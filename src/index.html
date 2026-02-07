@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CursorCine</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="controls">
+        <h1>CursorCine</h1>
+        <p class="sub">Electron 桌面錄影 + 滑鼠跟隨自動 Zoom</p>
+
+        <label>
+          錄製來源
+          <select id="sourceSelect"></select>
+        </label>
+
+        <label>
+          輸出格式
+          <select id="formatSelect">
+            <option value="webm" selected>WebM</option>
+            <option value="mp4">MP4（若不支援會自動改 WebM）</option>
+          </select>
+        </label>
+
+        <label>
+          最大 Zoom 倍率 <span id="zoomLabel">1.8x</span>
+          <input id="zoomInput" type="range" min="1.2" max="3" step="0.1" value="1.8" />
+        </label>
+
+        <label>
+          鏡頭平滑係數 <span id="smoothLabel">0.16</span>
+          <input id="smoothInput" type="range" min="0.05" max="0.4" step="0.01" value="0.16" />
+        </label>
+
+        <label>
+          光點大小 <span id="glowSizeLabel">22</span>
+          <input id="glowSizeInput" type="range" min="10" max="60" step="1" value="22" />
+        </label>
+
+        <label>
+          光點核心 <span id="glowCoreLabel">5</span>
+          <input id="glowCoreInput" type="range" min="2" max="20" step="1" value="5" />
+        </label>
+
+        <label>
+          光點亮度 <span id="glowOpacityLabel">0.90</span>
+          <input id="glowOpacityInput" type="range" min="0.20" max="1.00" step="0.05" value="0.90" />
+        </label>
+
+        <label>
+          <span>聲音設定</span>
+          <span>
+            <input id="micInput" type="checkbox" />
+            包含麥克風（系統聲音會盡量一併錄製）
+          </span>
+        </label>
+
+        <div class="buttons">
+          <button id="refreshBtn">重新整理來源</button>
+          <button id="recordBtn">開始錄影</button>
+          <button id="stopBtn" disabled>停止並下載</button>
+        </div>
+
+        <p id="status" class="status">尚未開始錄影</p>
+      </section>
+
+      <section class="preview">
+        <video id="rawVideo" playsinline muted hidden></video>
+        <canvas id="previewCanvas"></canvas>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

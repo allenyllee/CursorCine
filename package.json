@@ -1,0 +1,17 @@
+{
+  "name": "cursorcine",
+  "version": "0.1.0",
+  "description": "Electron desktop recorder with cursor-follow auto zoom",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^35.0.0"
+  },
+  "dependencies": {
+    "uiohook-napi": "^1.5.4"
+  }
+}

@@ -1,0 +1,146 @@
+:root {
+  --bg: #0b1220;
+  --panel: #121d31;
+  --panel-border: #2b3a59;
+  --text: #e8edf8;
+  --muted: #93a3c8;
+  --accent: #5ac8a8;
+  --accent-2: #7ad6ff;
+  --danger: #ff7d7d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: "Segoe UI", "Noto Sans TC", sans-serif;
+  background:
+    radial-gradient(1400px 700px at 85% -10%, #1c355f 0%, transparent 50%),
+    radial-gradient(1100px 600px at 10% 0%, #1a3d36 0%, transparent 45%),
+    var(--bg);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  gap: 16px;
+  padding: 16px;
+  min-height: 100vh;
+}
+
+.controls,
+.preview {
+  background: color-mix(in srgb, var(--panel) 88%, black 12%);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  backdrop-filter: blur(8px);
+}
+
+.controls {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.95rem;
+}
+
+select,
+input[type="range"] {
+  width: 100%;
+}
+
+select,
+button {
+  border-radius: 10px;
+  border: 1px solid #384b72;
+  background: #182945;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 0.94rem;
+}
+
+.buttons {
+  display: grid;
+  gap: 8px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #5d77af;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#recordBtn {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  color: #0b1a2b;
+  border: none;
+  font-weight: 700;
+}
+
+#stopBtn {
+  background: linear-gradient(120deg, #ffb3b3, var(--danger));
+  color: #2b0f0f;
+  border: none;
+  font-weight: 700;
+}
+
+.status {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+#previewCanvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #02060f;
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    min-height: auto;
+  }
+
+  .preview {
+    min-height: 56vh;
+  }
+}
