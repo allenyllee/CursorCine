@@ -358,6 +358,23 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
+  ipcMain.handle('window:should-auto-minimize', (_event, targetDisplayId) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { ok: false, shouldMinimize: false, reason: 'NO_MAIN_WINDOW' };
+    }
+
+    const mainBounds = mainWindow.getBounds();
+    const mainDisplay = screen.getDisplayMatching(mainBounds);
+    const targetDisplay = getTargetDisplay(targetDisplayId);
+
+    return {
+      ok: true,
+      shouldMinimize: String(mainDisplay.id) === String(targetDisplay.id),
+      mainDisplayId: mainDisplay.id,
+      targetDisplayId: targetDisplay.id
+    };
+  });
+
   ipcMain.handle('window:minimize-main', () => {
     if (!mainWindow || mainWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_MAIN_WINDOW' };

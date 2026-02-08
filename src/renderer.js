@@ -796,7 +796,11 @@ async function startRecording() {
   drawTimer = 0;
   drawLoop();
 
-  await electronAPI.minimizeMainWindow().catch(() => {});
+  const minimizeDecision = await electronAPI.shouldAutoMinimizeMainWindow(selectedSource.display_id).catch(() => ({ ok: false, shouldMinimize: true }));
+
+  if (!minimizeDecision || minimizeDecision.shouldMinimize !== false) {
+    await electronAPI.minimizeMainWindow().catch(() => {});
+  }
 
   recordBtn.disabled = true;
   stopBtn.disabled = false;

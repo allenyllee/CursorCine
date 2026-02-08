@@ -12,5 +12,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlayUndo: () => ipcRenderer.invoke('overlay:undo'),
   overlayClear: () => ipcRenderer.invoke('overlay:clear'),
   overlayDoubleClickMarker: (payload) => ipcRenderer.invoke('overlay:double-click-marker', payload),
+  shouldAutoMinimizeMainWindow: (displayId) => ipcRenderer.invoke('window:should-auto-minimize', displayId),
   minimizeMainWindow: () => ipcRenderer.invoke('window:minimize-main')
 });
