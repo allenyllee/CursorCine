@@ -11,6 +11,7 @@ const zoomInput = document.getElementById('zoomInput');
 const smoothInput = document.getElementById('smoothInput');
 const micInput = document.getElementById('micInput');
 const formatSelect = document.getElementById('formatSelect');
+const qualitySelect = document.getElementById('qualitySelect');
 const zoomLabel = document.getElementById('zoomLabel');
 const smoothLabel = document.getElementById('smoothLabel');
 const glowSizeInput = document.getElementById('glowSizeInput');
@@ -39,6 +40,13 @@ const DEFAULT_CURSOR_GLOW_OPACITY = 0.9;
 const CURSOR_GLOW_LAG = 0.18;
 const DEFAULT_PEN_COLOR = '#ff4f70';
 const DEFAULT_PEN_SIZE = 4;
+
+const QUALITY_PRESETS = {
+  smooth: { label: '流暢', videoBitrate: 12000000, audioBitrate: 192000 },
+  balanced: { label: '平衡', videoBitrate: 22000000, audioBitrate: 256000 },
+  high: { label: '高畫質', videoBitrate: 35000000, audioBitrate: 384000 }
+};
+const DEFAULT_QUALITY_PRESET = 'balanced';
 
 let sources = [];
 let sourceStream;
@@ -117,6 +125,11 @@ function setStatus(message) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function getQualityPreset() {
+  const key = qualitySelect?.value || DEFAULT_QUALITY_PRESET;
+  return QUALITY_PRESETS[key] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 }
 
 function mapPointToVideo(point) {
@@ -339,8 +352,8 @@ function pickRecorderConfig(requestedFormat) {
         'video/mp4'
       ]
     : [
-        'video/webm;codecs=vp8,opus',
         'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
         'video/webm'
       ];
 
@@ -354,7 +367,7 @@ function pickRecorderConfig(requestedFormat) {
   }
 
   if (requestedFormat === 'mp4') {
-    const fallback = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];
+    const fallback = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
     for (const mimeType of fallback) {
       if (MediaRecorder.isTypeSupported(mimeType)) {
         return { mimeType, ext: 'webm', fallbackFromMp4: true };
@@ -363,6 +376,55 @@ function pickRecorderConfig(requestedFormat) {
   }
 
   return { mimeType: '', ext: requestedFormat === 'mp4' ? 'mp4' : 'webm' };
+}
+
+function createMediaRecorder(stream, recorderConfig, qualityPreset) {
+  const videoBitrate = Number(qualityPreset.videoBitrate || 22000000);
+  const audioBitrate = Number(qualityPreset.audioBitrate || 256000);
+  const optionCandidates = [];
+
+  if (recorderConfig.mimeType) {
+    optionCandidates.push({
+      mimeType: recorderConfig.mimeType,
+      videoBitsPerSecond: videoBitrate,
+      audioBitsPerSecond: audioBitrate
+    });
+    optionCandidates.push({ mimeType: recorderConfig.mimeType });
+  }
+
+  optionCandidates.push({
+    videoBitsPerSecond: videoBitrate,
+    audioBitsPerSecond: audioBitrate,
+    bitsPerSecond: videoBitrate + audioBitrate
+  });
+  optionCandidates.push({});
+
+  let lastError;
+  for (const options of optionCandidates) {
+    try {
+      return new MediaRecorder(stream, options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Failed to create MediaRecorder');
+}
+
+function applyQualityHints(stream) {
+  if (!stream) {
+    return;
+  }
+
+  const [videoTrack] = stream.getVideoTracks();
+  if (!videoTrack) {
+    return;
+  }
+
+  try {
+    videoTrack.contentHint = 'detail';
+  } catch (_error) {
+  }
 }
 
 async function getDesktopStream(sourceId) {
@@ -522,6 +584,7 @@ async function startRecording() {
   };
 
   sourceStream = await getDesktopStream(sourceId);
+  applyQualityHints(sourceStream);
   micStream = await getMicStreamIfEnabled();
 
   rawVideo.srcObject = sourceStream;
@@ -548,6 +611,7 @@ async function startRecording() {
 
   chunks = [];
   const requestedFormat = formatSelect.value;
+  const qualityPreset = getQualityPreset();
   const recorderConfig = pickRecorderConfig(requestedFormat);
   recordingMeta = {
     outputExt: recorderConfig.ext,
@@ -556,9 +620,7 @@ async function startRecording() {
     fallbackFromMp4: Boolean(recorderConfig.fallbackFromMp4)
   };
 
-  mediaRecorder = recorderConfig.mimeType
-    ? new MediaRecorder(outputStream, { mimeType: recorderConfig.mimeType })
-    : new MediaRecorder(outputStream);
+  mediaRecorder = createMediaRecorder(outputStream, recorderConfig, qualityPreset);
 
   mediaRecorder.ondataavailable = (event) => {
     if (event.data.size > 0) {
@@ -591,6 +653,7 @@ async function startRecording() {
   sourceSelect.disabled = true;
   micInput.disabled = true;
   formatSelect.disabled = true;
+  qualitySelect.disabled = true;
 
   const hasSystemAudio = sourceStream.getAudioTracks().length > 0;
   const hasMicAudio = Boolean(micStream && micStream.getAudioTracks().length > 0);
@@ -598,7 +661,7 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  setStatus(`錄影中: 可在原始畫面畫筆標註（Ctrl 單擊切換繪製，滾輪會短暫暫停畫筆） (${audioMode})`);
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 單擊切換繪製，滾輪會短暫暫停畫筆） | 畫質: ' + qualityPreset.label + ' (' + audioMode + ')');
 }
 
 function stopRecording() {
@@ -628,6 +691,7 @@ function stopRecording() {
   sourceSelect.disabled = false;
   micInput.disabled = false;
   formatSelect.disabled = false;
+  qualitySelect.disabled = false;
 }
 
 async function setPenMode(enabled) {
