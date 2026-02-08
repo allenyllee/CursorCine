@@ -815,7 +815,7 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 單擊切換繪製，滾輪會短暫暫停畫筆） | 畫質: ' + qualityPreset.label + ' (' + audioMode + ')');
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 單擊切換繪製，滾輪可直接滾動） | 畫質: ' + qualityPreset.label + ' (' + audioMode + ')');
 }
 
 function stopRecording() {
@@ -855,8 +855,7 @@ async function setPenMode(enabled) {
   try {
     const mode = await electronAPI.overlaySetEnabled(enabled);
     if (enabled && mode && mode.toggleMode) {
-      const pauseMs = Number(mode.wheelPauseMs || 250);
-      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 單擊切換；滾輪暫停 250ms）';
+      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 單擊切換；滾輪可直接滾動）';
       return;
     }
   } catch (_error) {

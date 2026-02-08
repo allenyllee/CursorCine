@@ -308,6 +308,7 @@ canvas.addEventListener('wheel', () => {
   }
 
   endStroke();
+  
 });
 
 function applyGlobalPointer(payload) {

@@ -22,7 +22,7 @@ let overlayWheelLockUntilMouseDown = false;
 let overlayLastDrawActive = false;
 let overlayRecordingActive = false;
 let overlayBounds = null;
-const OVERLAY_WHEEL_PAUSE_MS = 320
+const OVERLAY_WHEEL_PAUSE_MS = 700
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -41,19 +41,10 @@ function scheduleOverlayWheelResume() {
 }
 
 function pauseOverlayByWheel() {
-  if (!overlayPenEnabled || !clickHookEnabled || !overlayDrawToggle) {
-    return;
-  }
-
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.webContents.send('overlay:clear');
-  }
-
-  overlayWheelPauseUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
-  overlayWheelLockUntilMouseDown = true;
-  applyOverlayMouseMode();
-  scheduleOverlayWheelResume();
+  // Keep pen mode state unchanged. With global-pointer drawing,
+  // wheel should pass through whenever left button is not held.
 }
+
 
 function overlayDrawEnabled() {
   if (!overlayPenEnabled) {
@@ -96,6 +87,7 @@ function applyOverlayMouseMode() {
   }
 
   const drawEnabled = overlayDrawEnabled();
+  const capturePointer = drawEnabled && mouseDown;
   const shouldKeepVisible = drawEnabled;
 
   if (shouldKeepVisible) {
@@ -108,14 +100,18 @@ function applyOverlayMouseMode() {
 
       overlayWindow.webContents.send("overlay:clear");
     }
-    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-    overlayWindow.blur();
+    if (capturePointer) {
+      overlayWindow.setIgnoreMouseEvents(false);
+    } else {
+      overlayWindow.setIgnoreMouseEvents(true);
+      overlayWindow.blur();
+    }
   } else {
     if (overlayLastDrawActive) {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    overlayWindow.setIgnoreMouseEvents(true);
 
     if (overlayWindow.isVisible()) {
       overlayWindow.hide();
@@ -177,6 +173,9 @@ function initGlobalClickHook() {
         return;
       }
       overlayAltPressed = false;
+    });
+    uIOhook.on('wheel', () => {
+      pauseOverlayByWheel();
     });
     uIOhook.start();
     clickHookEnabled = true;
@@ -288,7 +287,7 @@ function createOverlayWindow(displayId) {
         overlayBorderWindow.show();
       }
     }
-    overlayBorderWindow.setIgnoreMouseEvents(true, { forward: true });
+    overlayBorderWindow.setIgnoreMouseEvents(true);
   });
 
   overlayBorderWindow.on('closed', () => {
