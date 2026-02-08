@@ -308,7 +308,7 @@ canvas.addEventListener('wheel', () => {
   }
 
   endStroke();
-  
+  ipcRenderer.invoke('overlay:wheel').catch(() => {});
 });
 
 function applyGlobalPointer(payload) {

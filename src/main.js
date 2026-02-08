@@ -16,15 +16,14 @@ let mainWindow = null;
 let overlayPenEnabled = false;
 let overlayDrawToggle = false;
 let overlayAltPressed = false;
-let overlayWheelPauseUntil = 0;
+let overlayWheelLockUntil = 0;
 let overlayWheelResumeTimer = null;
-let overlayWheelLockUntilMouseDown = false;
+
 let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
 let overlayRecordingActive = false;
 let overlayBounds = null;
-const OVERLAY_WHEEL_PAUSE_MS = 450
-
+const OVERLAY_WHEEL_PAUSE_MS = 450;
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
   return code === 29 || code === 3613;
@@ -36,11 +35,16 @@ function scheduleOverlayWheelResume() {
   }
 
   overlayWheelResumeTimer = setTimeout(() => {
+    const waitMs = overlayWheelLockUntil - Date.now();
+    if (waitMs > 10) {
+      scheduleOverlayWheelResume();
+      return;
+    }
+
     overlayWheelResumeTimer = null;
-    overlayWheelLockUntilMouseDown = false;
     applyOverlayMouseMode();
     emitOverlayPointer();
-  }, OVERLAY_WHEEL_PAUSE_MS + 20);
+  }, Math.max(20, overlayWheelLockUntil - Date.now() + 20));
 }
 
 function pauseOverlayByWheel() {
@@ -48,8 +52,17 @@ function pauseOverlayByWheel() {
     return;
   }
 
-  overlayWheelLockUntilMouseDown = true;
-  overlayWheelPauseUntil = 0;
+  overlayWheelLockUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
+
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send("overlay:clear");
+    overlayWindow.setIgnoreMouseEvents(true);
+    if (overlayWindow.isVisible()) {
+      overlayWindow.hide();
+    }
+    overlayWindow.blur();
+  }
+
   scheduleOverlayWheelResume();
   applyOverlayMouseMode();
   emitOverlayPointer();
@@ -67,7 +80,7 @@ function overlayDrawEnabled() {
 }
 
 function overlayDrawActive() {
-  return overlayDrawEnabled() && !overlayWheelLockUntilMouseDown;
+  return overlayDrawEnabled() && Date.now() >= overlayWheelLockUntil;
 }
 
 function emitOverlayPointer() {
@@ -97,8 +110,9 @@ function applyOverlayMouseMode() {
   }
 
   const drawEnabled = overlayDrawEnabled();
+  const wheelLocked = Date.now() < overlayWheelLockUntil;
   const capturePointer = overlayDrawActive();
-  const shouldKeepVisible = drawEnabled;
+  const shouldKeepVisible = drawEnabled && !wheelLocked;
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -110,12 +124,16 @@ function applyOverlayMouseMode() {
 
       overlayWindow.webContents.send("overlay:clear");
     }
-    if (capturePointer) {
-      overlayWindow.setIgnoreMouseEvents(false);
-    } else {
-      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-      overlayWindow.blur();
+
+    overlayWindow.setIgnoreMouseEvents(false);
+  } else if (drawEnabled && wheelLocked) {
+    overlayWindow.setIgnoreMouseEvents(true);
+
+    if (overlayWindow.isVisible()) {
+      overlayWindow.hide();
     }
+
+    overlayWindow.blur();
   } else {
     if (overlayLastDrawActive) {
       overlayWindow.webContents.send("overlay:clear");
@@ -137,7 +155,7 @@ function applyOverlayMouseMode() {
     mouseDown,
     toggleEnabled: clickHookEnabled,
     toggled: overlayDrawToggle,
-    wheelPaused: overlayWheelLockUntilMouseDown
+    wheelPaused: wheelLocked
   });
   emitOverlayPointer();
 }
@@ -148,7 +166,7 @@ function initGlobalClickHook() {
     const { uIOhook } = require('uiohook-napi');
     uIOhook.on('mousedown', () => {
       mouseDown = true;
-      overlayWheelPauseUntil = 0;
+      overlayWheelLockUntil = 0;
       const p = screen.getCursorScreenPoint();
       lastGlobalClick = {
         x: p.x,
@@ -182,8 +200,7 @@ function initGlobalClickHook() {
       const now = Date.now();
       if (!overlayDrawToggle) {
         overlayDrawToggle = true;
-        overlayWheelPauseUntil = 0;
-        overlayWheelLockUntilMouseDown = false;
+        overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
         applyOverlayMouseMode();
         emitOverlayPointer();
@@ -192,13 +209,11 @@ function initGlobalClickHook() {
 
       if (now <= overlayCtrlToggleArmUntil) {
         overlayDrawToggle = false;
-        overlayWheelPauseUntil = 0;
-        overlayWheelLockUntilMouseDown = false;
+        overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
       } else {
         overlayCtrlToggleArmUntil = now + 420;
-        overlayWheelPauseUntil = 0;
-        overlayWheelLockUntilMouseDown = false;
+        overlayWheelLockUntil = 0;
       }
 
       applyOverlayMouseMode();
@@ -323,7 +338,7 @@ function createOverlayWindow(displayId) {
         overlayBorderWindow.show();
       }
     }
-    overlayBorderWindow.setIgnoreMouseEvents(true, { forward: true });
+    overlayBorderWindow.setIgnoreMouseEvents(true);
   });
 
   overlayBorderWindow.on('closed', () => {
@@ -515,9 +530,8 @@ app.whenReady().then(() => {
     overlayLastDrawActive = false;
     overlayDrawToggle = false;
     overlayAltPressed = false;
-    overlayWheelPauseUntil = 0;
+    overlayWheelLockUntil = 0;
     mouseDown = false;
-    overlayWheelLockUntilMouseDown = false;
     overlayCtrlToggleArmUntil = 0;
 
     if (overlayWheelResumeTimer) {
