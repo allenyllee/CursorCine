@@ -17,11 +17,22 @@ let overlayAltPressed = false;
 let overlayWheelPauseUntil = 0;
 let overlayWheelResumeTimer = null;
 let overlayLastDrawActive = false;
-const OVERLAY_WHEEL_PAUSE_MS = 500;
+const OVERLAY_WHEEL_PAUSE_MS = 250;
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
   return code === 29 || code === 3613;
+}
+
+function scheduleOverlayWheelResume() {
+  if (overlayWheelResumeTimer) {
+    clearTimeout(overlayWheelResumeTimer);
+  }
+
+  overlayWheelResumeTimer = setTimeout(() => {
+    overlayWheelResumeTimer = null;
+    applyOverlayMouseMode();
+  }, OVERLAY_WHEEL_PAUSE_MS + 20);
 }
 
 function pauseOverlayByWheel() {
@@ -33,15 +44,9 @@ function pauseOverlayByWheel() {
     overlayWindow.webContents.send('overlay:clear');
   }
 
-  overlayDrawToggle = false;
-  overlayWheelPauseUntil = 0;
-
-  if (overlayWheelResumeTimer) {
-    clearTimeout(overlayWheelResumeTimer);
-    overlayWheelResumeTimer = null;
-  }
-
+  overlayWheelPauseUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
   applyOverlayMouseMode();
+  scheduleOverlayWheelResume();
 }
 
 function overlayDrawActive() {
@@ -54,7 +59,12 @@ function overlayDrawActive() {
   if (!overlayDrawToggle) {
     return false;
   }
-  return true;
+
+  if (mouseDown) {
+    return true;
+  }
+
+  return Date.now() >= overlayWheelPauseUntil;
 }
 
 function applyOverlayMouseMode() {
@@ -364,7 +374,7 @@ app.whenReady().then(() => {
       ok: true,
       toggleMode: clickHookEnabled,
       toggleKey: 'Ctrl',
-      wheelStopsDrawing: true
+      wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
     };
   });
 
