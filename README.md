@@ -23,6 +23,34 @@ npm install
 npm start
 ```
 
+## 打包成執行檔
+
+先安裝依賴：
+
+```bash
+npm install
+```
+
+通用打包（依當前系統產物）：
+
+```bash
+npm run dist
+```
+
+只打包 Windows 安裝檔（NSIS）：
+
+```bash
+npm run dist:win
+```
+
+只打包 Linux 安裝檔（AppImage + deb）：
+
+```bash
+npm run dist:linux
+```
+
+產物會輸出到 `dist/` 目錄。
+
 ## 專案結構
 
 - `src/main.js`: Electron 主程序，提供游標位置 IPC、全域點擊 IPC 與 ffmpeg 轉檔 IPC
@@ -33,6 +61,6 @@ npm start
 ## 注意事項
 
 - 首次啟動請允許螢幕錄製與麥克風權限。
-- 若要啟用「全域滑鼠點擊觸發放大」，請安裝 `uiohook-napi`（已設為 optional dependency）。
+- 若要啟用「全域滑鼠點擊觸發放大」，請安裝 `uiohook-napi`。
 - 輸出使用瀏覽器 `MediaRecorder`，實際可用編碼會因系統不同而異。
 - 若要使用「MP4 轉檔」功能，系統需安裝 `ffmpeg` 並可在命令列執行 `ffmpeg -version`。

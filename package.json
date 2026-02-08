@@ -4,14 +4,44 @@
   "description": "Electron desktop recorder with cursor-follow auto zoom",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis",
+    "dist:linux": "electron-builder --linux AppImage deb"
   },
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^35.0.0"
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
   },
   "dependencies": {
     "uiohook-napi": "^1.5.4"
+  },
+  "build": {
+    "appId": "com.cursorcine.app",
+    "productName": "CursorCine",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "AudioVideo"
+    }
   }
 }
