@@ -302,8 +302,66 @@ canvas.addEventListener('pointerleave', () => {
 canvas.addEventListener('pointerup', finishStroke);
 canvas.addEventListener('pointercancel', finishStroke);
 
+canvas.addEventListener('wheel', () => {
+  if (!state.enabled || !state.drawActive) {
+    return;
+  }
+
+  endStroke();
+});
+
+function applyGlobalPointer(payload) {
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const inside = payload.inside !== false;
+
+  if (!inside) {
+    state.pointer.visible = false;
+    endStroke();
+    return;
+  }
+
+  const p = {
+    x: Number(payload.x || 0) * dpr,
+    y: Number(payload.y || 0) * dpr
+  };
+
+  state.pointer.x = p.x;
+  state.pointer.y = p.y;
+  state.pointer.visible = state.enabled && state.drawActive;
+
+  if (!state.enabled || !state.drawActive) {
+    endStroke();
+    return;
+  }
+
+  const down = Boolean(payload.down);
+  if (down) {
+    if (!state.isPointerDown) {
+      state.isPointerDown = true;
+      beginStroke(p);
+      return;
+    }
+
+    extendStroke(p);
+    return;
+  }
+
+  if (state.isPointerDown) {
+    extendStroke(p);
+    endStroke();
+  }
+}
+
 ipcRenderer.on('overlay:init', () => {
   resizeCanvas();
+});
+
+ipcRenderer.on('overlay:global-pointer', (_event, payload) => {
+  applyGlobalPointer(payload);
 });
 
 ipcRenderer.on('overlay:set-enabled', (_event, enabled) => {
