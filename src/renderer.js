@@ -438,7 +438,9 @@ function drawLoop() {
   }
 
   drawDoubleClickMarker(now);
-  drawCursorGlow(glowState.x, glowState.y);
+  if (!annotationState.enabled) {
+    drawCursorGlow(glowState.x, glowState.y);
+  }
 
   drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
 }
