@@ -46,7 +46,8 @@ let micStream;
 let outputStream;
 let mediaRecorder;
 let chunks = [];
-let drawRaf = 0;
+let drawTimer = 0;
+const DRAW_INTERVAL_MS = 16;
 let cursorTimer = 0;
 let selectedSource;
 
@@ -73,7 +74,7 @@ const glowState = {
 };
 
 const annotationState = {
-  enabled: false,
+  enabled: true,
   color: penColorInput?.value || DEFAULT_PEN_COLOR,
   size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
 };
@@ -261,7 +262,7 @@ function drawLoop() {
   const sw = rawVideo.videoWidth;
   const sh = rawVideo.videoHeight;
   if (!sw || !sh) {
-    drawRaf = requestAnimationFrame(drawLoop);
+    drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
     return;
   }
 
@@ -283,7 +284,7 @@ function drawLoop() {
   ctx.drawImage(rawVideo, sx, sy, cropW, cropH, 0, 0, sw, sh);
   drawCursorGlow(glowState.x, glowState.y);
 
-  drawRaf = requestAnimationFrame(drawLoop);
+  drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
 }
 
 function stopMediaTracks(stream) {
@@ -572,8 +573,6 @@ async function startRecording() {
 
   mediaRecorder.start();
 
-  await electronAPI.minimizeMainWindow().catch(() => {});
-
   await electronAPI.overlayCreate(selectedSource.display_id);
   await syncPenStyleToOverlay();
   await electronAPI.overlaySetEnabled(annotationState.enabled);
@@ -581,8 +580,11 @@ async function startRecording() {
   clearInterval(cursorTimer);
   cursorTimer = setInterval(updateCursorFromMain, 16);
 
-  cancelAnimationFrame(drawRaf);
+  clearTimeout(drawTimer);
+  drawTimer = 0;
   drawLoop();
+
+  await electronAPI.minimizeMainWindow().catch(() => {});
 
   recordBtn.disabled = true;
   stopBtn.disabled = false;
@@ -616,9 +618,9 @@ function stopRecording() {
   selectedSource = undefined;
 
   clearInterval(cursorTimer);
-  cancelAnimationFrame(drawRaf);
+  clearTimeout(drawTimer);
   cursorTimer = 0;
-  drawRaf = 0;
+  drawTimer = 0;
   electronAPI.overlayDestroy().catch(() => {});
 
   recordBtn.disabled = false;
@@ -642,7 +644,7 @@ async function setPenMode(enabled) {
   } catch (_error) {
   }
 
-  penToggleBtn.textContent = enabled ? '畫筆模式: 開' : '畫筆模式: 關';
+  penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 單擊切換）' : '畫筆模式: 關';
 }
 
 zoomInput.addEventListener('input', () => {
@@ -703,7 +705,7 @@ recordBtn.addEventListener('click', () => {
 });
 stopBtn.addEventListener('click', stopRecording);
 
-setPenMode(false).catch(() => {});
+setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
 
