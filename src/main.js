@@ -45,9 +45,14 @@ function pauseOverlayByWheel() {
     return;
   }
 
-  overlayWheelPauseUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
+  overlayWheelLockUntilMouseDown = true;
+  overlayWheelPauseUntil = 0;
+  if (overlayWheelResumeTimer) {
+    clearTimeout(overlayWheelResumeTimer);
+    overlayWheelResumeTimer = null;
+  }
   applyOverlayMouseMode();
-  scheduleOverlayWheelResume();
+  emitOverlayPointer();
 }
 
 
@@ -92,7 +97,7 @@ function applyOverlayMouseMode() {
   }
 
   const drawEnabled = overlayDrawEnabled();
-  const capturePointer = drawEnabled && Date.now() >= overlayWheelPauseUntil;
+  const capturePointer = drawEnabled && !overlayWheelLockUntilMouseDown;
   const shouldKeepVisible = drawEnabled;
 
   if (shouldKeepVisible) {
@@ -132,7 +137,7 @@ function applyOverlayMouseMode() {
     mouseDown,
     toggleEnabled: clickHookEnabled,
     toggled: overlayDrawToggle,
-    wheelPaused: clickHookEnabled ? Date.now() < overlayWheelPauseUntil : false
+    wheelPaused: overlayWheelLockUntilMouseDown
   });
   emitOverlayPointer();
 }
@@ -169,8 +174,18 @@ function initGlobalClickHook() {
         return;
       }
       overlayAltPressed = true;
+
+      if (overlayPenEnabled && overlayDrawToggle && overlayWheelLockUntilMouseDown) {
+        overlayWheelLockUntilMouseDown = false;
+        overlayWheelPauseUntil = 0;
+        applyOverlayMouseMode();
+        emitOverlayPointer();
+        return;
+      }
+
       overlayDrawToggle = !overlayDrawToggle;
       overlayWheelPauseUntil = 0;
+      overlayWheelLockUntilMouseDown = false;
       applyOverlayMouseMode();
       emitOverlayPointer();
     });
@@ -486,6 +501,7 @@ app.whenReady().then(() => {
     overlayDrawToggle = false;
     overlayAltPressed = false;
     overlayWheelPauseUntil = 0;
+    mouseDown = false;
     overlayWheelLockUntilMouseDown = false;
 
     if (overlayWheelResumeTimer) {
