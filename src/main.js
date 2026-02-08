@@ -22,7 +22,7 @@ let overlayWheelLockUntilMouseDown = false;
 let overlayLastDrawActive = false;
 let overlayRecordingActive = false;
 let overlayBounds = null;
-const OVERLAY_WHEEL_PAUSE_MS = 700
+const OVERLAY_WHEEL_PAUSE_MS = 450
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -41,8 +41,13 @@ function scheduleOverlayWheelResume() {
 }
 
 function pauseOverlayByWheel() {
-  // Keep pen mode state unchanged. With global-pointer drawing,
-  // wheel should pass through whenever left button is not held.
+  if (!overlayDrawEnabled()) {
+    return;
+  }
+
+  overlayWheelPauseUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
+  applyOverlayMouseMode();
+  scheduleOverlayWheelResume();
 }
 
 
@@ -87,7 +92,7 @@ function applyOverlayMouseMode() {
   }
 
   const drawEnabled = overlayDrawEnabled();
-  const capturePointer = drawEnabled && mouseDown;
+  const capturePointer = drawEnabled && Date.now() >= overlayWheelPauseUntil;
   const shouldKeepVisible = drawEnabled;
 
   if (shouldKeepVisible) {
@@ -138,7 +143,7 @@ function initGlobalClickHook() {
     const { uIOhook } = require('uiohook-napi');
     uIOhook.on('mousedown', () => {
       mouseDown = true;
-      overlayWheelLockUntilMouseDown = false;
+      overlayWheelPauseUntil = 0;
       const p = screen.getCursorScreenPoint();
       lastGlobalClick = {
         x: p.x,
@@ -165,6 +170,7 @@ function initGlobalClickHook() {
       }
       overlayAltPressed = true;
       overlayDrawToggle = !overlayDrawToggle;
+      overlayWheelPauseUntil = 0;
       applyOverlayMouseMode();
       emitOverlayPointer();
     });
