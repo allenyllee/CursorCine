@@ -572,6 +572,8 @@ async function startRecording() {
 
   mediaRecorder.start();
 
+  await electronAPI.minimizeMainWindow().catch(() => {});
+
   await electronAPI.overlayCreate(selectedSource.display_id);
   await syncPenStyleToOverlay();
   await electronAPI.overlaySetEnabled(annotationState.enabled);

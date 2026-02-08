@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),
   overlaySetPenStyle: (style) => ipcRenderer.invoke('overlay:set-pen-style', style),
   overlayUndo: () => ipcRenderer.invoke('overlay:undo'),
-  overlayClear: () => ipcRenderer.invoke('overlay:clear')
+  overlayClear: () => ipcRenderer.invoke('overlay:clear'),
+  minimizeMainWindow: () => ipcRenderer.invoke('window:minimize-main')
 });

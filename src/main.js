@@ -11,6 +11,7 @@ let clickHookError = '';
 let lastGlobalClick = null;
 let mouseDown = false;
 let overlayWindow = null;
+let mainWindow = null;
 let overlayPenEnabled = false;
 let overlayDrawToggle = false;
 let overlayAltPressed = false;
@@ -158,7 +159,7 @@ function initGlobalClickHook() {
 }
 
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 1000,
@@ -169,8 +170,11 @@ function createWindow() {
       nodeIntegration: false
     }
   });
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
-  win.loadFile(path.join(__dirname, 'index.html'));
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 }
 
 function getTargetDisplay(displayId) {
@@ -343,6 +347,15 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:create', (_event, displayId) => {
     createOverlayWindow(displayId);
+    return { ok: true };
+  });
+
+  ipcMain.handle('window:minimize-main', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_MAIN_WINDOW' };
+    }
+
+    mainWindow.minimize();
     return { ok: true };
   });
 
