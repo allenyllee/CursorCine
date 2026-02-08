@@ -5,6 +5,7 @@ const ctx = canvas.getContext('2d');
 
 const STROKE_FADE_MS = 1200;
 const DOUBLE_CLICK_MARKER_MS = 700;
+const RECORD_BORDER_BLINK_MS = 2200;
 
 const state = {
   enabled: false,
@@ -25,7 +26,8 @@ const state = {
     x: 0,
     y: 0,
     activeUntil: 0
-  }
+  },
+  recordingIndicator: false
 };
 
 function resizeCanvas() {
@@ -101,12 +103,31 @@ function drawDoubleClickMarker(now) {
   ctx.restore();
 }
 
+function drawRecordingBorder(now) {
+  if (!state.recordingIndicator) {
+    return;
+  }
+
+  const phase = ((now % RECORD_BORDER_BLINK_MS) / RECORD_BORDER_BLINK_MS) * Math.PI * 2;
+  const alpha = 0.35 + ((Math.sin(phase) + 1) / 2) * 0.45;
+  const dpr = window.devicePixelRatio || 1;
+  const lineWidth = Math.max(2, Math.round(3 * dpr));
+  const inset = Math.ceil(lineWidth / 2) + 1;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 42, 42, ' + alpha.toFixed(3) + ')';
+  ctx.lineWidth = lineWidth;
+  ctx.strokeRect(inset, inset, canvas.width - inset * 2, canvas.height - inset * 2);
+  ctx.restore();
+}
+
 function drawAll(now) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   if (!state.drawActive) {
     state.strokes = [];
     drawDoubleClickMarker(now);
+    drawRecordingBorder(now);
     return;
   }
 
@@ -149,6 +170,7 @@ function drawAll(now) {
   state.strokes = remaining;
   drawDoubleClickMarker(now);
   drawPointerGlow();
+  drawRecordingBorder(now);
 }
 
 function eventPoint(event) {
@@ -310,6 +332,10 @@ ipcRenderer.on('overlay:set-draw-active', (_event, payload) => {
   }
 
   canvas.style.cursor = state.enabled && state.drawActive ? 'none' : 'default';
+});
+
+ipcRenderer.on('overlay:set-recording-indicator', (_event, active) => {
+  state.recordingIndicator = Boolean(active);
 });
 
 ipcRenderer.on('overlay:set-pen-style', (_event, style) => {

@@ -19,12 +19,13 @@ let overlayWheelPauseUntil = 0;
 let overlayWheelResumeTimer = null;
 let overlayLastDrawActive = false;
 let overlayMarkerTimer = null;
+let overlayRecordingActive = false;
 const OVERLAY_WHEEL_PAUSE_MS = 250;
 const OVERLAY_MARKER_VISIBLE_MS = 850;
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
-  return code === 29 || code === 3613;
+  return code === 42 || code === 54;
 }
 
 function scheduleOverlayWheelResume() {
@@ -59,12 +60,8 @@ function overlayDrawActive() {
   if (!clickHookEnabled) {
     return true;
   }
-  if (!overlayDrawToggle) {
+  if (!overlayAltPressed) {
     return false;
-  }
-
-  if (mouseDown) {
-    return true;
   }
 
   return Date.now() >= overlayWheelPauseUntil;
@@ -76,24 +73,42 @@ function applyOverlayMouseMode() {
   }
 
   const drawActive = overlayDrawActive();
+  const shouldKeepVisible = drawActive || overlayRecordingActive;
 
-  if (drawActive) {
+  if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
       if (typeof overlayWindow.showInactive === 'function') {
         overlayWindow.showInactive();
       } else {
         overlayWindow.show();
       }
-      overlayWindow.webContents.send('overlay:clear');
-    }
 
-    overlayWindow.setIgnoreMouseEvents(false);
+      if (drawActive) {
+        overlayWindow.webContents.send('overlay:clear');
+      }
+    }
+    if (drawActive) {
+      overlayWindow.setIgnoreMouseEvents(false);
+    } else {
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+      overlayWindow.blur();
+
+      if (overlayLastDrawActive && overlayRecordingActive) {
+        overlayWindow.hide();
+        if (typeof overlayWindow.showInactive === 'function') {
+          overlayWindow.showInactive();
+        } else {
+          overlayWindow.show();
+        }
+        overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+      }
+    }
   } else {
     if (overlayLastDrawActive) {
       overlayWindow.webContents.send('overlay:clear');
     }
 
-    overlayWindow.setIgnoreMouseEvents(true);
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
 
     if (overlayWindow.isVisible()) {
       overlayWindow.hide();
@@ -112,6 +127,7 @@ function applyOverlayMouseMode() {
     wheelPaused: clickHookEnabled ? Date.now() < overlayWheelPauseUntil : false
   });
 }
+
 
 function initGlobalClickHook() {
   try {
@@ -134,13 +150,7 @@ function initGlobalClickHook() {
       if (!isOverlayToggleKey(event)) {
         return;
       }
-      if (overlayAltPressed) {
-        return;
-      }
-
       overlayAltPressed = true;
-      overlayDrawToggle = !overlayDrawToggle;
-      overlayWheelPauseUntil = 0;
       applyOverlayMouseMode();
     });
     uIOhook.on('keyup', (event) => {
@@ -148,6 +158,7 @@ function initGlobalClickHook() {
         return;
       }
       overlayAltPressed = false;
+      applyOverlayMouseMode();
     });
     uIOhook.on('wheel', () => {
       pauseOverlayByWheel();
@@ -251,6 +262,7 @@ function createOverlayWindow(displayId) {
       height: b.height
     });
     overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
+    overlayWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
     applyOverlayMouseMode();
   });
 
@@ -354,6 +366,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:create', (_event, displayId) => {
+    overlayRecordingActive = true;
     createOverlayWindow(displayId);
     return { ok: true };
   });
@@ -385,6 +398,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:destroy', () => {
+    overlayRecordingActive = false;
     destroyOverlayWindow();
     return { ok: true };
   });
@@ -392,7 +406,7 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
     overlayPenEnabled = Boolean(enabled);
     overlayLastDrawActive = false;
-    overlayDrawToggle = false;
+    overlayDrawToggle = overlayPenEnabled;
     overlayAltPressed = false;
     overlayWheelPauseUntil = 0;
 
@@ -416,7 +430,7 @@ app.whenReady().then(() => {
     return {
       ok: true,
       toggleMode: clickHookEnabled,
-      toggleKey: 'Ctrl',
+      toggleKey: 'Shift',
       wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
     };
   });
@@ -457,7 +471,7 @@ app.whenReady().then(() => {
       } else {
         overlayWindow.show();
       }
-      overlayWindow.setIgnoreMouseEvents(true);
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     }
 
     overlayWindow.webContents.send('overlay:double-click-marker', payload || {});
@@ -472,11 +486,13 @@ app.whenReady().then(() => {
       if (!overlayWindow || overlayWindow.isDestroyed()) {
         return;
       }
-      if (!overlayDrawActive()) {
-        overlayWindow.setIgnoreMouseEvents(true);
+      if (!overlayDrawActive() && !overlayRecordingActive) {
+        overlayWindow.setIgnoreMouseEvents(true, { forward: true });
         if (overlayWindow.isVisible()) {
           overlayWindow.hide();
         }
+      } else {
+        applyOverlayMouseMode();
       }
     }, OVERLAY_MARKER_VISIBLE_MS);
 
