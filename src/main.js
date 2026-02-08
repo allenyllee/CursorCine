@@ -11,6 +11,7 @@ let clickHookError = '';
 let lastGlobalClick = null;
 let mouseDown = false;
 let overlayWindow = null;
+let overlayBorderWindow = null;
 let mainWindow = null;
 let overlayPenEnabled = false;
 let overlayDrawToggle = false;
@@ -18,10 +19,8 @@ let overlayAltPressed = false;
 let overlayWheelPauseUntil = 0;
 let overlayWheelResumeTimer = null;
 let overlayLastDrawActive = false;
-let overlayMarkerTimer = null;
 let overlayRecordingActive = false;
 const OVERLAY_WHEEL_PAUSE_MS = 250;
-const OVERLAY_MARKER_VISIBLE_MS = 850;
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -73,7 +72,7 @@ function applyOverlayMouseMode() {
   }
 
   const drawActive = overlayDrawActive();
-  const shouldKeepVisible = drawActive || overlayRecordingActive;
+  const shouldKeepVisible = drawActive;
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -92,16 +91,6 @@ function applyOverlayMouseMode() {
     } else {
       overlayWindow.setIgnoreMouseEvents(true, { forward: true });
       overlayWindow.blur();
-
-      if (overlayLastDrawActive && overlayRecordingActive) {
-        overlayWindow.hide();
-        if (typeof overlayWindow.showInactive === 'function') {
-          overlayWindow.showInactive();
-        } else {
-          overlayWindow.show();
-        }
-        overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-      }
     }
   } else {
     if (overlayLastDrawActive) {
@@ -204,17 +193,17 @@ function getTargetDisplay(displayId) {
 }
 
 function destroyOverlayWindow() {
-  if (overlayMarkerTimer) {
-    clearTimeout(overlayMarkerTimer);
-    overlayMarkerTimer = null;
+
+  const windows = [overlayWindow, overlayBorderWindow];
+  for (const win of windows) {
+    if (!win || win.isDestroyed()) {
+      continue;
+    }
+    win.close();
   }
 
-  if (!overlayWindow || overlayWindow.isDestroyed()) {
-    overlayWindow = null;
-    return;
-  }
-  overlayWindow.close();
   overlayWindow = null;
+  overlayBorderWindow = null;
 }
 
 function createOverlayWindow(displayId) {
@@ -222,6 +211,61 @@ function createOverlayWindow(displayId) {
 
   const targetDisplay = getTargetDisplay(displayId);
   const b = targetDisplay.bounds;
+
+  overlayBorderWindow = new BrowserWindow({
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    focusable: false,
+    show: false,
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: true,
+      backgroundThrottling: false
+    }
+  });
+
+  overlayBorderWindow.setAlwaysOnTop(true, 'screen-saver');
+  overlayBorderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayBorderWindow.setFocusable(false);
+  overlayBorderWindow.blur();
+  overlayBorderWindow.loadFile(path.join(__dirname, 'overlay.html'));
+
+  overlayBorderWindow.webContents.once('did-finish-load', () => {
+    if (!overlayBorderWindow || overlayBorderWindow.isDestroyed()) {
+      return;
+    }
+    overlayBorderWindow.webContents.send('overlay:init', {
+      width: b.width,
+      height: b.height
+    });
+    overlayBorderWindow.webContents.send('overlay:set-enabled', false);
+    overlayBorderWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
+
+    if (!overlayBorderWindow.isVisible()) {
+      if (typeof overlayBorderWindow.showInactive === 'function') {
+        overlayBorderWindow.showInactive();
+      } else {
+        overlayBorderWindow.show();
+      }
+    }
+    overlayBorderWindow.setIgnoreMouseEvents(true, { forward: true });
+  });
+
+  overlayBorderWindow.on('closed', () => {
+    overlayBorderWindow = null;
+  });
 
   overlayWindow = new BrowserWindow({
     x: b.x,
@@ -262,7 +306,7 @@ function createOverlayWindow(displayId) {
       height: b.height
     });
     overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
-    overlayWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
+    overlayWindow.webContents.send('overlay:set-recording-indicator', false);
     applyOverlayMouseMode();
   });
 
@@ -410,11 +454,6 @@ app.whenReady().then(() => {
     overlayAltPressed = false;
     overlayWheelPauseUntil = 0;
 
-    if (overlayMarkerTimer) {
-      clearTimeout(overlayMarkerTimer);
-      overlayMarkerTimer = null;
-    }
-
     if (overlayWheelResumeTimer) {
       clearTimeout(overlayWheelResumeTimer);
       overlayWheelResumeTimer = null;
@@ -460,42 +499,11 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:double-click-marker', (_event, payload) => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) {
+    if (!overlayBorderWindow || overlayBorderWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
     }
 
-    const drawActive = overlayDrawActive();
-    if (!drawActive && !overlayWindow.isVisible()) {
-      if (typeof overlayWindow.showInactive === 'function') {
-        overlayWindow.showInactive();
-      } else {
-        overlayWindow.show();
-      }
-      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-    }
-
-    overlayWindow.webContents.send('overlay:double-click-marker', payload || {});
-
-    if (overlayMarkerTimer) {
-      clearTimeout(overlayMarkerTimer);
-      overlayMarkerTimer = null;
-    }
-
-    overlayMarkerTimer = setTimeout(() => {
-      overlayMarkerTimer = null;
-      if (!overlayWindow || overlayWindow.isDestroyed()) {
-        return;
-      }
-      if (!overlayDrawActive() && !overlayRecordingActive) {
-        overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-        if (overlayWindow.isVisible()) {
-          overlayWindow.hide();
-        }
-      } else {
-        applyOverlayMouseMode();
-      }
-    }, OVERLAY_MARKER_VISIBLE_MS);
-
+    overlayBorderWindow.webContents.send('overlay:double-click-marker', payload || {});
     return { ok: true };
   });
 
