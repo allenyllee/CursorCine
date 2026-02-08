@@ -815,7 +815,7 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 單擊切換繪製，滾輪可直接滾動） | 畫質: ' + qualityPreset.label + ' (' + audioMode + ')');
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' (' + audioMode + ')');
 }
 
 function stopRecording() {
@@ -855,13 +855,13 @@ async function setPenMode(enabled) {
   try {
     const mode = await electronAPI.overlaySetEnabled(enabled);
     if (enabled && mode && mode.toggleMode) {
-      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 單擊切換；滾輪可直接滾動）';
+      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉）';
       return;
     }
   } catch (_error) {
   }
 
-  penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 單擊切換）' : '畫筆模式: 關';
+  penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）' : '畫筆模式: 關';
 }
 
 zoomInput.addEventListener('input', () => {
