@@ -4,6 +4,7 @@ const canvas = document.getElementById('overlayCanvas');
 const ctx = canvas.getContext('2d');
 
 const STROKE_FADE_MS = 1200;
+const DOUBLE_CLICK_MARKER_MS = 700;
 
 const state = {
   enabled: false,
@@ -19,6 +20,11 @@ const state = {
     visible: false,
     x: 0,
     y: 0
+  },
+  doubleClickMarker: {
+    x: 0,
+    y: 0,
+    activeUntil: 0
   }
 };
 
@@ -62,11 +68,45 @@ function drawPointerGlow() {
   ctx.fill();
 }
 
+function triggerDoubleClickMarker(x, y) {
+  state.doubleClickMarker.x = x * (window.devicePixelRatio || 1);
+  state.doubleClickMarker.y = y * (window.devicePixelRatio || 1);
+  state.doubleClickMarker.activeUntil = performance.now() + DOUBLE_CLICK_MARKER_MS;
+}
+
+function drawDoubleClickMarker(now) {
+  if (now >= state.doubleClickMarker.activeUntil) {
+    return;
+  }
+
+  const remaining = state.doubleClickMarker.activeUntil - now;
+  const progress = 1 - (remaining / DOUBLE_CLICK_MARKER_MS);
+  const alpha = Math.max(0, 0.9 * (1 - progress));
+  const ringRadius = (18 + progress * 44) * (window.devicePixelRatio || 1);
+
+  const x = state.doubleClickMarker.x;
+  const y = state.doubleClickMarker.y;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 236, 150, " + alpha.toFixed(3) + ")";
+  ctx.lineWidth = 3.5 * (window.devicePixelRatio || 1);
+  ctx.beginPath();
+  ctx.arc(x, y, ringRadius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(255, 140, 80, " + Math.max(0, alpha * 0.65).toFixed(3) + ")";
+  ctx.beginPath();
+  ctx.arc(x, y, (6 + (1 - progress) * 3) * (window.devicePixelRatio || 1), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawAll(now) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   if (!state.drawActive) {
     state.strokes = [];
+    drawDoubleClickMarker(now);
     return;
   }
 
@@ -107,6 +147,7 @@ function drawAll(now) {
   }
 
   state.strokes = remaining;
+  drawDoubleClickMarker(now);
   drawPointerGlow();
 }
 
@@ -287,6 +328,20 @@ ipcRenderer.on('overlay:undo', () => {
 ipcRenderer.on('overlay:clear', () => {
   state.strokes = [];
   endStroke();
+});
+
+ipcRenderer.on('overlay:double-click-marker', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  const x = Number(payload.x);
+  const y = Number(payload.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return;
+  }
+
+  triggerDoubleClickMarker(x, y);
 });
 
 function renderLoop() {

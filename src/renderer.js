@@ -43,7 +43,10 @@ const MIC_GAIN = 5.5;
 const MASTER_GAIN = 1.8;
 const CLICK_ZOOM_HOLD_MS = 1800;
 const CLICK_ZOOM_IN_SLOWDOWN = 0.55;
-const PEN_MODE_ZOOM_RATIO = 0.65;
+const PEN_HOLD_ZOOM_RATIO = 0.45;
+const PEN_HOLD_DELAY_MS = 180;
+const DOUBLE_CLICK_MAX_WINDOW_MS = 320;
+const DOUBLE_CLICK_MARKER_MS = 700;
 const DEFAULT_CURSOR_GLOW_RADIUS = 22;
 const DEFAULT_CURSOR_GLOW_CORE_RADIUS = 5;
 const DEFAULT_CURSOR_GLOW_OPACITY = 0.9;
@@ -83,7 +86,16 @@ let recordingMeta = {
 let clickState = {
   enabled: false,
   checkedCapability: false,
-  lastClickTimestamp: 0
+  lastClickTimestamp: 0,
+  holdDelayUntil: 0,
+  lastZoomTriggerTs: 0,
+  forceMaxUntil: 0
+};
+
+const doubleClickMarkerState = {
+  x: 0,
+  y: 0,
+  activeUntil: 0
 };
 
 const glowState = {
@@ -154,13 +166,9 @@ function getQualityPreset() {
   return QUALITY_PRESETS[key] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 }
 
-function getEffectiveMaxZoom() {
-  if (!annotationState.enabled) {
-    return cameraState.maxZoom;
-  }
-
+function getPenHoldZoom() {
   const extraZoom = Math.max(0, cameraState.maxZoom - 1);
-  return 1 + extraZoom * PEN_MODE_ZOOM_RATIO;
+  return 1 + extraZoom * PEN_HOLD_ZOOM_RATIO;
 }
 
 function updateHdrCompUi() {
@@ -214,11 +222,49 @@ function mapPointToVideo(point) {
   };
 }
 
-function triggerTemporaryZoom(x, y) {
+function triggerTemporaryZoom(x, y, targetZoom = cameraState.maxZoom) {
   cameraState.targetX = x;
   cameraState.targetY = y;
-  cameraState.targetZoom = getEffectiveMaxZoom();
+  cameraState.targetZoom = targetZoom;
   cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
+}
+
+function triggerDoubleClickMarker(x, y) {
+  doubleClickMarkerState.x = x;
+  doubleClickMarkerState.y = y;
+  doubleClickMarkerState.activeUntil = performance.now() + DOUBLE_CLICK_MARKER_MS;
+}
+
+function drawDoubleClickMarker(now) {
+  if (now >= doubleClickMarkerState.activeUntil) {
+    return;
+  }
+
+  const remaining = doubleClickMarkerState.activeUntil - now;
+  const progress = 1 - (remaining / DOUBLE_CLICK_MARKER_MS);
+  const alpha = Math.max(0, 0.9 * (1 - progress));
+  const ringRadius = 18 + progress * 44;
+
+  const { sx, sy, cropW, cropH, outputW, outputH } = viewState;
+  const x = (doubleClickMarkerState.x - sx) * (outputW / cropW);
+  const y = (doubleClickMarkerState.y - sy) * (outputH / cropH);
+
+  if (x < -80 || y < -80 || x > outputW + 80 || y > outputH + 80) {
+    return;
+  }
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 236, 150, " + alpha.toFixed(3) + ")";
+  ctx.lineWidth = 3.5;
+  ctx.beginPath();
+  ctx.arc(x, y, ringRadius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(255, 140, 80, " + Math.max(0, alpha * 0.65).toFixed(3) + ")";
+  ctx.beginPath();
+  ctx.arc(x, y, 6 + (1 - progress) * 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function resizeCanvasToSource() {
@@ -275,15 +321,29 @@ function updateCursorFromMain() {
         clickState.checkedCapability = true;
         clickState.enabled = Boolean(clickInfo && clickInfo.enabled);
       }
-
-      if (clickInfo && clickInfo.mouseDown) {
-        cameraState.targetZoom = getEffectiveMaxZoom();
-        cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
-      }
       if (clickInfo && clickInfo.hasNew && clickInfo.inside) {
         clickState.lastClickTimestamp = clickInfo.timestamp;
         const clickPoint = mapPointToVideo(clickInfo);
-        triggerTemporaryZoom(clickPoint.x, clickPoint.y);
+        const clickTs = Number(clickInfo.timestamp || Date.now());
+        const isDoubleClick = clickState.lastZoomTriggerTs > 0 && (clickTs - clickState.lastZoomTriggerTs) <= DOUBLE_CLICK_MAX_WINDOW_MS;
+
+        clickState.lastZoomTriggerTs = clickTs;
+        clickState.holdDelayUntil = performance.now() + PEN_HOLD_DELAY_MS;
+        clickState.forceMaxUntil = isDoubleClick ? performance.now() + CLICK_ZOOM_HOLD_MS : 0;
+
+        triggerTemporaryZoom(clickPoint.x, clickPoint.y, isDoubleClick ? cameraState.maxZoom : getPenHoldZoom());
+        if (isDoubleClick) {
+          triggerDoubleClickMarker(clickPoint.x, clickPoint.y);
+          electronAPI.overlayDoubleClickMarker({ x: clickInfo.x, y: clickInfo.y }).catch(() => {});
+        }
+      }
+
+      if (clickInfo && clickInfo.mouseDown && performance.now() >= clickState.holdDelayUntil && performance.now() >= clickState.forceMaxUntil) {
+        cameraState.targetZoom = getPenHoldZoom();
+        cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
+      } else if (clickInfo && !clickInfo.mouseDown) {
+        clickState.holdDelayUntil = 0;
+        clickState.forceMaxUntil = 0;
       }
     });
   });
@@ -344,7 +404,7 @@ function drawLoop() {
     return;
   }
 
-  const zoom = clamp(cameraState.zoom, 1, getEffectiveMaxZoom());
+  const zoom = clamp(cameraState.zoom, 1, cameraState.maxZoom);
   const cropW = sw / zoom;
   const cropH = sh / zoom;
   const sx = clamp(cameraState.viewportX - cropW / 2, 0, sw - cropW);
@@ -376,6 +436,7 @@ function drawLoop() {
     }
   }
 
+  drawDoubleClickMarker(now);
   drawCursorGlow(glowState.x, glowState.y);
 
   drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
@@ -661,8 +722,13 @@ async function startRecording() {
   clickState = {
     enabled: false,
     checkedCapability: false,
-    lastClickTimestamp: 0
+    lastClickTimestamp: 0,
+    holdDelayUntil: 0,
+    lastZoomTriggerTs: 0,
+    forceMaxUntil: 0
   };
+
+  doubleClickMarkerState.activeUntil = 0;
 
   sourceStream = await getDesktopStream(sourceId);
   applyQualityHints(sourceStream);

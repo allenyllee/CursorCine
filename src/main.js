@@ -18,7 +18,9 @@ let overlayAltPressed = false;
 let overlayWheelPauseUntil = 0;
 let overlayWheelResumeTimer = null;
 let overlayLastDrawActive = false;
+let overlayMarkerTimer = null;
 const OVERLAY_WHEEL_PAUSE_MS = 250;
+const OVERLAY_MARKER_VISIBLE_MS = 850;
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -191,6 +193,11 @@ function getTargetDisplay(displayId) {
 }
 
 function destroyOverlayWindow() {
+  if (overlayMarkerTimer) {
+    clearTimeout(overlayMarkerTimer);
+    overlayMarkerTimer = null;
+  }
+
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     overlayWindow = null;
     return;
@@ -372,6 +379,11 @@ app.whenReady().then(() => {
     overlayAltPressed = false;
     overlayWheelPauseUntil = 0;
 
+    if (overlayMarkerTimer) {
+      clearTimeout(overlayMarkerTimer);
+      overlayMarkerTimer = null;
+    }
+
     if (overlayWheelResumeTimer) {
       clearTimeout(overlayWheelResumeTimer);
       overlayWheelResumeTimer = null;
@@ -413,6 +425,44 @@ app.whenReady().then(() => {
       return { ok: false, reason: 'NO_OVERLAY' };
     }
     overlayWindow.webContents.send('overlay:clear');
+    return { ok: true };
+  });
+
+  ipcMain.handle('overlay:double-click-marker', (_event, payload) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_OVERLAY' };
+    }
+
+    const drawActive = overlayDrawActive();
+    if (!drawActive && !overlayWindow.isVisible()) {
+      if (typeof overlayWindow.showInactive === 'function') {
+        overlayWindow.showInactive();
+      } else {
+        overlayWindow.show();
+      }
+      overlayWindow.setIgnoreMouseEvents(true);
+    }
+
+    overlayWindow.webContents.send('overlay:double-click-marker', payload || {});
+
+    if (overlayMarkerTimer) {
+      clearTimeout(overlayMarkerTimer);
+      overlayMarkerTimer = null;
+    }
+
+    overlayMarkerTimer = setTimeout(() => {
+      overlayMarkerTimer = null;
+      if (!overlayWindow || overlayWindow.isDestroyed()) {
+        return;
+      }
+      if (!overlayDrawActive()) {
+        overlayWindow.setIgnoreMouseEvents(true);
+        if (overlayWindow.isVisible()) {
+          overlayWindow.hide();
+        }
+      }
+    }, OVERLAY_MARKER_VISIBLE_MS);
+
     return { ok: true };
   });
 
