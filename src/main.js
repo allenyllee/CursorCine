@@ -24,7 +24,7 @@ const OVERLAY_WHEEL_PAUSE_MS = 250;
 
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
-  return code === 42 || code === 54;
+  return code === 29 || code === 3613;
 }
 
 function scheduleOverlayWheelResume() {
@@ -59,7 +59,7 @@ function overlayDrawActive() {
   if (!clickHookEnabled) {
     return true;
   }
-  if (!overlayAltPressed) {
+  if (!overlayDrawToggle) {
     return false;
   }
 
@@ -139,7 +139,11 @@ function initGlobalClickHook() {
       if (!isOverlayToggleKey(event)) {
         return;
       }
+      if (overlayAltPressed) {
+        return;
+      }
       overlayAltPressed = true;
+      overlayDrawToggle = !overlayDrawToggle;
       applyOverlayMouseMode();
     });
     uIOhook.on('keyup', (event) => {
@@ -147,7 +151,6 @@ function initGlobalClickHook() {
         return;
       }
       overlayAltPressed = false;
-      applyOverlayMouseMode();
     });
     uIOhook.on('wheel', () => {
       pauseOverlayByWheel();
@@ -450,7 +453,7 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
     overlayPenEnabled = Boolean(enabled);
     overlayLastDrawActive = false;
-    overlayDrawToggle = overlayPenEnabled;
+    overlayDrawToggle = false;
     overlayAltPressed = false;
     overlayWheelPauseUntil = 0;
 
@@ -469,7 +472,7 @@ app.whenReady().then(() => {
     return {
       ok: true,
       toggleMode: clickHookEnabled,
-      toggleKey: 'Shift',
+      toggleKey: 'Ctrl',
       wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
     };
   });
