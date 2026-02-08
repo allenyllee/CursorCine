@@ -108,7 +108,7 @@ function applyOverlayMouseMode() {
     if (capturePointer) {
       overlayWindow.setIgnoreMouseEvents(false);
     } else {
-      overlayWindow.setIgnoreMouseEvents(true);
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
       overlayWindow.blur();
     }
   } else {
@@ -116,7 +116,7 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    overlayWindow.setIgnoreMouseEvents(true);
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
 
     if (overlayWindow.isVisible()) {
       overlayWindow.hide();
@@ -293,7 +293,7 @@ function createOverlayWindow(displayId) {
         overlayBorderWindow.show();
       }
     }
-    overlayBorderWindow.setIgnoreMouseEvents(true);
+    overlayBorderWindow.setIgnoreMouseEvents(true, { forward: true });
   });
 
   overlayBorderWindow.on('closed', () => {
