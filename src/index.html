@@ -35,6 +35,34 @@
         </label>
 
         <label>
+          <span>HDR 補償（實驗）</span>
+          <span>
+            <input id="hdrCompEnable" type="checkbox" checked />
+            開啟
+          </span>
+        </label>
+
+        <label>
+          HDR 補償強度 <span id="hdrCompStrengthLabel">-0.70</span>
+          <input id="hdrCompStrength" type="range" min="-1" max="1" step="0.05" value="-0.7" />
+        </label>
+
+        <label>
+          HDR 色相校正 <span id="hdrCompHueLabel">-9°</span>
+          <input id="hdrCompHue" type="range" min="-30" max="30" step="1" value="-9" />
+        </label>
+
+        <label>
+          高亮壓縮 <span id="hdrCompRolloffLabel">0.70</span>
+          <input id="hdrCompRolloff" type="range" min="0" max="1" step="0.05" value="0.7" />
+        </label>
+
+        <label>
+          清晰度（實驗） <span id="hdrCompSharpnessLabel">1.00</span>
+          <input id="hdrCompSharpness" type="range" min="0" max="1" step="0.05" value="1.0" />
+        </label>
+
+        <label>
           最大 Zoom 倍率 <span id="zoomLabel">1.8x</span>
           <input id="zoomInput" type="range" min="1.2" max="3" step="0.1" value="1.8" />
         </label>

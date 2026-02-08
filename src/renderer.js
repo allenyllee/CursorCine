@@ -12,6 +12,15 @@ const smoothInput = document.getElementById('smoothInput');
 const micInput = document.getElementById('micInput');
 const formatSelect = document.getElementById('formatSelect');
 const qualitySelect = document.getElementById('qualitySelect');
+const hdrCompEnable = document.getElementById('hdrCompEnable');
+const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
+const hdrCompStrengthLabel = document.getElementById('hdrCompStrengthLabel');
+const hdrCompHueInput = document.getElementById('hdrCompHue');
+const hdrCompHueLabel = document.getElementById('hdrCompHueLabel');
+const hdrCompRolloffInput = document.getElementById('hdrCompRolloff');
+const hdrCompRolloffLabel = document.getElementById('hdrCompRolloffLabel');
+const hdrCompSharpnessInput = document.getElementById('hdrCompSharpness');
+const hdrCompSharpnessLabel = document.getElementById('hdrCompSharpnessLabel');
 const zoomLabel = document.getElementById('zoomLabel');
 const smoothLabel = document.getElementById('smoothLabel');
 const glowSizeInput = document.getElementById('glowSizeInput');
@@ -34,12 +43,17 @@ const MIC_GAIN = 5.5;
 const MASTER_GAIN = 1.8;
 const CLICK_ZOOM_HOLD_MS = 1800;
 const CLICK_ZOOM_IN_SLOWDOWN = 0.55;
+const PEN_MODE_ZOOM_RATIO = 0.65;
 const DEFAULT_CURSOR_GLOW_RADIUS = 22;
 const DEFAULT_CURSOR_GLOW_CORE_RADIUS = 5;
 const DEFAULT_CURSOR_GLOW_OPACITY = 0.9;
 const CURSOR_GLOW_LAG = 0.18;
 const DEFAULT_PEN_COLOR = '#ff4f70';
 const DEFAULT_PEN_SIZE = 4;
+const DEFAULT_HDR_COMP_STRENGTH = -0.7;
+const DEFAULT_HDR_COMP_HUE = -9;
+const DEFAULT_HDR_COMP_ROLLOFF = 0.7;
+const DEFAULT_HDR_COMP_SHARPNESS = 1.0;
 
 const QUALITY_PRESETS = {
   smooth: { label: '流暢', videoBitrate: 12000000, audioBitrate: 192000 },
@@ -87,6 +101,14 @@ const annotationState = {
   size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
 };
 
+const hdrCompState = {
+  enabled: Boolean(hdrCompEnable?.checked),
+  strength: Number(hdrCompStrengthInput?.value || DEFAULT_HDR_COMP_STRENGTH),
+  hue: Number(hdrCompHueInput?.value || DEFAULT_HDR_COMP_HUE),
+  rolloff: Number(hdrCompRolloffInput?.value || DEFAULT_HDR_COMP_ROLLOFF),
+  sharpness: Number(hdrCompSharpnessInput?.value || DEFAULT_HDR_COMP_SHARPNESS)
+};
+
 const viewState = {
   sx: 0,
   sy: 0,
@@ -132,6 +154,49 @@ function getQualityPreset() {
   return QUALITY_PRESETS[key] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 }
 
+function getEffectiveMaxZoom() {
+  if (!annotationState.enabled) {
+    return cameraState.maxZoom;
+  }
+
+  const extraZoom = Math.max(0, cameraState.maxZoom - 1);
+  return 1 + extraZoom * PEN_MODE_ZOOM_RATIO;
+}
+
+function updateHdrCompUi() {
+  if (!hdrCompStrengthInput || !hdrCompStrengthLabel || !hdrCompHueInput || !hdrCompHueLabel || !hdrCompRolloffInput || !hdrCompRolloffLabel || !hdrCompSharpnessInput || !hdrCompSharpnessLabel) {
+    return;
+  }
+
+  hdrCompStrengthInput.disabled = !hdrCompState.enabled;
+  hdrCompHueInput.disabled = !hdrCompState.enabled;
+  hdrCompRolloffInput.disabled = !hdrCompState.enabled;
+  hdrCompSharpnessInput.disabled = !hdrCompState.enabled;
+
+  hdrCompStrengthLabel.textContent = (hdrCompState.strength > 0 ? '+' : '') + hdrCompState.strength.toFixed(2);
+  const hue = Math.round(hdrCompState.hue);
+  hdrCompHueLabel.textContent = (hue > 0 ? '+' : '') + String(hue) + '°';
+  hdrCompRolloffLabel.textContent = hdrCompState.rolloff.toFixed(2);
+  hdrCompSharpnessLabel.textContent = hdrCompState.sharpness.toFixed(2);
+}
+
+function buildHdrCompensationFilter() {
+  if (!hdrCompState.enabled) {
+    return 'none';
+  }
+
+  const strength = clamp(hdrCompState.strength, -1, 1);
+  const rolloff = clamp(hdrCompState.rolloff, 0, 1);
+  const sharpness = clamp(hdrCompState.sharpness, 0, 1);
+
+  const brightness = clamp(1.0 + strength * 0.06 - rolloff * 0.12, 0.75, 1.2).toFixed(3);
+  const contrast = clamp(1.0 + strength * 0.18 - rolloff * 0.22 + sharpness * 0.10, 0.70, 1.65).toFixed(3);
+  const saturation = clamp(1.0 + strength * 0.40 - rolloff * 0.20, 0.55, 1.80).toFixed(3);
+  const hue = clamp(hdrCompState.hue, -30, 30).toFixed(0);
+
+  return 'brightness(' + brightness + ') contrast(' + contrast + ') saturate(' + saturation + ') hue-rotate(' + hue + 'deg)';
+}
+
 function mapPointToVideo(point) {
   const sw = rawVideo.videoWidth || previewCanvas.width || 1;
   const sh = rawVideo.videoHeight || previewCanvas.height || 1;
@@ -152,7 +217,7 @@ function mapPointToVideo(point) {
 function triggerTemporaryZoom(x, y) {
   cameraState.targetX = x;
   cameraState.targetY = y;
-  cameraState.targetZoom = cameraState.maxZoom;
+  cameraState.targetZoom = getEffectiveMaxZoom();
   cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
 }
 
@@ -212,7 +277,7 @@ function updateCursorFromMain() {
       }
 
       if (clickInfo && clickInfo.mouseDown) {
-        cameraState.targetZoom = cameraState.maxZoom;
+        cameraState.targetZoom = getEffectiveMaxZoom();
         cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
       }
       if (clickInfo && clickInfo.hasNew && clickInfo.inside) {
@@ -279,7 +344,7 @@ function drawLoop() {
     return;
   }
 
-  const zoom = clamp(cameraState.zoom, 1, cameraState.maxZoom);
+  const zoom = clamp(cameraState.zoom, 1, getEffectiveMaxZoom());
   const cropW = sw / zoom;
   const cropH = sh / zoom;
   const sx = clamp(cameraState.viewportX - cropW / 2, 0, sw - cropW);
@@ -294,7 +359,23 @@ function drawLoop() {
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+  ctx.filter = buildHdrCompensationFilter();
   ctx.drawImage(rawVideo, sx, sy, cropW, cropH, 0, 0, sw, sh);
+  ctx.filter = 'none';
+
+  if (hdrCompState.enabled) {
+    const sharpness = clamp(hdrCompState.sharpness, 0, 1);
+    if (sharpness > 0.01) {
+      ctx.globalAlpha = sharpness * 0.12;
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.filter = 'contrast(' + (1 + sharpness * 0.45).toFixed(3) + ')';
+      ctx.drawImage(rawVideo, sx, sy, cropW, cropH, 0, 0, sw, sh);
+      ctx.filter = 'none';
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+    }
+  }
+
   drawCursorGlow(glowState.x, glowState.y);
 
   drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
@@ -736,6 +817,31 @@ glowOpacityInput.addEventListener('input', () => {
   glowOpacityLabel.textContent = glowState.opacity.toFixed(2);
 });
 
+hdrCompEnable.addEventListener('change', () => {
+  hdrCompState.enabled = Boolean(hdrCompEnable.checked);
+  updateHdrCompUi();
+});
+
+hdrCompStrengthInput.addEventListener('input', () => {
+  hdrCompState.strength = clamp(Number(hdrCompStrengthInput.value), -1, 1);
+  updateHdrCompUi();
+});
+
+hdrCompHueInput.addEventListener('input', () => {
+  hdrCompState.hue = clamp(Number(hdrCompHueInput.value), -30, 30);
+  updateHdrCompUi();
+});
+
+hdrCompRolloffInput.addEventListener('input', () => {
+  hdrCompState.rolloff = clamp(Number(hdrCompRolloffInput.value), 0, 1);
+  updateHdrCompUi();
+});
+
+hdrCompSharpnessInput.addEventListener('input', () => {
+  hdrCompState.sharpness = clamp(Number(hdrCompSharpnessInput.value), 0, 1);
+  updateHdrCompUi();
+});
+
 penToggleBtn.addEventListener('click', () => {
   setPenMode(!annotationState.enabled).catch(() => {});
 });
@@ -772,13 +878,20 @@ stopBtn.addEventListener('click', stopRecording);
 setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
+hdrCompState.enabled = Boolean(hdrCompEnable.checked);
+hdrCompState.strength = clamp(Number(hdrCompStrengthInput.value || DEFAULT_HDR_COMP_STRENGTH), -1, 1);
+hdrCompState.hue = clamp(Number(hdrCompHueInput.value || DEFAULT_HDR_COMP_HUE), -30, 30);
+hdrCompState.rolloff = clamp(Number(hdrCompRolloffInput.value || DEFAULT_HDR_COMP_ROLLOFF), 0, 1);
+hdrCompState.sharpness = clamp(Number(hdrCompSharpnessInput.value || DEFAULT_HDR_COMP_SHARPNESS), 0, 1);
 
 zoomLabel.textContent = `${cameraState.maxZoom.toFixed(1)}x`;
 smoothLabel.textContent = cameraState.smoothing.toFixed(2);
 glowSizeLabel.textContent = String(glowState.radius);
 glowCoreLabel.textContent = String(glowState.coreRadius);
 glowOpacityLabel.textContent = glowState.opacity.toFixed(2);
+hdrCompStrengthLabel.textContent = hdrCompState.strength.toFixed(2);
 penSizeLabel.textContent = String(annotationState.size);
+updateHdrCompUi();
 
 loadSources().catch((error) => {
   console.error(error);
