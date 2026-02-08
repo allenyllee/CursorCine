@@ -333,8 +333,9 @@ function updateCursorFromMain() {
 
         triggerTemporaryZoom(clickPoint.x, clickPoint.y, isDoubleClick ? cameraState.maxZoom : getPenHoldZoom());
         if (isDoubleClick) {
-          triggerDoubleClickMarker(clickPoint.x, clickPoint.y);
-          electronAPI.overlayDoubleClickMarker({ x: clickInfo.x, y: clickInfo.y }).catch(() => {});
+          electronAPI.overlayDoubleClickMarker({ x: clickInfo.x, y: clickInfo.y }).catch(() => {
+            triggerDoubleClickMarker(clickPoint.x, clickPoint.y);
+          });
         }
       }
 
