@@ -11,6 +11,94 @@ let clickHookError = '';
 let lastGlobalClick = null;
 let mouseDown = false;
 let overlayWindow = null;
+let overlayPenEnabled = false;
+let overlayDrawToggle = false;
+let overlayAltPressed = false;
+let overlayWheelPauseUntil = 0;
+let overlayWheelResumeTimer = null;
+let overlayLastDrawActive = false;
+const OVERLAY_WHEEL_PAUSE_MS = 500;
+
+function isOverlayToggleKey(event) {
+  const code = Number(event && event.keycode);
+  return code === 29 || code === 3613;
+}
+
+function pauseOverlayByWheel() {
+  if (!overlayPenEnabled || !clickHookEnabled || !overlayDrawToggle) {
+    return;
+  }
+
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('overlay:clear');
+  }
+
+  overlayDrawToggle = false;
+  overlayWheelPauseUntil = 0;
+
+  if (overlayWheelResumeTimer) {
+    clearTimeout(overlayWheelResumeTimer);
+    overlayWheelResumeTimer = null;
+  }
+
+  applyOverlayMouseMode();
+}
+
+function overlayDrawActive() {
+  if (!overlayPenEnabled) {
+    return false;
+  }
+  if (!clickHookEnabled) {
+    return true;
+  }
+  if (!overlayDrawToggle) {
+    return false;
+  }
+  return true;
+}
+
+function applyOverlayMouseMode() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  const drawActive = overlayDrawActive();
+
+  if (drawActive) {
+    if (!overlayWindow.isVisible()) {
+      if (typeof overlayWindow.showInactive === 'function') {
+        overlayWindow.showInactive();
+      } else {
+        overlayWindow.show();
+      }
+      overlayWindow.webContents.send('overlay:clear');
+    }
+
+    overlayWindow.setIgnoreMouseEvents(false);
+  } else {
+    if (overlayLastDrawActive) {
+      overlayWindow.webContents.send('overlay:clear');
+    }
+
+    overlayWindow.setIgnoreMouseEvents(true);
+
+    if (overlayWindow.isVisible()) {
+      overlayWindow.hide();
+    }
+
+    overlayWindow.blur();
+  }
+
+  overlayLastDrawActive = drawActive;
+
+  overlayWindow.webContents.send('overlay:set-draw-active', {
+    active: drawActive,
+    mouseDown,
+    toggleEnabled: clickHookEnabled,
+    toggled: overlayDrawToggle,
+    wheelPaused: clickHookEnabled ? Date.now() < overlayWheelPauseUntil : false
+  });
+}
 
 function initGlobalClickHook() {
   try {
@@ -23,9 +111,33 @@ function initGlobalClickHook() {
         y: p.y,
         timestamp: Date.now()
       };
+      applyOverlayMouseMode();
     });
     uIOhook.on('mouseup', () => {
       mouseDown = false;
+      applyOverlayMouseMode();
+    });
+    uIOhook.on('keydown', (event) => {
+      if (!isOverlayToggleKey(event)) {
+        return;
+      }
+      if (overlayAltPressed) {
+        return;
+      }
+
+      overlayAltPressed = true;
+      overlayDrawToggle = !overlayDrawToggle;
+      overlayWheelPauseUntil = 0;
+      applyOverlayMouseMode();
+    });
+    uIOhook.on('keyup', (event) => {
+      if (!isOverlayToggleKey(event)) {
+        return;
+      }
+      overlayAltPressed = false;
+    });
+    uIOhook.on('wheel', () => {
+      pauseOverlayByWheel();
     });
     uIOhook.start();
     clickHookEnabled = true;
@@ -93,17 +205,19 @@ function createOverlayWindow(displayId) {
     skipTaskbar: true,
     hasShadow: false,
     alwaysOnTop: true,
-    focusable: true,
+    focusable: false,
+    show: false,
     webPreferences: {
       contextIsolation: false,
-      nodeIntegration: true
+      nodeIntegration: true,
+      backgroundThrottling: false
     }
   });
 
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-
+  overlayWindow.setFocusable(false);
+  overlayWindow.blur();
   overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
 
   overlayWindow.webContents.once('did-finish-load', () => {
@@ -114,6 +228,8 @@ function createOverlayWindow(displayId) {
       width: b.width,
       height: b.height
     });
+    overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
+    applyOverlayMouseMode();
   });
 
   overlayWindow.on('closed', () => {
@@ -226,14 +342,30 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
+    overlayPenEnabled = Boolean(enabled);
+    overlayLastDrawActive = false;
+    overlayDrawToggle = false;
+    overlayAltPressed = false;
+    overlayWheelPauseUntil = 0;
+
+    if (overlayWheelResumeTimer) {
+      clearTimeout(overlayWheelResumeTimer);
+      overlayWheelResumeTimer = null;
+    }
+
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
     }
 
-    const drawEnabled = Boolean(enabled);
-    overlayWindow.setIgnoreMouseEvents(!drawEnabled, { forward: true });
-    overlayWindow.webContents.send('overlay:set-enabled', drawEnabled);
-    return { ok: true };
+    overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
+    applyOverlayMouseMode();
+
+    return {
+      ok: true,
+      toggleMode: clickHookEnabled,
+      toggleKey: 'Ctrl',
+      wheelStopsDrawing: true
+    };
   });
 
   ipcMain.handle('overlay:set-pen-style', (_event, style) => {

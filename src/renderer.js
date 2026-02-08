@@ -594,7 +594,7 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  setStatus(`錄影中: 可在原始畫面用畫筆寫字 (${audioMode})`);
+  setStatus(`錄影中: 可在原始畫面畫筆標註（Ctrl 單擊切換繪製，滾輪會自動關閉畫筆） (${audioMode})`);
 }
 
 function stopRecording() {
@@ -626,11 +626,20 @@ function stopRecording() {
   formatSelect.disabled = false;
 }
 
-function setPenMode(enabled) {
+async function setPenMode(enabled) {
   annotationState.enabled = enabled;
-  penToggleBtn.textContent = enabled ? '畫筆模式: 開' : '畫筆模式: 關';
   penToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-  electronAPI.overlaySetEnabled(enabled).catch(() => {});
+
+  try {
+    const mode = await electronAPI.overlaySetEnabled(enabled);
+    if (enabled && mode && mode.toggleMode) {
+      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 單擊切換；滾輪會關閉畫筆）';
+      return;
+    }
+  } catch (_error) {
+  }
+
+  penToggleBtn.textContent = enabled ? '畫筆模式: 開' : '畫筆模式: 關';
 }
 
 zoomInput.addEventListener('input', () => {
@@ -659,7 +668,7 @@ glowOpacityInput.addEventListener('input', () => {
 });
 
 penToggleBtn.addEventListener('click', () => {
-  setPenMode(!annotationState.enabled);
+  setPenMode(!annotationState.enabled).catch(() => {});
 });
 
 penColorInput.addEventListener('input', () => {
@@ -691,7 +700,7 @@ recordBtn.addEventListener('click', () => {
 });
 stopBtn.addEventListener('click', stopRecording);
 
-setPenMode(false);
+setPenMode(false).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
 
