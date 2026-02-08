@@ -19,6 +19,12 @@ const glowCoreInput = document.getElementById('glowCoreInput');
 const glowCoreLabel = document.getElementById('glowCoreLabel');
 const glowOpacityInput = document.getElementById('glowOpacityInput');
 const glowOpacityLabel = document.getElementById('glowOpacityLabel');
+const penToggleBtn = document.getElementById('penToggleBtn');
+const penColorInput = document.getElementById('penColorInput');
+const penSizeInput = document.getElementById('penSizeInput');
+const penSizeLabel = document.getElementById('penSizeLabel');
+const penUndoBtn = document.getElementById('penUndoBtn');
+const penClearBtn = document.getElementById('penClearBtn');
 
 const ctx = previewCanvas.getContext('2d', { alpha: false });
 
@@ -29,7 +35,10 @@ const CLICK_ZOOM_HOLD_MS = 1800;
 const CLICK_ZOOM_IN_SLOWDOWN = 0.55;
 const DEFAULT_CURSOR_GLOW_RADIUS = 22;
 const DEFAULT_CURSOR_GLOW_CORE_RADIUS = 5;
-const DEFAULT_CURSOR_GLOW_OPACITY = 0.90;
+const DEFAULT_CURSOR_GLOW_OPACITY = 0.9;
+const CURSOR_GLOW_LAG = 0.18;
+const DEFAULT_PEN_COLOR = '#ff4f70';
+const DEFAULT_PEN_SIZE = 4;
 
 let sources = [];
 let sourceStream;
@@ -40,12 +49,14 @@ let chunks = [];
 let drawRaf = 0;
 let cursorTimer = 0;
 let selectedSource;
+
 let recordingMeta = {
   outputExt: 'webm',
   outputMimeType: 'video/webm',
   requestedFormat: 'webm',
   fallbackFromMp4: false
 };
+
 let clickState = {
   enabled: false,
   checkedCapability: false,
@@ -55,7 +66,25 @@ let clickState = {
 const glowState = {
   radius: Number(glowSizeInput.value || DEFAULT_CURSOR_GLOW_RADIUS),
   coreRadius: Number(glowCoreInput.value || DEFAULT_CURSOR_GLOW_CORE_RADIUS),
-  opacity: Number(glowOpacityInput.value || DEFAULT_CURSOR_GLOW_OPACITY)
+  opacity: Number(glowOpacityInput.value || DEFAULT_CURSOR_GLOW_OPACITY),
+  lag: CURSOR_GLOW_LAG,
+  x: 0,
+  y: 0
+};
+
+const annotationState = {
+  enabled: false,
+  color: penColorInput?.value || DEFAULT_PEN_COLOR,
+  size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
+};
+
+const viewState = {
+  sx: 0,
+  sy: 0,
+  cropW: 1,
+  cropH: 1,
+  outputW: 1,
+  outputH: 1
 };
 
 let audioContext;
@@ -78,12 +107,52 @@ const cameraState = {
   targetZoom: 1,
   zoomHoldUntil: 0,
   maxZoom: Number(zoomInput.value),
-  smoothing: Number(smoothInput.value),
-  lastMoveAt: 0
+  smoothing: Number(smoothInput.value)
 };
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function mapPointToVideo(point) {
+  const sw = rawVideo.videoWidth || previewCanvas.width || 1;
+  const sh = rawVideo.videoHeight || previewCanvas.height || 1;
+
+  if (typeof point.nx === 'number' && typeof point.ny === 'number') {
+    return {
+      x: clamp(point.nx * sw, 0, sw),
+      y: clamp(point.ny * sh, 0, sh)
+    };
+  }
+
+  return {
+    x: clamp(point.x || 0, 0, sw),
+    y: clamp(point.y || 0, 0, sh)
+  };
+}
+
+function triggerTemporaryZoom(x, y) {
+  cameraState.targetX = x;
+  cameraState.targetY = y;
+  cameraState.targetZoom = cameraState.maxZoom;
+  cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
+}
+
+function resizeCanvasToSource() {
+  const w = rawVideo.videoWidth;
+  const h = rawVideo.videoHeight;
+  if (!w || !h) {
+    return;
+  }
+
+  if (previewCanvas.width !== w || previewCanvas.height !== h) {
+    previewCanvas.width = w;
+    previewCanvas.height = h;
+  }
 }
 
 async function loadSources() {
@@ -105,13 +174,6 @@ async function loadSources() {
   setStatus(`已載入 ${sources.length} 個螢幕來源`);
 }
 
-function triggerTemporaryZoom(x, y) {
-  cameraState.targetX = x;
-  cameraState.targetY = y;
-  cameraState.targetZoom = cameraState.maxZoom;
-  cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
-}
-
 function updateCursorFromMain() {
   if (!selectedSource) {
     return;
@@ -122,6 +184,7 @@ function updateCursorFromMain() {
       cameraState.targetZoom = 1;
       return;
     }
+
     const cursorPoint = mapPointToVideo(p);
     cameraState.cursorX = cursorPoint.x;
     cameraState.cursorY = cursorPoint.y;
@@ -138,7 +201,6 @@ function updateCursorFromMain() {
         cameraState.targetZoom = cameraState.maxZoom;
         cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
       }
-
       if (clickInfo && clickInfo.hasNew && clickInfo.inside) {
         clickState.lastClickTimestamp = clickInfo.timestamp;
         const clickPoint = mapPointToVideo(clickInfo);
@@ -148,41 +210,8 @@ function updateCursorFromMain() {
   });
 }
 
-function resizeCanvasToSource() {
-  const w = rawVideo.videoWidth;
-  const h = rawVideo.videoHeight;
-  if (!w || !h) {
-    return;
-  }
-
-  if (previewCanvas.width !== w || previewCanvas.height !== h) {
-    previewCanvas.width = w;
-    previewCanvas.height = h;
-  }
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function mapPointToVideo(point) {
-  const sw = rawVideo.videoWidth || previewCanvas.width || 1;
-  const sh = rawVideo.videoHeight || previewCanvas.height || 1;
-
-  if (typeof point.nx === "number" && typeof point.ny === "number") {
-    return {
-      x: clamp(point.nx * sw, 0, sw),
-      y: clamp(point.ny * sh, 0, sh)
-    };
-  }
-
-  return {
-    x: clamp(point.x || 0, 0, sw),
-    y: clamp(point.y || 0, 0, sh)
-  };
-}
-
-function drawCursorGlow(cursorX, cursorY, sx, sy, cropW, cropH, outputW, outputH) {
+function drawCursorGlow(cursorX, cursorY) {
+  const { sx, sy, cropW, cropH, outputW, outputH } = viewState;
   const x = (cursorX - sx) * (outputW / cropW);
   const y = (cursorY - sy) * (outputH / cropH);
 
@@ -191,15 +220,15 @@ function drawCursorGlow(cursorX, cursorY, sx, sy, cropW, cropH, outputW, outputH
   }
 
   const glow = ctx.createRadialGradient(x, y, 0, x, y, glowState.radius);
-  glow.addColorStop(0, "rgba(255, 241, 150, " + glowState.opacity.toFixed(2) + ")");
-  glow.addColorStop(0.35, "rgba(255, 196, 80, " + (glowState.opacity * 0.62).toFixed(2) + ")");
-  glow.addColorStop(1, "rgba(255, 160, 40, 0)");
+  glow.addColorStop(0, 'rgba(255, 241, 150, ' + glowState.opacity.toFixed(2) + ')');
+  glow.addColorStop(0.35, 'rgba(255, 196, 80, ' + (glowState.opacity * 0.62).toFixed(2) + ')');
+  glow.addColorStop(1, 'rgba(255, 160, 40, 0)');
   ctx.fillStyle = glow;
   ctx.beginPath();
   ctx.arc(x, y, glowState.radius, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = "rgba(255, 248, 225, " + Math.min(1, glowState.opacity + 0.1).toFixed(2) + ")";
+  ctx.fillStyle = 'rgba(255, 248, 225, ' + Math.min(1, glowState.opacity + 0.1).toFixed(2) + ')';
   ctx.beginPath();
   ctx.arc(x, y, glowState.coreRadius, 0, Math.PI * 2);
   ctx.fill();
@@ -221,9 +250,13 @@ function drawLoop() {
   const zoomSmooth = cameraState.targetZoom > cameraState.zoom
     ? smooth * CLICK_ZOOM_IN_SLOWDOWN
     : smooth;
+
   cameraState.zoom += (cameraState.targetZoom - cameraState.zoom) * zoomSmooth;
   cameraState.viewportX += (cameraState.targetX - cameraState.viewportX) * smooth;
   cameraState.viewportY += (cameraState.targetY - cameraState.viewportY) * smooth;
+
+  glowState.x += (cameraState.cursorX - glowState.x) * glowState.lag;
+  glowState.y += (cameraState.cursorY - glowState.y) * glowState.lag;
 
   const sw = rawVideo.videoWidth;
   const sh = rawVideo.videoHeight;
@@ -235,14 +268,20 @@ function drawLoop() {
   const zoom = clamp(cameraState.zoom, 1, cameraState.maxZoom);
   const cropW = sw / zoom;
   const cropH = sh / zoom;
-
   const sx = clamp(cameraState.viewportX - cropW / 2, 0, sw - cropW);
   const sy = clamp(cameraState.viewportY - cropH / 2, 0, sh - cropH);
+
+  viewState.sx = sx;
+  viewState.sy = sy;
+  viewState.cropW = cropW;
+  viewState.cropH = cropH;
+  viewState.outputW = sw;
+  viewState.outputH = sh;
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(rawVideo, sx, sy, cropW, cropH, 0, 0, sw, sh);
-  drawCursorGlow(cameraState.cursorX, cameraState.cursorY, sx, sy, cropW, cropH, sw, sh);
+  drawCursorGlow(glowState.x, glowState.y);
 
   drawRaf = requestAnimationFrame(drawLoop);
 }
@@ -251,8 +290,9 @@ function stopMediaTracks(stream) {
   if (!stream) {
     return;
   }
-  for (const t of stream.getTracks()) {
-    t.stop();
+
+  for (const track of stream.getTracks()) {
+    track.stop();
   }
 }
 
@@ -458,6 +498,13 @@ async function exportRecording(blob) {
   setStatus('錄影已停止，檔案已下載');
 }
 
+function syncPenStyleToOverlay() {
+  return electronAPI.overlaySetPenStyle({
+    color: annotationState.color,
+    size: annotationState.size
+  }).catch(() => {});
+}
+
 async function startRecording() {
   const sourceId = sourceSelect.value;
   selectedSource = sources.find((s) => s.id === sourceId);
@@ -481,6 +528,8 @@ async function startRecording() {
 
   cameraState.cursorX = rawVideo.videoWidth / 2;
   cameraState.cursorY = rawVideo.videoHeight / 2;
+  glowState.x = cameraState.cursorX;
+  glowState.y = cameraState.cursorY;
   cameraState.targetX = cameraState.cursorX;
   cameraState.targetY = cameraState.cursorY;
   cameraState.viewportX = cameraState.cursorX;
@@ -488,7 +537,6 @@ async function startRecording() {
   cameraState.zoom = 1;
   cameraState.targetZoom = 1;
   cameraState.zoomHoldUntil = 0;
-  cameraState.lastMoveAt = performance.now();
 
   outputStream = previewCanvas.captureStream(60);
 
@@ -524,6 +572,10 @@ async function startRecording() {
 
   mediaRecorder.start();
 
+  await electronAPI.overlayCreate(selectedSource.display_id);
+  await syncPenStyleToOverlay();
+  await electronAPI.overlaySetEnabled(annotationState.enabled);
+
   clearInterval(cursorTimer);
   cursorTimer = setInterval(updateCursorFromMain, 16);
 
@@ -542,11 +594,7 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  const formatMode = recorderConfig.fallbackFromMp4
-    ? '格式: MP4 不支援，停止後改由 ffmpeg 轉檔'
-    : `格式: ${recordingMeta.outputExt.toUpperCase()}`;
-
-  setStatus(`錄影中: 點擊滑鼠位置會暫時放大，再自動縮回（需全域點擊 hook） (${audioMode} / ${formatMode})`);
+  setStatus(`錄影中: 可在原始畫面用畫筆寫字 (${audioMode})`);
 }
 
 function stopRecording() {
@@ -569,12 +617,20 @@ function stopRecording() {
   cancelAnimationFrame(drawRaf);
   cursorTimer = 0;
   drawRaf = 0;
+  electronAPI.overlayDestroy().catch(() => {});
 
   recordBtn.disabled = false;
   stopBtn.disabled = true;
   sourceSelect.disabled = false;
   micInput.disabled = false;
   formatSelect.disabled = false;
+}
+
+function setPenMode(enabled) {
+  annotationState.enabled = enabled;
+  penToggleBtn.textContent = enabled ? '畫筆模式: 開' : '畫筆模式: 關';
+  penToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  electronAPI.overlaySetEnabled(enabled).catch(() => {});
 }
 
 zoomInput.addEventListener('input', () => {
@@ -602,9 +658,28 @@ glowOpacityInput.addEventListener('input', () => {
   glowOpacityLabel.textContent = glowState.opacity.toFixed(2);
 });
 
-glowSizeLabel.textContent = String(glowState.radius);
-glowCoreLabel.textContent = String(glowState.coreRadius);
-glowOpacityLabel.textContent = glowState.opacity.toFixed(2);
+penToggleBtn.addEventListener('click', () => {
+  setPenMode(!annotationState.enabled);
+});
+
+penColorInput.addEventListener('input', () => {
+  annotationState.color = penColorInput.value;
+  syncPenStyleToOverlay();
+});
+
+penSizeInput.addEventListener('input', () => {
+  annotationState.size = Number(penSizeInput.value);
+  penSizeLabel.textContent = String(annotationState.size);
+  syncPenStyleToOverlay();
+});
+
+penUndoBtn.addEventListener('click', () => {
+  electronAPI.overlayUndo().catch(() => {});
+});
+
+penClearBtn.addEventListener('click', () => {
+  electronAPI.overlayClear().catch(() => {});
+});
 
 refreshBtn.addEventListener('click', loadSources);
 recordBtn.addEventListener('click', () => {
@@ -615,6 +690,17 @@ recordBtn.addEventListener('click', () => {
   });
 });
 stopBtn.addEventListener('click', stopRecording);
+
+setPenMode(false);
+annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
+annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
+
+zoomLabel.textContent = `${cameraState.maxZoom.toFixed(1)}x`;
+smoothLabel.textContent = cameraState.smoothing.toFixed(2);
+glowSizeLabel.textContent = String(glowState.radius);
+glowCoreLabel.textContent = String(glowState.coreRadius);
+glowOpacityLabel.textContent = glowState.opacity.toFixed(2);
+penSizeLabel.textContent = String(annotationState.size);
 
 loadSources().catch((error) => {
   console.error(error);

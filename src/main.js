@@ -10,6 +10,7 @@ let clickHookEnabled = false;
 let clickHookError = '';
 let lastGlobalClick = null;
 let mouseDown = false;
+let overlayWindow = null;
 
 function initGlobalClickHook() {
   try {
@@ -50,6 +51,76 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'index.html'));
 }
 
+function getTargetDisplay(displayId) {
+  if (displayId) {
+    const found = screen
+      .getAllDisplays()
+      .find((d) => String(d.id) === String(displayId));
+    if (found) {
+      return found;
+    }
+  }
+  return screen.getPrimaryDisplay();
+}
+
+function destroyOverlayWindow() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    overlayWindow = null;
+    return;
+  }
+  overlayWindow.close();
+  overlayWindow = null;
+}
+
+function createOverlayWindow(displayId) {
+  destroyOverlayWindow();
+
+  const targetDisplay = getTargetDisplay(displayId);
+  const b = targetDisplay.bounds;
+
+  overlayWindow = new BrowserWindow({
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    focusable: true,
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: true
+    }
+  });
+
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+
+  overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
+
+  overlayWindow.webContents.once('did-finish-load', () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return;
+    }
+    overlayWindow.webContents.send('overlay:init', {
+      width: b.width,
+      height: b.height
+    });
+  });
+
+  overlayWindow.on('closed', () => {
+    overlayWindow = null;
+  });
+}
+
 function hasFfmpeg() {
   const result = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
   return result.status === 0;
@@ -85,14 +156,7 @@ app.whenReady().then(() => {
       return { x: p.x, y: p.y, inside: true, timestamp: Date.now() };
     }
 
-    const targetDisplay = screen
-      .getAllDisplays()
-      .find((d) => String(d.id) === String(displayId));
-
-    if (!targetDisplay) {
-      return { x: p.x, y: p.y, inside: false, timestamp: Date.now() };
-    }
-
+    const targetDisplay = getTargetDisplay(displayId);
     const b = targetDisplay.bounds;
     const inside = p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height;
     const relX = p.x - b.x;
@@ -123,26 +187,7 @@ app.whenReady().then(() => {
       return { enabled: true, hasNew: false, mouseDown };
     }
 
-    if (!displayId) {
-      return {
-        enabled: true,
-        hasNew: true,
-        timestamp: lastGlobalClick.timestamp,
-        x: lastGlobalClick.x,
-        y: lastGlobalClick.y,
-        inside: true,
-        mouseDown
-      };
-    }
-
-    const targetDisplay = screen
-      .getAllDisplays()
-      .find((d) => String(d.id) === String(displayId));
-
-    if (!targetDisplay) {
-      return { enabled: true, hasNew: false, mouseDown };
-    }
-
+    const targetDisplay = getTargetDisplay(displayId);
     const b = targetDisplay.bounds;
     const inside =
       lastGlobalClick.x >= b.x &&
@@ -168,6 +213,51 @@ app.whenReady().then(() => {
       inside: true,
       mouseDown
     };
+  });
+
+  ipcMain.handle('overlay:create', (_event, displayId) => {
+    createOverlayWindow(displayId);
+    return { ok: true };
+  });
+
+  ipcMain.handle('overlay:destroy', () => {
+    destroyOverlayWindow();
+    return { ok: true };
+  });
+
+  ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_OVERLAY' };
+    }
+
+    const drawEnabled = Boolean(enabled);
+    overlayWindow.setIgnoreMouseEvents(!drawEnabled, { forward: true });
+    overlayWindow.webContents.send('overlay:set-enabled', drawEnabled);
+    return { ok: true };
+  });
+
+  ipcMain.handle('overlay:set-pen-style', (_event, style) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_OVERLAY' };
+    }
+    overlayWindow.webContents.send('overlay:set-pen-style', style || {});
+    return { ok: true };
+  });
+
+  ipcMain.handle('overlay:undo', () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_OVERLAY' };
+    }
+    overlayWindow.webContents.send('overlay:undo');
+    return { ok: true };
+  });
+
+  ipcMain.handle('overlay:clear', () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_OVERLAY' };
+    }
+    overlayWindow.webContents.send('overlay:clear');
+    return { ok: true };
   });
 
   ipcMain.handle('desktop-sources:get', async () => {
@@ -254,6 +344,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  destroyOverlayWindow();
   if (process.platform !== 'darwin') {
     app.quit();
   }

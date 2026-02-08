@@ -144,3 +144,38 @@ button:disabled {
     min-height: 56vh;
   }
 }
+
+.pen-tools {
+  border: 1px dashed #3b4e77;
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: #14233d;
+}
+
+.pen-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+#penToggleBtn {
+  background: linear-gradient(120deg, #ffe39a, #ffb067);
+  color: #37210a;
+  border: none;
+  font-weight: 700;
+}
+
+#penColorInput {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #384b72;
+  border-radius: 10px;
+  background: #182945;
+  padding: 2px;
+}
+
+#previewCanvas {
+  touch-action: none;
+}
