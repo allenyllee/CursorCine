@@ -1059,6 +1059,27 @@ async function renderTrimmedBlob() {
   };
 }
 
+async function exportTrimmedViaFfmpeg() {
+  if (!editorState.blob || editorState.blob.size <= 0) {
+    return {
+      ok: false,
+      reason: 'INVALID_INPUT',
+      message: '找不到可剪輯的原始錄影資料。'
+    };
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const bytes = new Uint8Array(await editorState.blob.arrayBuffer());
+  return electronAPI.exportTrimmedVideo({
+    bytes,
+    startSec: editorState.trimStart,
+    endSec: editorState.trimEnd,
+    requestedFormat: recordingMeta.requestedFormat,
+    inputExt: recordingMeta.outputExt,
+    baseName: `cursorcine-${timestamp}`
+  });
+}
+
 async function saveEditedClip() {
   if (!editorState.active || editorState.exportBusy) {
     return;
@@ -1072,11 +1093,24 @@ async function saveEditedClip() {
     if (!Number.isFinite(editorState.trimStart) || !Number.isFinite(editorState.trimEnd) || editorState.trimEnd <= editorState.trimStart) {
       throw new Error('剪輯範圍無效，請重新調整起訖點。');
     }
-    setStatus('正在輸出剪輯片段...');
-    const rendered = await renderTrimmedBlob();
-    if (!rendered.blob || rendered.blob.size <= 0) {
-      throw new Error('剪輯輸出為空檔');
+
+    setStatus('正在輸出剪輯片段（ffmpeg）...');
+    const ffmpegResult = await exportTrimmedViaFfmpeg();
+    if (ffmpegResult && ffmpegResult.ok) {
+      setStatus('儲存完成（剪輯輸出）');
+      return;
     }
+
+    if (ffmpegResult && ffmpegResult.reason && ffmpegResult.reason !== 'NO_FFMPEG') {
+      if (ffmpegResult.reason === 'CANCELED') {
+        setStatus('已取消儲存');
+        return;
+      }
+      throw new Error(ffmpegResult.message || 'ffmpeg 剪輯失敗');
+    }
+
+    setStatus('未偵測到 ffmpeg，改用內建剪輯器輸出...');
+    const rendered = await renderTrimmedBlob();
     if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
       recordingMeta.fallbackFromMp4 = true;
       recordingMeta.outputExt = rendered.ext;

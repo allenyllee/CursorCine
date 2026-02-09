@@ -666,6 +666,102 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('video:trim-export', async (_event, payload) => {
+    if (!hasFfmpeg()) {
+      return {
+        ok: false,
+        reason: 'NO_FFMPEG',
+        message: '找不到 ffmpeg，改用內建剪輯器。'
+      };
+    }
+
+    const bytes = payload && payload.bytes ? payload.bytes : null;
+    const startSec = Number(payload && payload.startSec);
+    const endSec = Number(payload && payload.endSec);
+    if (!bytes || !Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
+      return {
+        ok: false,
+        reason: 'INVALID_INPUT',
+        message: '剪輯參數無效。'
+      };
+    }
+
+    const requestedFormat = String(payload && payload.requestedFormat ? payload.requestedFormat : 'webm').toLowerCase() === 'mp4' ? 'mp4' : 'webm';
+    const inputExt = String(payload && payload.inputExt ? payload.inputExt : 'webm').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'webm';
+    const safeBaseName = String(payload && payload.baseName ? payload.baseName : 'cursorcine-export').replace(/[^a-zA-Z0-9-_]/g, '_');
+    const outputExt = requestedFormat === 'mp4' ? 'mp4' : 'webm';
+
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: '儲存剪輯影片',
+      defaultPath: `${safeBaseName}.${outputExt}`,
+      filters: [{ name: `${outputExt.toUpperCase()} Video`, extensions: [outputExt] }]
+    });
+
+    if (canceled || !filePath) {
+      return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-trim-'));
+    const inputPath = path.join(tempDir, `${safeBaseName}.${inputExt}`);
+    const durationSec = Math.max(0.05, endSec - startSec);
+
+    try {
+      await fs.writeFile(inputPath, Buffer.from(bytes));
+
+      const ffmpegArgs = [
+        '-y',
+        '-ss',
+        startSec.toFixed(3),
+        '-t',
+        durationSec.toFixed(3),
+        '-i',
+        inputPath
+      ];
+
+      if (outputExt === 'mp4') {
+        ffmpegArgs.push(
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-crf',
+          '21',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '192k'
+        );
+      } else {
+        ffmpegArgs.push(
+          '-c:v',
+          'libvpx-vp9',
+          '-crf',
+          '32',
+          '-b:v',
+          '0',
+          '-c:a',
+          'libopus',
+          '-b:a',
+          '128k'
+        );
+      }
+
+      ffmpegArgs.push(filePath);
+      await runFfmpeg(ffmpegArgs);
+      return { ok: true, path: filePath, ext: outputExt };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'TRIM_FAILED',
+        message: error.message || 'ffmpeg 剪輯失敗。'
+      };
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   ipcMain.handle('video:save-file', async (_event, payload) => {
     const bytes = payload && payload.bytes ? payload.bytes : null;
     if (!bytes) {
