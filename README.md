@@ -8,8 +8,6 @@
 
 ## Demo
 
-> GitHub README 不支援內嵌 `<video>` 播放器，請點擊下圖觀看影片。
-
 [cursorcine-2026-02-09T08-28-13-836Z.webm](https://github.com/user-attachments/assets/02377999-0465-4cc0-adaf-bcf4a4d1b66f)
 
 ## 功能
