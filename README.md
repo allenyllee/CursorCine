@@ -25,6 +25,26 @@ npm install
 npm start
 ```
 
+## Dev Container 開發
+
+本專案已提供 `.devcontainer/`，可在 VS Code / Cursor 的容器環境中直接執行 Electron（含音訊與螢幕相關依賴）。
+
+使用方式：
+
+1. 安裝 Docker。
+2. 用 VS Code / Cursor 開啟專案後，執行「Reopen in Container」。
+3. 首次建立容器會自動執行 `npm install`（由 `postCreateCommand` 設定）。
+4. 在容器終端執行 `npm start` 啟動開發。
+
+目前 devcontainer 內容重點：
+
+- 以 `mcr.microsoft.com/devcontainers/javascript-node:1-20-bookworm` 為基底
+- 預裝 Electron 常用系統套件與 `ffmpeg`
+- 掛載音訊與顯示相關 socket（X11 / Wayland / PulseAudio）
+- 設定 `ELECTRON_DISABLE_SANDBOX=1` 以降低容器中執行限制
+
+若你修改了 `.devcontainer/Dockerfile` 或 `.devcontainer/devcontainer.json`，請執行「Rebuild Container」讓變更生效。
+
 ## 打包成執行檔
 
 先安裝依賴：
