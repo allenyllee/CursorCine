@@ -8,9 +8,11 @@
 
 ## Demo
 
-<video src="assets/demo.mp4" controls width="960"></video>
+> GitHub README 不支援內嵌 `<video>` 播放器，請點擊下圖觀看影片。
 
-若你的平台無法直接播放，請改用連結：[觀看 Demo](assets/demo.mp4)
+[![CursorCine Demo](assets/demo-cover.jpg)](assets/demo.mp4)
+
+備用連結：[觀看 Demo](assets/demo.mp4)
 
 ## 功能
 
