@@ -1030,7 +1030,7 @@ async function renderTrimmedBlob() {
 
   await seekVideo(source, editorState.trimStart);
   renderCtx.drawImage(source, 0, 0, width, height);
-  recorder.start(150);
+  recorder.start();
   await source.play();
 
   const drawFrame = () => {
@@ -1068,6 +1068,10 @@ async function saveEditedClip() {
 
   try {
     stopEditorPlayback();
+    enforceTrimBounds();
+    if (!Number.isFinite(editorState.trimStart) || !Number.isFinite(editorState.trimEnd) || editorState.trimEnd <= editorState.trimStart) {
+      throw new Error('剪輯範圍無效，請重新調整起訖點。');
+    }
     setStatus('正在輸出剪輯片段...');
     const rendered = await renderTrimmedBlob();
     if (!rendered.blob || rendered.blob.size <= 0) {
@@ -1081,15 +1085,6 @@ async function saveEditedClip() {
     await exportRecording(rendered.blob);
   } catch (error) {
     console.error(error);
-    if (editorState.blob && editorState.blob.size > 0) {
-      setStatus('剪輯輸出失敗，改為儲存原始錄影檔...');
-      try {
-        await exportRecording(editorState.blob);
-        return;
-      } catch (fallbackError) {
-        console.error(fallbackError);
-      }
-    }
     setStatus(`輸出失敗: ${error.message}`);
   } finally {
     editorState.exportBusy = false;
