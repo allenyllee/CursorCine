@@ -173,12 +173,15 @@
               <input id="playheadInput" type="range" min="0" max="1000" step="1" value="0" />
             </div>
             <div class="timeline-row">
-              <label for="trimStartInput">剪輯起點</label>
-              <input id="trimStartInput" type="range" min="0" max="1000" step="1" value="0" />
-            </div>
-            <div class="timeline-row">
-              <label for="trimEndInput">剪輯終點</label>
-              <input id="trimEndInput" type="range" min="0" max="1000" step="1" value="1000" />
+              <label for="trimStartInput">
+                剪輯範圍 <span id="trimRangeLabel">00:00.0 - 00:00.0</span>
+              </label>
+              <div id="trimRangeBar" class="trim-range">
+                <div class="trim-range-track"></div>
+                <div class="trim-range-selected"></div>
+                <input id="trimStartInput" class="trim-handle trim-handle-start" type="range" min="0" max="1000" step="1" value="0" />
+                <input id="trimEndInput" class="trim-handle trim-handle-end" type="range" min="0" max="1000" step="1" value="1000" />
+              </div>
             </div>
             <div class="timeline-tail-space" aria-hidden="true"></div>
           </div>

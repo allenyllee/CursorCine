@@ -279,6 +279,89 @@ button:disabled {
   color: #b8c5e6;
 }
 
+#trimRangeLabel {
+  color: #9fdfc4;
+  font-size: 0.78rem;
+}
+
+.trim-range {
+  position: relative;
+  height: 30px;
+  display: flex;
+  align-items: center;
+}
+
+.trim-range-track,
+.trim-range-selected {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.trim-range-track {
+  background: #2a3a5d;
+}
+
+.trim-range-selected {
+  background: linear-gradient(90deg, #7be4b5, #58d89b);
+  left: calc(var(--trim-start, 0) * 1%);
+  right: calc(100% - (var(--trim-end, 100) * 1%));
+}
+
+.trim-handle {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  margin: 0;
+  background: none;
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: none;
+}
+
+.trim-handle::-webkit-slider-runnable-track {
+  height: 6px;
+  background: transparent;
+}
+
+.trim-handle::-moz-range-track {
+  height: 6px;
+  background: transparent;
+}
+
+.trim-handle::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #0f2138;
+  background: #a9ffd8;
+  box-shadow: 0 0 0 2px rgba(95, 210, 161, 0.35);
+  margin-top: -4px;
+}
+
+.trim-handle::-moz-range-thumb {
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #0f2138;
+  background: #a9ffd8;
+  box-shadow: 0 0 0 2px rgba(95, 210, 161, 0.35);
+}
+
+.trim-handle-start {
+  z-index: 2;
+}
+
+.trim-handle-end {
+  z-index: 3;
+}
+
 .timeline-actions {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

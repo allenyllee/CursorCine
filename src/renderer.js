@@ -13,6 +13,8 @@ const clipDurationInfo = document.getElementById('clipDurationInfo');
 const playheadInput = document.getElementById('playheadInput');
 const trimStartInput = document.getElementById('trimStartInput');
 const trimEndInput = document.getElementById('trimEndInput');
+const trimRangeBar = document.getElementById('trimRangeBar');
+const trimRangeLabel = document.getElementById('trimRangeLabel');
 const playPauseBtn = document.getElementById('playPauseBtn');
 const previewRangeBtn = document.getElementById('previewRangeBtn');
 const saveClipBtn = document.getElementById('saveClipBtn');
@@ -924,10 +926,27 @@ function updateEditorButtons() {
   discardClipBtn.disabled = busy || !editorState.active;
 }
 
+function updateTrimRangeVisual() {
+  if (!trimRangeBar || !trimRangeLabel) {
+    return;
+  }
+
+  const duration = Math.max(0.1, toFiniteNumber(editorState.duration, 0.1));
+  const start = clamp(toFiniteNumber(editorState.trimStart, 0), 0, duration);
+  const end = clamp(toFiniteNumber(editorState.trimEnd, duration), 0, duration);
+  const startPercent = (start / duration) * 100;
+  const endPercent = (end / duration) * 100;
+
+  trimRangeBar.style.setProperty('--trim-start', startPercent.toFixed(3));
+  trimRangeBar.style.setProperty('--trim-end', endPercent.toFixed(3));
+  trimRangeLabel.textContent = formatClock(start) + ' - ' + formatClock(end);
+}
+
 function updateTimelineInputs() {
   if (!editorState.active || editorState.duration <= 0) {
     timeInfo.textContent = '00:00.0 / 00:00.0';
     clipDurationInfo.textContent = '剪輯長度: 00:00.0';
+    updateTrimRangeVisual();
     return;
   }
 
@@ -948,6 +967,7 @@ function updateTimelineInputs() {
     ' / ' +
     formatClock(duration);
   clipDurationInfo.textContent = '剪輯長度: ' + formatClock(clipDuration);
+  updateTrimRangeVisual();
 }
 
 function enforceTrimBounds() {
