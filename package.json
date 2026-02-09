@@ -4,7 +4,7 @@
   "description": "Electron desktop recorder with cursor-follow auto zoom",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "env -u ELECTRON_RUN_AS_NODE electron --no-sandbox --disable-setuid-sandbox .",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win nsis",

@@ -1,0 +1,33 @@
+{
+  "name": "CursorCine Dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    "--ipc=host"
+  ],
+  "mounts": [
+    "type=bind,source=/tmp/.X11-unix,target=/tmp/.X11-unix",
+    "type=bind,source=${localEnv:XDG_RUNTIME_DIR}/${localEnv:WAYLAND_DISPLAY},target=/tmp/vscode-wayland.sock",
+    "type=volume,source=cursorcine-codex-home,target=/home/node/.codex",
+    "type=volume,source=cursorcine-vscode-server,target=/home/node/.vscode-server",
+    "type=volume,source=cursorcine-cursor-server,target=/home/node/.cursor-server"
+  ],
+  "remoteUser": "node",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "openai.chatgpt",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  },
+  "postCreateCommand": "npm install",
+  "containerEnv": {
+    "ELECTRON_DISABLE_SANDBOX": "1",
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "XDG_RUNTIME_DIR": "/tmp",
+    "WAYLAND_DISPLAY": "vscode-wayland.sock"
+  }
+}
