@@ -6,6 +6,12 @@
 
 可在 Windows / Linux 執行的桌面錄影工具，特色是錄影畫面會跟隨游標自動縮放，並內建錄後剪輯時間軸，方便快速產出教學影片。
 
+## Demo
+
+<video src="assets/demo.mp4" controls width="960"></video>
+
+若你的平台無法直接播放，請改用連結：[觀看 Demo](assets/demo.mp4)
+
 ## 功能
 
 - 錄製整個螢幕（可選多螢幕來源）
