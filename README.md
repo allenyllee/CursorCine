@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="CursorCine Logo" width="320" />
+</p>
+
 # CursorCine (Electron)
 
 可在 Windows / Linux 執行的桌面錄影工具，特色是錄影畫面會跟隨游標自動縮放，並內建錄後剪輯時間軸，方便快速產出教學影片。
