@@ -83,6 +83,47 @@ label {
   font-size: 0.95rem;
 }
 
+.control-group {
+  border: 1px solid #334a73;
+  border-radius: 11px;
+  background: #13233e;
+  overflow: hidden;
+}
+
+.control-group summary {
+  position: relative;
+  list-style: none;
+  cursor: pointer;
+  padding: 11px 14px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  user-select: none;
+}
+
+.control-group summary::-webkit-details-marker {
+  display: none;
+}
+
+.control-group summary::after {
+  content: "▾";
+  position: absolute;
+  right: 14px;
+  top: 9px;
+  font-size: 1rem;
+  color: #8eb4ff;
+  transition: transform 140ms ease;
+}
+
+.control-group:not([open]) summary::after {
+  transform: rotate(-90deg);
+}
+
+.group-content {
+  display: grid;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
 select,
 input[type="range"] {
   width: 100%;

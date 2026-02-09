@@ -20,104 +20,124 @@
 
         <p id="status" class="status">尚未開始錄影</p>
 
-        <label>
-          錄製來源
-          <select id="sourceSelect"></select>
-        </label>
+        <details class="control-group" open>
+          <summary>基本設定</summary>
+          <div class="group-content">
+            <label>
+              錄製來源
+              <select id="sourceSelect"></select>
+            </label>
 
-        <label>
-          輸出格式
-          <select id="formatSelect">
-            <option value="webm" selected>WebM</option>
-            <option value="mp4">MP4（若不支援會自動改 WebM）</option>
-          </select>
-        </label>
+            <label>
+              輸出格式
+              <select id="formatSelect">
+                <option value="webm" selected>WebM</option>
+                <option value="mp4">MP4（若不支援會自動改 WebM）</option>
+              </select>
+            </label>
 
-        <label>
-          畫質檔位
-          <select id="qualitySelect">
-            <option value="smooth">流暢（較省資源）</option>
-            <option value="balanced" selected>平衡（推薦）</option>
-            <option value="high">高畫質（較吃效能）</option>
-          </select>
-        </label>
+            <label>
+              畫質檔位
+              <select id="qualitySelect">
+                <option value="smooth">流暢（較省資源）</option>
+                <option value="balanced" selected>平衡（推薦）</option>
+                <option value="high">高畫質（較吃效能）</option>
+              </select>
+            </label>
 
-        <label>
-          <span>HDR 補償（實驗）</span>
-          <span>
-            <input id="hdrCompEnable" type="checkbox" checked />
-            開啟
-          </span>
-        </label>
-
-        <label>
-          HDR 補償強度 <span id="hdrCompStrengthLabel">-0.70</span>
-          <input id="hdrCompStrength" type="range" min="-1" max="1" step="0.05" value="-0.7" />
-        </label>
-
-        <label>
-          HDR 色相校正 <span id="hdrCompHueLabel">-9°</span>
-          <input id="hdrCompHue" type="range" min="-30" max="30" step="1" value="-9" />
-        </label>
-
-        <label>
-          高亮壓縮 <span id="hdrCompRolloffLabel">0.70</span>
-          <input id="hdrCompRolloff" type="range" min="0" max="1" step="0.05" value="0.7" />
-        </label>
-
-        <label>
-          清晰度（實驗） <span id="hdrCompSharpnessLabel">1.00</span>
-          <input id="hdrCompSharpness" type="range" min="0" max="1" step="0.05" value="1.0" />
-        </label>
-
-        <label>
-          最大 Zoom 倍率 <span id="zoomLabel">1.8x</span>
-          <input id="zoomInput" type="range" min="1.2" max="3" step="0.1" value="1.8" />
-        </label>
-
-        <label>
-          鏡頭平滑係數 <span id="smoothLabel">0.16</span>
-          <input id="smoothInput" type="range" min="0.05" max="0.4" step="0.01" value="0.16" />
-        </label>
-
-        <label>
-          光點大小 <span id="glowSizeLabel">22</span>
-          <input id="glowSizeInput" type="range" min="10" max="60" step="1" value="22" />
-        </label>
-
-        <label>
-          光點核心 <span id="glowCoreLabel">5</span>
-          <input id="glowCoreInput" type="range" min="2" max="20" step="1" value="5" />
-        </label>
-
-        <label>
-          光點亮度 <span id="glowOpacityLabel">0.90</span>
-          <input id="glowOpacityInput" type="range" min="0.20" max="1.00" step="0.05" value="0.90" />
-        </label>
-
-        <div class="pen-tools">
-          <button id="penToggleBtn" type="button" aria-pressed="false">畫筆模式: 關</button>
-          <label>
-            畫筆顏色
-            <input id="penColorInput" type="color" value="#ff4f70" />
-          </label>
-          <label>
-            筆刷粗細 <span id="penSizeLabel">4</span>
-            <input id="penSizeInput" type="range" min="1" max="20" step="1" value="4" />
-          </label>
-          <div class="pen-actions">
-            <button id="penUndoBtn" type="button">復原一筆</button>
-            <button id="penClearBtn" type="button">清空畫筆</button>
+            <label>
+              <span>聲音設定</span>
+              <span>
+                <input id="micInput" type="checkbox" />
+                包含麥克風（系統聲音會盡量一併錄製）
+              </span>
+            </label>
           </div>
-        </div>
+        </details>
 
-        <label>
-          <span>聲音設定</span>
-          <span>
-            <input id="micInput" type="checkbox" />
-            包含麥克風（系統聲音會盡量一併錄製）
-          </span>
-        </label>
+        <details class="control-group" open>
+          <summary>鏡頭與游標</summary>
+          <div class="group-content">
+            <label>
+              最大 Zoom 倍率 <span id="zoomLabel">1.8x</span>
+              <input id="zoomInput" type="range" min="1.2" max="3" step="0.1" value="1.8" />
+            </label>
+
+            <label>
+              鏡頭平滑係數 <span id="smoothLabel">0.16</span>
+              <input id="smoothInput" type="range" min="0.05" max="0.4" step="0.01" value="0.16" />
+            </label>
+
+            <label>
+              光點大小 <span id="glowSizeLabel">22</span>
+              <input id="glowSizeInput" type="range" min="10" max="60" step="1" value="22" />
+            </label>
+
+            <label>
+              光點核心 <span id="glowCoreLabel">5</span>
+              <input id="glowCoreInput" type="range" min="2" max="20" step="1" value="5" />
+            </label>
+
+            <label>
+              光點亮度 <span id="glowOpacityLabel">0.90</span>
+              <input id="glowOpacityInput" type="range" min="0.20" max="1.00" step="0.05" value="0.90" />
+            </label>
+          </div>
+        </details>
+
+        <details class="control-group">
+          <summary>HDR 補償（實驗）</summary>
+          <div class="group-content">
+            <label>
+              <span>HDR 補償（實驗）</span>
+              <span>
+                <input id="hdrCompEnable" type="checkbox" checked />
+                開啟
+              </span>
+            </label>
+
+            <label>
+              HDR 補償強度 <span id="hdrCompStrengthLabel">-0.70</span>
+              <input id="hdrCompStrength" type="range" min="-1" max="1" step="0.05" value="-0.7" />
+            </label>
+
+            <label>
+              HDR 色相校正 <span id="hdrCompHueLabel">-9°</span>
+              <input id="hdrCompHue" type="range" min="-30" max="30" step="1" value="-9" />
+            </label>
+
+            <label>
+              高亮壓縮 <span id="hdrCompRolloffLabel">0.70</span>
+              <input id="hdrCompRolloff" type="range" min="0" max="1" step="0.05" value="0.7" />
+            </label>
+
+            <label>
+              清晰度（實驗） <span id="hdrCompSharpnessLabel">1.00</span>
+              <input id="hdrCompSharpness" type="range" min="0" max="1" step="0.05" value="1.0" />
+            </label>
+          </div>
+        </details>
+
+        <details class="control-group">
+          <summary>畫筆工具</summary>
+          <div class="group-content">
+            <div class="pen-tools">
+              <button id="penToggleBtn" type="button" aria-pressed="false">畫筆模式: 關</button>
+              <label>
+                畫筆顏色
+                <input id="penColorInput" type="color" value="#ff4f70" />
+              </label>
+              <label>
+                筆刷粗細 <span id="penSizeLabel">4</span>
+                <input id="penSizeInput" type="range" min="1" max="20" step="1" value="4" />
+              </label>
+              <div class="pen-actions">
+                <button id="penUndoBtn" type="button">復原一筆</button>
+                <button id="penClearBtn" type="button">清空畫筆</button>
+              </div>
+            </div>
+          </div>
+        </details>
 
       </section>
 
