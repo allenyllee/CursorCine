@@ -45,6 +45,9 @@ const CLICK_ZOOM_HOLD_MS = 1800;
 const CLICK_ZOOM_IN_SLOWDOWN = 0.55;
 const PEN_HOLD_ZOOM_RATIO = 0.45;
 const PEN_HOLD_DELAY_MS = 180;
+const PEN_DRAW_FOLLOW_SLOWDOWN = 0.35;
+const PEN_FOLLOW_DEADZONE_RATIO_X = 0.32;
+const PEN_FOLLOW_DEADZONE_RATIO_Y = 0.28;
 const DOUBLE_CLICK_MAX_WINDOW_MS = 320;
 const DOUBLE_CLICK_MARKER_MS = 700;
 const DEFAULT_CURSOR_GLOW_RADIUS = 22;
@@ -313,8 +316,14 @@ function updateCursorFromMain() {
     const cursorPoint = mapPointToVideo(p);
     cameraState.cursorX = cursorPoint.x;
     cameraState.cursorY = cursorPoint.y;
-    cameraState.targetX = cursorPoint.x;
-    cameraState.targetY = cursorPoint.y;
+    if (annotationState.enabled) {
+      const penTarget = getPenFollowTarget(cursorPoint.x, cursorPoint.y);
+      cameraState.targetX = penTarget.x;
+      cameraState.targetY = penTarget.y;
+    } else {
+      cameraState.targetX = cursorPoint.x;
+      cameraState.targetY = cursorPoint.y;
+    }
 
     electronAPI.getLatestClick(selectedSource.display_id, clickState.lastClickTimestamp).then((clickInfo) => {
       if (!clickState.checkedCapability) {
@@ -374,6 +383,36 @@ function drawCursorGlow(cursorX, cursorY) {
   ctx.fill();
 }
 
+function getPenFollowTarget(cursorX, cursorY) {
+  const sw = rawVideo.videoWidth || previewCanvas.width || 1;
+  const sh = rawVideo.videoHeight || previewCanvas.height || 1;
+  const zoom = clamp(cameraState.zoom, 1, cameraState.maxZoom);
+  const cropW = sw / zoom;
+  const cropH = sh / zoom;
+  const deadzoneHalfW = cropW * PEN_FOLLOW_DEADZONE_RATIO_X;
+  const deadzoneHalfH = cropH * PEN_FOLLOW_DEADZONE_RATIO_Y;
+
+  let targetX = cameraState.viewportX;
+  let targetY = cameraState.viewportY;
+
+  if (cursorX < targetX - deadzoneHalfW) {
+    targetX = cursorX + deadzoneHalfW;
+  } else if (cursorX > targetX + deadzoneHalfW) {
+    targetX = cursorX - deadzoneHalfW;
+  }
+
+  if (cursorY < targetY - deadzoneHalfH) {
+    targetY = cursorY + deadzoneHalfH;
+  } else if (cursorY > targetY + deadzoneHalfH) {
+    targetY = cursorY - deadzoneHalfH;
+  }
+
+  return {
+    x: clamp(targetX, cropW / 2, sw - cropW / 2),
+    y: clamp(targetY, cropH / 2, sh - cropH / 2)
+  };
+}
+
 function drawLoop() {
   if (!sourceStream) {
     return;
@@ -387,13 +426,16 @@ function drawLoop() {
   }
 
   const smooth = cameraState.smoothing;
+  const followSmooth = annotationState.enabled
+    ? smooth * PEN_DRAW_FOLLOW_SLOWDOWN
+    : smooth;
   const zoomSmooth = cameraState.targetZoom > cameraState.zoom
     ? smooth * CLICK_ZOOM_IN_SLOWDOWN
     : smooth;
 
   cameraState.zoom += (cameraState.targetZoom - cameraState.zoom) * zoomSmooth;
-  cameraState.viewportX += (cameraState.targetX - cameraState.viewportX) * smooth;
-  cameraState.viewportY += (cameraState.targetY - cameraState.viewportY) * smooth;
+  cameraState.viewportX += (cameraState.targetX - cameraState.viewportX) * followSmooth;
+  cameraState.viewportY += (cameraState.targetY - cameraState.viewportY) * followSmooth;
 
   glowState.x += (cameraState.cursorX - glowState.x) * glowState.lag;
   glowState.y += (cameraState.cursorY - glowState.y) * glowState.lag;
