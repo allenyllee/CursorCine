@@ -9,6 +9,7 @@ const previewCanvas = document.getElementById('previewCanvas');
 const rawVideo = document.getElementById('rawVideo');
 const timelinePanel = document.getElementById('timelinePanel');
 const timeInfo = document.getElementById('timeInfo');
+const clipDurationInfo = document.getElementById('clipDurationInfo');
 const playheadInput = document.getElementById('playheadInput');
 const trimStartInput = document.getElementById('trimStartInput');
 const trimEndInput = document.getElementById('trimEndInput');
@@ -844,11 +845,13 @@ function updateEditorButtons() {
 function updateTimelineInputs() {
   if (!editorState.active || editorState.duration <= 0) {
     timeInfo.textContent = '00:00.0 / 00:00.0';
+    clipDurationInfo.textContent = '剪輯長度: 00:00.0';
     return;
   }
 
   const duration = Math.max(0.1, toFiniteNumber(editorState.duration, 0.1));
   const currentTime = clamp(toFiniteNumber(rawVideo.currentTime, 0), 0, duration);
+  const clipDuration = Math.max(0, toFiniteNumber(editorState.trimEnd, 0) - toFiniteNumber(editorState.trimStart, 0));
   const normalizedPlayhead = Math.round((currentTime / duration) * 1000);
   const normalizedStart = Math.round((editorState.trimStart / duration) * 1000);
   const normalizedEnd = Math.round((editorState.trimEnd / duration) * 1000);
@@ -862,6 +865,7 @@ function updateTimelineInputs() {
     formatClock(editorState.trimEnd) +
     ' / ' +
     formatClock(duration);
+  clipDurationInfo.textContent = '剪輯長度: ' + formatClock(clipDuration);
 }
 
 function enforceTrimBounds() {

@@ -230,9 +230,20 @@ button:disabled {
   font-size: 0.95rem;
 }
 
+.timeline-meta {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
 #timeInfo {
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+#clipDurationInfo {
+  color: #b2e8d0;
+  font-size: 0.82rem;
 }
 
 .timeline-row {
