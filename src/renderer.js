@@ -42,6 +42,7 @@ const DESKTOP_GAIN = 3.0;
 const MIC_GAIN = 5.5;
 const MASTER_GAIN = 1.8;
 const CLICK_ZOOM_HOLD_MS = 1800;
+const DOUBLE_CLICK_ZOOM_HOLD_MS = 3000;
 const CLICK_ZOOM_IN_SLOWDOWN = 0.55;
 const PEN_HOLD_ZOOM_RATIO = 0.45;
 const PEN_HOLD_DELAY_MS = 180;
@@ -50,6 +51,7 @@ const PEN_FOLLOW_DEADZONE_RATIO_X = 0.32;
 const PEN_FOLLOW_DEADZONE_RATIO_Y = 0.28;
 const DOUBLE_CLICK_MAX_WINDOW_MS = 320;
 const DOUBLE_CLICK_MARKER_MS = 700;
+const DOUBLE_CLICK_UNLOCK_DISTANCE_PX = 20;
 const DEFAULT_CURSOR_GLOW_RADIUS = 22;
 const DEFAULT_CURSOR_GLOW_CORE_RADIUS = 5;
 const DEFAULT_CURSOR_GLOW_OPACITY = 0.9;
@@ -92,7 +94,10 @@ let clickState = {
   lastClickTimestamp: 0,
   holdDelayUntil: 0,
   lastZoomTriggerTs: 0,
-  forceMaxUntil: 0
+  forceMaxUntil: 0,
+  doubleClickLocked: false,
+  lockedX: 0,
+  lockedY: 0
 };
 
 const doubleClickMarkerState = {
@@ -225,11 +230,11 @@ function mapPointToVideo(point) {
   };
 }
 
-function triggerTemporaryZoom(x, y, targetZoom = cameraState.maxZoom) {
+function triggerTemporaryZoom(x, y, targetZoom = cameraState.maxZoom, holdMs = CLICK_ZOOM_HOLD_MS) {
   cameraState.targetX = x;
   cameraState.targetY = y;
   cameraState.targetZoom = targetZoom;
-  cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
+  cameraState.zoomHoldUntil = performance.now() + holdMs;
 }
 
 function triggerDoubleClickMarker(x, y) {
@@ -316,7 +321,11 @@ function updateCursorFromMain() {
     const cursorPoint = mapPointToVideo(p);
     cameraState.cursorX = cursorPoint.x;
     cameraState.cursorY = cursorPoint.y;
-    if (annotationState.enabled) {
+    if (clickState.doubleClickLocked) {
+      cameraState.targetX = clickState.lockedX;
+      cameraState.targetY = clickState.lockedY;
+      cameraState.targetZoom = cameraState.maxZoom;
+    } else if (annotationState.enabled) {
       const penTarget = getPenFollowTarget(cursorPoint.x, cursorPoint.y);
       cameraState.targetX = penTarget.x;
       cameraState.targetY = penTarget.y;
@@ -335,12 +344,28 @@ function updateCursorFromMain() {
         const clickPoint = mapPointToVideo(clickInfo);
         const clickTs = Number(clickInfo.timestamp || Date.now());
         const isDoubleClick = clickState.lastZoomTriggerTs > 0 && (clickTs - clickState.lastZoomTriggerTs) <= DOUBLE_CLICK_MAX_WINDOW_MS;
+        const lockDistance = Math.hypot(clickPoint.x - clickState.lockedX, clickPoint.y - clickState.lockedY);
+        const clickedOtherPosition = lockDistance >= DOUBLE_CLICK_UNLOCK_DISTANCE_PX;
 
         clickState.lastZoomTriggerTs = clickTs;
         clickState.holdDelayUntil = performance.now() + PEN_HOLD_DELAY_MS;
-        clickState.forceMaxUntil = isDoubleClick ? performance.now() + CLICK_ZOOM_HOLD_MS : 0;
+        clickState.forceMaxUntil = isDoubleClick ? performance.now() + DOUBLE_CLICK_ZOOM_HOLD_MS : 0;
 
-        triggerTemporaryZoom(clickPoint.x, clickPoint.y, isDoubleClick ? cameraState.maxZoom : getPenHoldZoom());
+        if (isDoubleClick) {
+          clickState.doubleClickLocked = true;
+          clickState.lockedX = clickPoint.x;
+          clickState.lockedY = clickPoint.y;
+          triggerTemporaryZoom(clickPoint.x, clickPoint.y, cameraState.maxZoom, DOUBLE_CLICK_ZOOM_HOLD_MS);
+        } else {
+          if (clickState.doubleClickLocked && clickedOtherPosition) {
+            clickState.doubleClickLocked = false;
+            cameraState.zoomHoldUntil = 0;
+            cameraState.targetZoom = 1;
+          }
+          if (!clickState.doubleClickLocked) {
+            triggerTemporaryZoom(clickPoint.x, clickPoint.y, getPenHoldZoom(), CLICK_ZOOM_HOLD_MS);
+          }
+        }
         if (isDoubleClick) {
           electronAPI.overlayDoubleClickMarker({ x: clickInfo.x, y: clickInfo.y }).catch(() => {
             triggerDoubleClickMarker(clickPoint.x, clickPoint.y);
@@ -348,7 +373,7 @@ function updateCursorFromMain() {
         }
       }
 
-      if (clickInfo && clickInfo.mouseDown && performance.now() >= clickState.holdDelayUntil && performance.now() >= clickState.forceMaxUntil) {
+      if (clickInfo && !clickState.doubleClickLocked && clickInfo.mouseDown && performance.now() >= clickState.holdDelayUntil && performance.now() >= clickState.forceMaxUntil) {
         cameraState.targetZoom = getPenHoldZoom();
         cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
       } else if (clickInfo && !clickInfo.mouseDown) {
@@ -421,7 +446,7 @@ function drawLoop() {
   resizeCanvasToSource();
 
   const now = performance.now();
-  if (now > cameraState.zoomHoldUntil) {
+  if (!clickState.doubleClickLocked && now > cameraState.zoomHoldUntil) {
     cameraState.targetZoom = 1;
   }
 
@@ -770,7 +795,10 @@ async function startRecording() {
     lastClickTimestamp: 0,
     holdDelayUntil: 0,
     lastZoomTriggerTs: 0,
-    forceMaxUntil: 0
+    forceMaxUntil: 0,
+    doubleClickLocked: false,
+    lockedX: 0,
+    lockedY: 0
   };
 
   doubleClickMarkerState.activeUntil = 0;
@@ -892,6 +920,9 @@ function stopRecording() {
 
 async function setPenMode(enabled) {
   annotationState.enabled = enabled;
+  if (!enabled) {
+    clickState.doubleClickLocked = false;
+  }
   penToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
 
   try {
