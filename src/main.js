@@ -666,6 +666,40 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('video:save-file', async (_event, payload) => {
+    const bytes = payload && payload.bytes ? payload.bytes : null;
+    if (!bytes) {
+      return {
+        ok: false,
+        reason: 'INVALID_INPUT',
+        message: '缺少影片資料。'
+      };
+    }
+
+    const ext = String(payload.ext || 'webm').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'webm';
+    const safeBaseName = String(payload.baseName || 'cursorcine-export').replace(/[^a-zA-Z0-9-_]/g, '_');
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: '儲存影片',
+      defaultPath: `${safeBaseName}.${ext}`,
+      filters: [{ name: `${ext.toUpperCase()} Video`, extensions: [ext] }]
+    });
+
+    if (canceled || !filePath) {
+      return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+    }
+
+    try {
+      await fs.writeFile(filePath, Buffer.from(bytes));
+      return { ok: true, path: filePath };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WRITE_FAILED',
+        message: error.message || '儲存失敗。'
+      };
+    }
+  });
+
   createWindow();
 
   app.on('activate', () => {

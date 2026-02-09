@@ -191,9 +191,8 @@ button:disabled {
 
 .preview {
   position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  grid-template-rows: 1fr auto;
   overflow: hidden;
 }
 
@@ -202,6 +201,68 @@ button:disabled {
   height: 100%;
   object-fit: contain;
   background: #02060f;
+}
+
+#rawVideo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #02060f;
+}
+
+.timeline-panel {
+  border-top: 1px solid #30486d;
+  background: color-mix(in srgb, #0f1b30 92%, black 8%);
+  padding: 12px 14px 14px;
+  display: grid;
+  gap: 9px;
+}
+
+.timeline-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.timeline-head h2 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+#timeInfo {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.timeline-row {
+  display: grid;
+  gap: 4px;
+}
+
+.timeline-row label {
+  font-size: 0.82rem;
+  color: #b8c5e6;
+}
+
+.timeline-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#saveClipBtn {
+  background: linear-gradient(120deg, #a4f4c7, #58d89b);
+  color: #0d2f20;
+  border: none;
+  font-weight: 700;
+}
+
+#discardClipBtn {
+  background: linear-gradient(120deg, #ffdfac, #ffc075);
+  color: #432b0d;
+  border: none;
+  font-weight: 700;
 }
 
 @media (max-width: 960px) {
@@ -222,6 +283,10 @@ button:disabled {
 
   .controls {
     overflow: visible;
+  }
+
+  .timeline-actions {
+    grid-template-columns: 1fr 1fr;
   }
 }
 

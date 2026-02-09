@@ -14,7 +14,7 @@
 
         <div class="buttons buttons-sticky">
           <button id="recordBtn">開始錄影</button>
-          <button id="stopBtn" disabled>停止並下載</button>
+          <button id="stopBtn" disabled>停止錄製</button>
           <button id="refreshBtn">重新整理來源</button>
         </div>
 
@@ -144,6 +144,30 @@
       <section class="preview">
         <video id="rawVideo" playsinline muted hidden></video>
         <canvas id="previewCanvas"></canvas>
+        <section id="timelinePanel" class="timeline-panel" hidden>
+          <div class="timeline-head">
+            <h2>剪輯時間軸</h2>
+            <span id="timeInfo">00:00.0 / 00:00.0</span>
+          </div>
+          <div class="timeline-row">
+            <label for="playheadInput">播放位置</label>
+            <input id="playheadInput" type="range" min="0" max="1000" step="1" value="0" />
+          </div>
+          <div class="timeline-row">
+            <label for="trimStartInput">剪輯起點</label>
+            <input id="trimStartInput" type="range" min="0" max="1000" step="1" value="0" />
+          </div>
+          <div class="timeline-row">
+            <label for="trimEndInput">剪輯終點</label>
+            <input id="trimEndInput" type="range" min="0" max="1000" step="1" value="1000" />
+          </div>
+          <div class="timeline-actions">
+            <button id="playPauseBtn" type="button">播放</button>
+            <button id="previewRangeBtn" type="button">回放剪輯區段</button>
+            <button id="saveClipBtn" type="button">儲存定稿</button>
+            <button id="discardClipBtn" type="button">取消剪輯</button>
+          </div>
+        </section>
       </section>
     </main>
 

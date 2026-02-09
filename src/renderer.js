@@ -7,6 +7,15 @@ const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
 const previewCanvas = document.getElementById('previewCanvas');
 const rawVideo = document.getElementById('rawVideo');
+const timelinePanel = document.getElementById('timelinePanel');
+const timeInfo = document.getElementById('timeInfo');
+const playheadInput = document.getElementById('playheadInput');
+const trimStartInput = document.getElementById('trimStartInput');
+const trimEndInput = document.getElementById('trimEndInput');
+const playPauseBtn = document.getElementById('playPauseBtn');
+const previewRangeBtn = document.getElementById('previewRangeBtn');
+const saveClipBtn = document.getElementById('saveClipBtn');
+const discardClipBtn = document.getElementById('discardClipBtn');
 const zoomInput = document.getElementById('zoomInput');
 const smoothInput = document.getElementById('smoothInput');
 const micInput = document.getElementById('micInput');
@@ -69,6 +78,7 @@ const QUALITY_PRESETS = {
   high: { label: '高畫質', videoBitrate: 35000000, audioBitrate: 384000 }
 };
 const DEFAULT_QUALITY_PRESET = 'balanced';
+const MIN_TRIM_GAP_SECONDS = 0.1;
 
 let sources = [];
 let sourceStream;
@@ -80,6 +90,7 @@ let drawTimer = 0;
 const DRAW_INTERVAL_MS = 16;
 let cursorTimer = 0;
 let selectedSource;
+let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 
 let recordingMeta = {
   outputExt: 'webm',
@@ -138,6 +149,16 @@ const viewState = {
   outputH: 1
 };
 
+const editorState = {
+  active: false,
+  exportBusy: false,
+  blob: null,
+  sourceUrl: '',
+  duration: 0,
+  trimStart: 0,
+  trimEnd: 0
+};
+
 let audioContext;
 let mixedAudioDestination;
 let desktopAudioNode;
@@ -167,6 +188,69 @@ function setStatus(message) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function getMediaDuration(video, fallback = 0.1) {
+  const direct = Number(video && video.duration);
+  if (Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+
+  if (video && video.seekable && video.seekable.length > 0) {
+    const end = Number(video.seekable.end(video.seekable.length - 1));
+    if (Number.isFinite(end) && end > 0) {
+      return end;
+    }
+  }
+
+  return fallback;
+}
+
+function formatClock(seconds) {
+  const safe = Math.max(0, toFiniteNumber(seconds, 0));
+  const mins = Math.floor(safe / 60);
+  const secs = Math.floor(safe % 60);
+  const tenths = Math.floor((safe - Math.floor(safe)) * 10);
+  return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0') + '.' + String(tenths);
+}
+
+function waitForEvent(target, eventName) {
+  return new Promise((resolve, reject) => {
+    const onDone = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Video load failed'));
+    };
+    const cleanup = () => {
+      target.removeEventListener(eventName, onDone);
+      target.removeEventListener('error', onError);
+    };
+
+    target.addEventListener(eventName, onDone, { once: true });
+    target.addEventListener('error', onError, { once: true });
+  });
+}
+
+async function seekVideo(video, time) {
+  const duration = getMediaDuration(video, 0);
+  const maxTime = Math.max(0, duration);
+  const targetTime = clamp(Math.max(0, toFiniteNumber(time, 0)), 0, maxTime > 0 ? maxTime : Number.MAX_SAFE_INTEGER);
+  const currentTime = Math.max(0, toFiniteNumber(video.currentTime, 0));
+
+  if (Math.abs(currentTime - targetTime) < 0.01) {
+    return;
+  }
+  const seekPromise = waitForEvent(video, 'seeked');
+  video.currentTime = targetTime;
+  await seekPromise;
 }
 
 function getQualityPreset() {
@@ -735,27 +819,83 @@ async function buildMixedAudioTrack() {
   return mixedAudioDestination.stream.getAudioTracks()[0];
 }
 
-function downloadBlob(blob, ext) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+function setEditorVisible(visible) {
+  timelinePanel.hidden = !visible;
+  previewCanvas.hidden = visible;
+  rawVideo.hidden = !visible;
+}
+
+function updateEditorButtons() {
+  const busy = editorState.exportBusy;
+  const playing = !rawVideo.paused && !rawVideo.ended;
+  playPauseBtn.textContent = playing ? '暫停' : '播放';
+  playPauseBtn.disabled = busy || !editorState.active;
+  previewRangeBtn.disabled = busy || !editorState.active;
+  saveClipBtn.disabled = busy || !editorState.active;
+  discardClipBtn.disabled = busy || !editorState.active;
+}
+
+function updateTimelineInputs() {
+  if (!editorState.active || editorState.duration <= 0) {
+    timeInfo.textContent = '00:00.0 / 00:00.0';
+    return;
+  }
+
+  const duration = Math.max(0.1, toFiniteNumber(editorState.duration, 0.1));
+  const currentTime = clamp(toFiniteNumber(rawVideo.currentTime, 0), 0, duration);
+  const normalizedPlayhead = Math.round((currentTime / duration) * 1000);
+  const normalizedStart = Math.round((editorState.trimStart / duration) * 1000);
+  const normalizedEnd = Math.round((editorState.trimEnd / duration) * 1000);
+
+  playheadInput.value = String(clamp(normalizedPlayhead, 0, 1000));
+  trimStartInput.value = String(clamp(normalizedStart, 0, 1000));
+  trimEndInput.value = String(clamp(normalizedEnd, 0, 1000));
+  timeInfo.textContent =
+    formatClock(editorState.trimStart) +
+    ' - ' +
+    formatClock(editorState.trimEnd) +
+    ' / ' +
+    formatClock(duration);
+}
+
+function enforceTrimBounds() {
+  const duration = Math.max(0.1, toFiniteNumber(editorState.duration, 0.1));
+  const currentTime = Math.max(0, toFiniteNumber(rawVideo.currentTime, 0));
+  const minGap = Math.min(MIN_TRIM_GAP_SECONDS, duration);
+  editorState.trimStart = clamp(editorState.trimStart, 0, Math.max(0, duration - minGap));
+  editorState.trimEnd = clamp(editorState.trimEnd, minGap, duration);
+
+  if (editorState.trimEnd - editorState.trimStart < minGap) {
+    if (currentTime <= editorState.trimStart) {
+      editorState.trimEnd = clamp(editorState.trimStart + minGap, minGap, duration);
+    } else {
+      editorState.trimStart = clamp(editorState.trimEnd - minGap, 0, Math.max(0, duration - minGap));
+    }
+  }
+}
+
+async function saveBlobToDisk(blob, ext) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  a.href = url;
-  a.download = `cursorcine-${timestamp}.${ext}`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const result = await electronAPI.saveVideoFile(bytes, `cursorcine-${timestamp}`, ext);
+  if (!result.ok) {
+    if (result.reason === 'CANCELED') {
+      setStatus('已取消儲存');
+      return;
+    }
+    throw new Error(result.message || '儲存失敗');
+  }
 }
 
 async function exportRecording(blob) {
   if (recordingMeta.requestedFormat === 'mp4' && recordingMeta.fallbackFromMp4) {
-    setStatus('錄影已停止，正在用 ffmpeg 轉為 MP4...');
+    setStatus('正在輸出剪輯檔，並用 ffmpeg 轉為 MP4...');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const result = await electronAPI.convertWebmToMp4(bytes, `cursorcine-${timestamp}`);
 
     if (result.ok) {
-      setStatus('錄影已停止，MP4 轉檔完成');
+      setStatus('儲存完成（MP4）');
       return;
     }
 
@@ -764,13 +904,171 @@ async function exportRecording(blob) {
       return;
     }
 
-    downloadBlob(blob, 'webm');
-    setStatus(`MP4 轉檔失敗，已改下載 WebM: ${result.message}`);
+    await saveBlobToDisk(blob, 'webm');
+    setStatus(`MP4 轉檔失敗，已改存 WebM: ${result.message}`);
     return;
   }
 
-  downloadBlob(blob, recordingMeta.outputExt);
-  setStatus('錄影已停止，檔案已下載');
+  await saveBlobToDisk(blob, recordingMeta.outputExt);
+  setStatus(`儲存完成（${recordingMeta.outputExt.toUpperCase()}）`);
+}
+
+function clearEditorState() {
+  if (editorState.sourceUrl) {
+    URL.revokeObjectURL(editorState.sourceUrl);
+  }
+  editorState.active = false;
+  editorState.exportBusy = false;
+  editorState.blob = null;
+  editorState.sourceUrl = '';
+  editorState.duration = 0;
+  editorState.trimStart = 0;
+  editorState.trimEnd = 0;
+  rawVideo.pause();
+  rawVideo.removeAttribute('src');
+  rawVideo.load();
+  setEditorVisible(false);
+}
+
+async function enterEditorMode(blob) {
+  clearEditorState();
+  editorState.blob = blob;
+  editorState.sourceUrl = URL.createObjectURL(blob);
+  editorState.active = true;
+
+  rawVideo.srcObject = null;
+  rawVideo.muted = false;
+  rawVideo.controls = false;
+  rawVideo.src = editorState.sourceUrl;
+  await waitForEvent(rawVideo, 'loadedmetadata');
+
+  editorState.duration = getMediaDuration(rawVideo, 0.1);
+  editorState.trimStart = 0;
+  editorState.trimEnd = editorState.duration;
+  await seekVideo(rawVideo, 0);
+
+  setEditorVisible(true);
+  updateTimelineInputs();
+  updateEditorButtons();
+  setStatus('錄製完成：請在下方時間軸剪輯並回放，定稿後按「儲存定稿」。');
+}
+
+function stopEditorPlayback() {
+  if (!editorState.active) {
+    return;
+  }
+  rawVideo.pause();
+  updateEditorButtons();
+}
+
+async function playEditorSegment(fromTrimStart) {
+  if (!editorState.active) {
+    return;
+  }
+  enforceTrimBounds();
+  const currentTime = toFiniteNumber(rawVideo.currentTime, editorState.trimStart);
+  const start = fromTrimStart ? editorState.trimStart : clamp(currentTime, editorState.trimStart, editorState.trimEnd);
+  await seekVideo(rawVideo, start);
+  await rawVideo.play();
+  updateEditorButtons();
+}
+
+async function renderTrimmedBlob() {
+  const source = document.createElement('video');
+  source.src = editorState.sourceUrl;
+  source.muted = true;
+  source.playsInline = true;
+  source.preload = 'auto';
+  await waitForEvent(source, 'loadedmetadata');
+
+  const width = source.videoWidth || previewCanvas.width || 1920;
+  const height = source.videoHeight || previewCanvas.height || 1080;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const renderCtx = canvas.getContext('2d', { alpha: false });
+  const captureStream = canvas.captureStream(60);
+  const sourceStream = source.captureStream();
+  const sourceAudioTrack = sourceStream.getAudioTracks()[0];
+  if (sourceAudioTrack) {
+    captureStream.addTrack(sourceAudioTrack);
+  }
+
+  const recorderConfig = pickRecorderConfig(recordingMeta.requestedFormat);
+  const recorder = createMediaRecorder(captureStream, recorderConfig, recordingQualityPreset);
+  const outputMimeType = recorderConfig.mimeType || (recorderConfig.ext === 'mp4' ? 'video/mp4' : 'video/webm');
+  const recordedChunks = [];
+
+  recorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      recordedChunks.push(event.data);
+    }
+  };
+
+  const completed = new Promise((resolve) => {
+    recorder.onstop = () => resolve();
+  });
+
+  await seekVideo(source, editorState.trimStart);
+  recorder.start(150);
+  await source.play();
+
+  const drawFrame = () => {
+    renderCtx.drawImage(source, 0, 0, width, height);
+    if (source.currentTime >= editorState.trimEnd || source.ended) {
+      source.pause();
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+      return;
+    }
+    requestAnimationFrame(drawFrame);
+  };
+  drawFrame();
+
+  await completed;
+  stopMediaTracks(captureStream);
+  stopMediaTracks(sourceStream);
+
+  return {
+    blob: new Blob(recordedChunks, { type: outputMimeType }),
+    ext: recorderConfig.ext
+  };
+}
+
+async function saveEditedClip() {
+  if (!editorState.active || editorState.exportBusy) {
+    return;
+  }
+  editorState.exportBusy = true;
+  updateEditorButtons();
+
+  try {
+    stopEditorPlayback();
+    setStatus('正在輸出剪輯片段...');
+    const rendered = await renderTrimmedBlob();
+    if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
+      recordingMeta.fallbackFromMp4 = true;
+      recordingMeta.outputExt = rendered.ext;
+      recordingMeta.outputMimeType = rendered.blob.type || 'video/webm';
+    }
+    await exportRecording(rendered.blob);
+  } catch (error) {
+    console.error(error);
+    setStatus(`輸出失敗: ${error.message}`);
+  } finally {
+    editorState.exportBusy = false;
+    updateEditorButtons();
+  }
+}
+
+function timelineValueToTime(value) {
+  if (!editorState.active || editorState.duration <= 0) {
+    return 0;
+  }
+  const normalized = clamp(Number(value) || 0, 0, 1000) / 1000;
+  const duration = Math.max(0.1, toFiniteNumber(editorState.duration, 0.1));
+  return normalized * duration;
 }
 
 function syncPenStyleToOverlay() {
@@ -781,6 +1079,10 @@ function syncPenStyleToOverlay() {
 }
 
 async function startRecording() {
+  if (editorState.active) {
+    clearEditorState();
+  }
+
   const sourceId = sourceSelect.value;
   selectedSource = sources.find((s) => s.id === sourceId);
 
@@ -832,6 +1134,7 @@ async function startRecording() {
   chunks = [];
   const requestedFormat = formatSelect.value;
   const qualityPreset = getQualityPreset();
+  recordingQualityPreset = qualityPreset;
   const recorderConfig = pickRecorderConfig(requestedFormat);
   recordingMeta = {
     outputExt: recorderConfig.ext,
@@ -850,7 +1153,7 @@ async function startRecording() {
 
   mediaRecorder.onstop = async () => {
     const blob = new Blob(chunks, { type: recordingMeta.outputMimeType });
-    await exportRecording(blob);
+    await enterEditorMode(blob);
   };
 
   mediaRecorder.start();
@@ -890,6 +1193,7 @@ async function startRecording() {
 
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    setStatus('錄製停止中，正在載入剪輯時間軸...');
     mediaRecorder.stop();
   }
 
@@ -936,6 +1240,92 @@ async function setPenMode(enabled) {
 
   penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）' : '畫筆模式: 關';
 }
+
+playheadInput.addEventListener('input', () => {
+  if (!editorState.active) {
+    return;
+  }
+  const target = timelineValueToTime(playheadInput.value);
+  rawVideo.currentTime = clamp(target, editorState.trimStart, editorState.trimEnd);
+  updateTimelineInputs();
+});
+
+trimStartInput.addEventListener('input', () => {
+  if (!editorState.active) {
+    return;
+  }
+  editorState.trimStart = timelineValueToTime(trimStartInput.value);
+  enforceTrimBounds();
+  if (rawVideo.currentTime < editorState.trimStart) {
+    rawVideo.currentTime = editorState.trimStart;
+  }
+  updateTimelineInputs();
+});
+
+trimEndInput.addEventListener('input', () => {
+  if (!editorState.active) {
+    return;
+  }
+  editorState.trimEnd = timelineValueToTime(trimEndInput.value);
+  enforceTrimBounds();
+  if (rawVideo.currentTime > editorState.trimEnd) {
+    rawVideo.currentTime = editorState.trimEnd;
+  }
+  updateTimelineInputs();
+});
+
+rawVideo.addEventListener('timeupdate', () => {
+  if (!editorState.active) {
+    return;
+  }
+  if (rawVideo.currentTime >= editorState.trimEnd) {
+    rawVideo.pause();
+    rawVideo.currentTime = editorState.trimEnd;
+  }
+  updateTimelineInputs();
+  updateEditorButtons();
+});
+
+rawVideo.addEventListener('play', updateEditorButtons);
+rawVideo.addEventListener('pause', updateEditorButtons);
+rawVideo.addEventListener('ended', updateEditorButtons);
+
+playPauseBtn.addEventListener('click', () => {
+  if (!editorState.active || editorState.exportBusy) {
+    return;
+  }
+  if (rawVideo.paused || rawVideo.ended) {
+    playEditorSegment(false).catch((error) => {
+      console.error(error);
+      setStatus(`回放失敗: ${error.message}`);
+    });
+    return;
+  }
+  stopEditorPlayback();
+});
+
+previewRangeBtn.addEventListener('click', () => {
+  if (!editorState.active || editorState.exportBusy) {
+    return;
+  }
+  playEditorSegment(true).catch((error) => {
+    console.error(error);
+    setStatus(`回放失敗: ${error.message}`);
+  });
+});
+
+saveClipBtn.addEventListener('click', () => {
+  saveEditedClip().catch((error) => {
+    console.error(error);
+    setStatus(`儲存失敗: ${error.message}`);
+  });
+});
+
+discardClipBtn.addEventListener('click', () => {
+  stopEditorPlayback();
+  clearEditorState();
+  setStatus('已取消剪輯，請重新錄影。');
+});
 
 zoomInput.addEventListener('input', () => {
   cameraState.maxZoom = Number(zoomInput.value);
@@ -1020,6 +1410,8 @@ recordBtn.addEventListener('click', () => {
 });
 stopBtn.addEventListener('click', stopRecording);
 
+setEditorVisible(false);
+updateEditorButtons();
 setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);

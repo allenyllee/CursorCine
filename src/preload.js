@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLatestClick: (displayId, lastSeenTimestamp) => ipcRenderer.invoke('click:get-latest', displayId, lastSeenTimestamp),
   getDesktopSources: () => ipcRenderer.invoke('desktop-sources:get'),
   convertWebmToMp4: (bytes, baseName) => ipcRenderer.invoke('video:convert-webm-to-mp4', { bytes, baseName }),
+  saveVideoFile: (bytes, baseName, ext) => ipcRenderer.invoke('video:save-file', { bytes, baseName, ext }),
   overlayCreate: (displayId) => ipcRenderer.invoke('overlay:create', displayId),
   overlayDestroy: () => ipcRenderer.invoke('overlay:destroy'),
   overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),
