@@ -20,6 +20,7 @@ const discardClipBtn = document.getElementById('discardClipBtn');
 const exportDebugRoute = document.getElementById('exportDebugRoute');
 const exportDebugCode = document.getElementById('exportDebugCode');
 const exportDebugMessage = document.getElementById('exportDebugMessage');
+const exportDebugTrace = document.getElementById('exportDebugTrace');
 const zoomInput = document.getElementById('zoomInput');
 const smoothInput = document.getElementById('smoothInput');
 const micInput = document.getElementById('micInput');
@@ -98,6 +99,7 @@ let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 let recordingStartedAtMs = 0;
 let recordingDurationEstimateSec = 0;
+let builtinAudioCompatibility = 'unknown';
 
 let recordingMeta = {
   outputExt: 'webm',
@@ -289,6 +291,25 @@ function setExportDebug(route, code, message) {
     exportDebugMessage.textContent = safeMessage;
   }
   console.info('[ExportDebug]', safeRoute, safeCode, safeMessage);
+}
+
+function resetExportTrace(message = 'Trace: 尚未輸出') {
+  if (exportDebugTrace) {
+    exportDebugTrace.textContent = message;
+  }
+}
+
+function appendExportTrace(message) {
+  const stamp = new Date().toISOString().slice(11, 23);
+  const line = '[' + stamp + '] ' + String(message || '');
+  if (exportDebugTrace) {
+    const prev = exportDebugTrace.textContent || '';
+    const merged = prev ? prev + '\n' + line : line;
+    const lines = merged.split('\n');
+    exportDebugTrace.textContent = lines.slice(-60).join('\n');
+    exportDebugTrace.scrollTop = exportDebugTrace.scrollHeight;
+  }
+  console.info('[ExportTrace]', line);
 }
 
 function getPenHoldZoom() {
@@ -707,6 +728,22 @@ function pickRecorderConfig(requestedFormat) {
   return { mimeType: '', ext: requestedFormat === 'mp4' ? 'mp4' : 'webm' };
 }
 
+function pickBuiltinRecorderConfig() {
+  const candidates = [
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
+
+  for (const mimeType of candidates) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      return { mimeType, ext: 'webm' };
+    }
+  }
+
+  return { mimeType: '', ext: 'webm' };
+}
+
 function createMediaRecorder(stream, recorderConfig, qualityPreset) {
   const videoBitrate = Number(qualityPreset.videoBitrate || 22000000);
   const audioBitrate = Number(qualityPreset.audioBitrate || 256000);
@@ -738,6 +775,25 @@ function createMediaRecorder(stream, recorderConfig, qualityPreset) {
   }
 
   throw lastError || new Error('Failed to create MediaRecorder');
+}
+
+function createBuiltinMediaRecorder(stream, recorderConfig) {
+  const optionCandidates = [];
+  if (recorderConfig && recorderConfig.mimeType) {
+    optionCandidates.push({ mimeType: recorderConfig.mimeType });
+  }
+  optionCandidates.push({});
+
+  let lastError;
+  for (const options of optionCandidates) {
+    try {
+      return new MediaRecorder(stream, options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Failed to create builtin MediaRecorder');
 }
 
 function applyQualityHints(stream) {
@@ -964,6 +1020,7 @@ function clearEditorState() {
   rawVideo.removeAttribute('src');
   rawVideo.load();
   setExportDebug('待命', '-', '尚未輸出');
+  resetExportTrace('Trace: 尚未輸出');
   setEditorVisible(false);
 }
 
@@ -988,6 +1045,7 @@ async function enterEditorMode(blob, fallbackDurationSec = 0.1) {
   updateTimelineInputs();
   updateEditorButtons();
   setExportDebug('待命', '-', '請按「儲存定稿」開始輸出');
+  resetExportTrace('Trace: 就緒，等待輸出');
   setStatus('錄製完成：請在下方時間軸剪輯並回放，定稿後按「儲存定稿」。');
 }
 
@@ -1012,83 +1070,238 @@ async function playEditorSegment(fromTrimStart) {
 }
 
 async function renderTrimmedBlob() {
-  const source = document.createElement('video');
-  source.src = editorState.sourceUrl;
-  source.muted = true;
-  source.playsInline = true;
-  source.preload = 'auto';
-  await waitForEvent(source, 'loadedmetadata');
+  const recorderConfig = pickBuiltinRecorderConfig();
+  const outputMimeType = recorderConfig.mimeType || 'video/webm';
+  const width = rawVideo.videoWidth || previewCanvas.width || 1920;
+  const height = rawVideo.videoHeight || previewCanvas.height || 1080;
+  appendExportTrace(
+    'builtin init: format=' + recordingMeta.requestedFormat +
+    ', mime=' + (recorderConfig.mimeType || 'auto') +
+    ', ext=' + recorderConfig.ext +
+    ', trim=' + editorState.trimStart.toFixed(3) + '->' + editorState.trimEnd.toFixed(3) +
+    ', size=' + width + 'x' + height
+  );
 
-  const width = source.videoWidth || previewCanvas.width || 1920;
-  const height = source.videoHeight || previewCanvas.height || 1080;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const renderCtx = canvas.getContext('2d', { alpha: false });
-  const captureStream = canvas.captureStream(60);
-  const sourceStream = source.captureStream();
-  const sourceAudioTrack = sourceStream.getAudioTracks()[0];
-  if (sourceAudioTrack) {
-    captureStream.addTrack(sourceAudioTrack);
-  }
+  async function runBuiltinCapture(mode, includeAudio) {
+    appendExportTrace('builtin[' + mode + '] start (audio=' + (includeAudio ? 'on' : 'off') + ')');
+    const source = document.createElement('video');
+    source.src = editorState.sourceUrl;
+    source.muted = true;
+    source.playsInline = true;
+    source.preload = 'auto';
+    source.style.position = 'fixed';
+    source.style.left = '-99999px';
+    source.style.top = '-99999px';
+    source.style.width = '1px';
+    source.style.height = '1px';
+    document.body.appendChild(source);
 
-  const recorderConfig = pickRecorderConfig(recordingMeta.requestedFormat);
-  const recorder = createMediaRecorder(captureStream, recorderConfig, recordingQualityPreset);
-  const outputMimeType = recorderConfig.mimeType || (recorderConfig.ext === 'mp4' ? 'video/mp4' : 'video/webm');
-  const recordedChunks = [];
-  let stopping = false;
+    let outputStream;
+    let sourceStream;
+    let recorder;
+    let pollTimer = 0;
+    let stopping = false;
+    let drawFrame = null;
+    let stopReason = 'unknown';
 
-  recorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) {
-      recordedChunks.push(event.data);
-    }
-  };
-
-  const completed = new Promise((resolve) => {
-    recorder.onstop = () => resolve();
-  });
-
-  const stopRecorderSafely = () => {
-    if (stopping || recorder.state === 'inactive') {
-      return;
-    }
-    stopping = true;
     try {
-      recorder.requestData();
-    } catch (_error) {
-    }
-    recorder.stop();
-  };
+      await waitForEvent(source, 'loadedmetadata');
+      appendExportTrace(
+        'builtin[' + mode + '] metadata: duration=' + toFiniteNumber(source.duration, 0).toFixed(3) +
+        ', readyState=' + source.readyState
+      );
+      await seekVideo(source, editorState.trimStart);
+      appendExportTrace('builtin[' + mode + '] seeked: current=' + toFiniteNumber(source.currentTime, 0).toFixed(3));
 
-  await seekVideo(source, editorState.trimStart);
-  renderCtx.drawImage(source, 0, 0, width, height);
-  recorder.start();
-  await source.play();
+      if (mode === 'canvas') {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const renderCtx = canvas.getContext('2d', { alpha: false });
+        sourceStream = source.captureStream();
+        outputStream = canvas.captureStream(60);
+        appendExportTrace(
+          'builtin[' + mode + '] tracks: source(v=' + sourceStream.getVideoTracks().length +
+          ',a=' + sourceStream.getAudioTracks().length + '), output(v=' +
+          outputStream.getVideoTracks().length + ',a=' + outputStream.getAudioTracks().length + ')'
+        );
+        const sourceAudioTrack = includeAudio ? sourceStream.getAudioTracks()[0] : null;
+        if (sourceAudioTrack && includeAudio) {
+          outputStream.addTrack(sourceAudioTrack);
+          appendExportTrace('builtin[' + mode + '] audio track bridged to output stream');
+        } else if (!includeAudio) {
+          appendExportTrace('builtin[' + mode + '] audio disabled for this attempt');
+        }
 
-  const drawFrame = () => {
-    renderCtx.drawImage(source, 0, 0, width, height);
-    if (source.currentTime >= editorState.trimEnd || source.ended) {
+        // Draw one frame before recorder starts to avoid empty first segment.
+        renderCtx.drawImage(source, 0, 0, width, height);
+
+        drawFrame = () => {
+          if (source.readyState >= 2) {
+            renderCtx.drawImage(source, 0, 0, width, height);
+          }
+        };
+      } else {
+        outputStream = source.captureStream();
+        if (!includeAudio) {
+          for (const audioTrack of outputStream.getAudioTracks()) {
+            audioTrack.stop();
+            outputStream.removeTrack(audioTrack);
+          }
+          appendExportTrace('builtin[' + mode + '] audio tracks removed for this attempt');
+        }
+        appendExportTrace(
+          'builtin[' + mode + '] direct tracks: output(v=' +
+          outputStream.getVideoTracks().length + ',a=' + outputStream.getAudioTracks().length + ')'
+        );
+      }
+
+      recorder = createBuiltinMediaRecorder(outputStream, recorderConfig);
+      appendExportTrace(
+        'builtin[' + mode + '] recorder created: mime=' + (recorder.mimeType || outputMimeType) +
+        ', state=' + recorder.state
+      );
+      const chunks = [];
+      let chunkCount = 0;
+      let totalBytes = 0;
+      recorder.ondataavailable = (event) => {
+        const size = Number(event && event.data ? event.data.size : 0);
+        chunkCount += 1;
+        totalBytes += size;
+        appendExportTrace('builtin[' + mode + '] chunk#' + chunkCount + ': ' + size + ' bytes');
+        if (size > 0) {
+          chunks.push(event.data);
+        }
+      };
+      recorder.onerror = (event) => {
+        const err = event && event.error ? event.error.message || String(event.error) : 'unknown';
+        appendExportTrace('builtin[' + mode + '] recorder error: ' + err);
+      };
+      source.addEventListener('error', () => {
+        appendExportTrace('builtin[' + mode + '] source error event');
+      });
+
+      const completed = new Promise((resolve) => {
+        recorder.onstop = () => {
+          appendExportTrace(
+            'builtin[' + mode + '] onstop: reason=' + stopReason +
+            ', chunks=' + chunkCount +
+            ', total=' + totalBytes + ' bytes'
+          );
+          resolve();
+        };
+      });
+
+      const stopRecorderSafely = () => {
+        if (stopping || recorder.state === 'inactive') {
+          return;
+        }
+        stopping = true;
+        appendExportTrace(
+          'builtin[' + mode + '] stop requested at t=' +
+          toFiniteNumber(source.currentTime, 0).toFixed(3) +
+          ', target=' + toFiniteNumber(editorState.trimEnd, 0).toFixed(3)
+        );
+        try {
+          recorder.requestData();
+          appendExportTrace('builtin[' + mode + '] requestData called');
+        } catch (_error) {
+          appendExportTrace('builtin[' + mode + '] requestData failed');
+        }
+        setTimeout(() => {
+          if (recorder.state !== 'inactive') {
+            appendExportTrace('builtin[' + mode + '] recorder.stop called');
+            recorder.stop();
+          }
+        }, 80);
+      };
+
+      recorder.start(200);
+      appendExportTrace('builtin[' + mode + '] recorder.start(200)');
+      await source.play();
+      appendExportTrace('builtin[' + mode + '] source.play ok');
+
+      pollTimer = setInterval(() => {
+        if (mode === 'canvas' && typeof drawFrame === 'function') {
+          drawFrame();
+        }
+
+        if (source.currentTime >= editorState.trimEnd || source.ended) {
+          stopReason = source.ended ? 'source-ended' : 'reach-trim-end';
+          source.pause();
+          stopRecorderSafely();
+        }
+      }, 16);
+
+      await completed;
+      clearInterval(pollTimer);
+      pollTimer = 0;
+
+      const blob = new Blob(chunks, { type: outputMimeType });
+      appendExportTrace('builtin[' + mode + '] blob size=' + blob.size + ' bytes');
+      return {
+        blob,
+        ext: recorderConfig.ext,
+        includeAudio
+      };
+    } finally {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
+      if (sourceStream) {
+        stopMediaTracks(sourceStream);
+      }
+      if (outputStream) {
+        stopMediaTracks(outputStream);
+      }
       source.pause();
-      stopRecorderSafely();
-      return;
+      source.removeAttribute('src');
+      source.load();
+      source.remove();
+      appendExportTrace('builtin[' + mode + '] cleanup done');
     }
-    requestAnimationFrame(drawFrame);
-  };
-  drawFrame();
-
-  await completed;
-  stopMediaTracks(captureStream);
-  stopMediaTracks(sourceStream);
-
-  const blob = new Blob(recordedChunks, { type: outputMimeType });
-  if (!blob || blob.size <= 0) {
-    throw new Error('剪輯輸出為空檔，請調整剪輯區段後重試。');
   }
 
-  return {
-    blob,
-    ext: recorderConfig.ext
-  };
+  const attempts = builtinAudioCompatibility === 'broken'
+    ? [
+        { mode: 'canvas', includeAudio: false },
+        { mode: 'direct', includeAudio: false }
+      ]
+    : [
+        { mode: 'canvas', includeAudio: true },
+        { mode: 'direct', includeAudio: true },
+        { mode: 'canvas', includeAudio: false },
+        { mode: 'direct', includeAudio: false }
+      ];
+
+  if (builtinAudioCompatibility === 'broken') {
+    appendExportTrace('builtin audio compatibility=broken, skip audio-on attempts');
+  }
+
+  for (const attempt of attempts) {
+    const result = await runBuiltinCapture(attempt.mode, attempt.includeAudio);
+    if (result.blob && result.blob.size > 0) {
+      if (attempt.includeAudio) {
+        builtinAudioCompatibility = 'ok';
+      } else if (builtinAudioCompatibility !== 'ok') {
+        builtinAudioCompatibility = 'broken';
+      }
+      appendExportTrace(
+        'builtin success: mode=' + attempt.mode +
+        ', audio=' + (attempt.includeAudio ? 'on' : 'off') +
+        ', bytes=' + result.blob.size
+      );
+      return result;
+    }
+    appendExportTrace(
+      'builtin attempt empty: mode=' + attempt.mode +
+      ', audio=' + (attempt.includeAudio ? 'on' : 'off')
+    );
+  }
+
+  appendExportTrace('builtin all attempts empty');
+
+  throw new Error('剪輯輸出為空檔，請調整剪輯區段後重試。');
 }
 
 async function exportTrimmedViaFfmpeg() {
@@ -1120,6 +1333,7 @@ async function exportTrimmedViaBuiltin() {
     recordingMeta.outputMimeType = rendered.blob.type || 'video/webm';
   }
   await exportRecording(rendered.blob);
+  return rendered;
 }
 
 async function saveEditedClip() {
@@ -1130,8 +1344,11 @@ async function saveEditedClip() {
   updateEditorButtons();
 
   try {
+    resetExportTrace('Trace: 開始輸出');
+    appendExportTrace('saveEditedClip start');
     stopEditorPlayback();
     enforceTrimBounds();
+    appendExportTrace('trim bounds: ' + editorState.trimStart.toFixed(3) + ' -> ' + editorState.trimEnd.toFixed(3));
     if (!Number.isFinite(editorState.trimStart) || !Number.isFinite(editorState.trimEnd) || editorState.trimEnd <= editorState.trimStart) {
       setExportDebug('參數檢查', 'INVALID_RANGE', '剪輯起訖點無效');
       throw new Error('剪輯範圍無效，請重新調整起訖點。');
@@ -1172,8 +1389,13 @@ async function saveEditedClip() {
     }
 
     try {
-      await exportTrimmedViaBuiltin();
-      setExportDebug(mode === 'builtin' ? '內建' : 'ffmpeg -> 內建', 'OK', '內建輸出完成');
+      const rendered = await exportTrimmedViaBuiltin();
+      const route = mode === 'builtin' ? '內建' : 'ffmpeg -> 內建';
+      if (rendered && rendered.includeAudio === false) {
+        setExportDebug(route, 'OK_NO_AUDIO', '內建輸出完成（已自動關閉音訊）');
+      } else {
+        setExportDebug(route, 'OK', '內建輸出完成');
+      }
     } catch (builtinError) {
       setExportDebug(mode === 'builtin' ? '內建' : 'ffmpeg -> 內建', 'BUILTIN_FAILED', builtinError.message || '內建輸出失敗');
       throw builtinError;

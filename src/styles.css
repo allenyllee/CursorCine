@@ -281,6 +281,21 @@ button:disabled {
   gap: 4px;
 }
 
+.export-debug-trace {
+  margin: 4px 0 0;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid #2e436d;
+  background: #0b1527;
+  color: #97b0df;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+}
+
 #saveClipBtn {
   background: linear-gradient(120deg, #a4f4c7, #58d89b);
   color: #0d2f20;
