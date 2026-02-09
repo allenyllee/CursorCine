@@ -46,6 +46,7 @@ textarea {
   gap: 16px;
   padding: 16px;
   height: 100vh;
+  overflow: hidden;
 }
 
 .controls,
@@ -192,9 +193,12 @@ button:disabled {
 .preview {
   position: relative;
   display: grid;
-  grid-template-rows: 1fr auto;
-  overflow: hidden;
+  grid-template-rows: minmax(320px, 1fr) auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
+  overscroll-behavior: contain;
+  padding-bottom: 18px;
 }
 
 #previewCanvas {
@@ -214,12 +218,26 @@ button:disabled {
 .timeline-panel {
   border-top: 1px solid #30486d;
   background: color-mix(in srgb, #0f1b30 92%, black 8%);
-  padding: 12px 14px 14px;
+  padding: 12px 14px 22px;
   display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 9px;
   min-height: 0;
-  max-height: min(42vh, 360px);
-  overflow-y: auto;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+.timeline-scroll {
+  min-height: auto;
+  overflow: visible;
+  display: grid;
+  gap: 9px;
+  padding-bottom: 4px;
+}
+
+.timeline-tail-space {
+  height: 44px;
 }
 
 .timeline-head {
@@ -264,10 +282,9 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  position: sticky;
-  bottom: 0;
   background: color-mix(in srgb, #0f1b30 96%, black 4%);
-  padding-top: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2b4067;
 }
 
 .export-debug {
@@ -327,7 +344,7 @@ button:disabled {
   }
 
   .controls {
-    overflow: visible;
+    overflow: auto;
   }
 
   .timeline-actions {
@@ -335,7 +352,8 @@ button:disabled {
   }
 
   .timeline-panel {
-    max-height: 52vh;
+    height: auto;
+    max-height: none;
   }
 }
 

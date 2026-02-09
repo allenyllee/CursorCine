@@ -161,29 +161,32 @@
               <span id="clipDurationInfo">剪輯長度: 00:00.0</span>
             </div>
           </div>
-          <div class="export-debug" aria-live="polite">
-            <div><strong>Debug 路徑:</strong> <span id="exportDebugRoute">待命</span></div>
-            <div><strong>Debug 錯誤碼:</strong> <span id="exportDebugCode">-</span></div>
-            <div><strong>Debug 訊息:</strong> <span id="exportDebugMessage">尚未輸出</span></div>
-            <pre id="exportDebugTrace" class="export-debug-trace">Trace: 尚未輸出</pre>
-          </div>
-          <div class="timeline-row">
-            <label for="playheadInput">播放位置</label>
-            <input id="playheadInput" type="range" min="0" max="1000" step="1" value="0" />
-          </div>
-          <div class="timeline-row">
-            <label for="trimStartInput">剪輯起點</label>
-            <input id="trimStartInput" type="range" min="0" max="1000" step="1" value="0" />
-          </div>
-          <div class="timeline-row">
-            <label for="trimEndInput">剪輯終點</label>
-            <input id="trimEndInput" type="range" min="0" max="1000" step="1" value="1000" />
-          </div>
           <div class="timeline-actions">
             <button id="playPauseBtn" type="button">播放</button>
             <button id="previewRangeBtn" type="button">回放剪輯區段</button>
             <button id="saveClipBtn" type="button">儲存定稿</button>
             <button id="discardClipBtn" type="button">取消剪輯</button>
+          </div>
+          <div class="timeline-scroll">
+            <div class="export-debug" aria-live="polite">
+              <div><strong>Debug 路徑:</strong> <span id="exportDebugRoute">待命</span></div>
+              <div><strong>Debug 錯誤碼:</strong> <span id="exportDebugCode">-</span></div>
+              <div><strong>Debug 訊息:</strong> <span id="exportDebugMessage">尚未輸出</span></div>
+              <pre id="exportDebugTrace" class="export-debug-trace">Trace: 尚未輸出</pre>
+            </div>
+            <div class="timeline-row">
+              <label for="playheadInput">播放位置</label>
+              <input id="playheadInput" type="range" min="0" max="1000" step="1" value="0" />
+            </div>
+            <div class="timeline-row">
+              <label for="trimStartInput">剪輯起點</label>
+              <input id="trimStartInput" type="range" min="0" max="1000" step="1" value="0" />
+            </div>
+            <div class="timeline-row">
+              <label for="trimEndInput">剪輯終點</label>
+              <input id="trimEndInput" type="range" min="0" max="1000" step="1" value="1000" />
+            </div>
+            <div class="timeline-tail-space" aria-hidden="true"></div>
           </div>
         </section>
       </section>
