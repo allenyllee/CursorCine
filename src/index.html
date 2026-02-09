@@ -168,12 +168,6 @@
             <button id="discardClipBtn" type="button">取消剪輯</button>
           </div>
           <div class="timeline-scroll">
-            <div class="export-debug" aria-live="polite">
-              <div><strong>Debug 路徑:</strong> <span id="exportDebugRoute">待命</span></div>
-              <div><strong>Debug 錯誤碼:</strong> <span id="exportDebugCode">-</span></div>
-              <div><strong>Debug 訊息:</strong> <span id="exportDebugMessage">尚未輸出</span></div>
-              <pre id="exportDebugTrace" class="export-debug-trace">Trace: 尚未輸出</pre>
-            </div>
             <div class="timeline-row">
               <label for="playheadInput">播放位置</label>
               <input id="playheadInput" type="range" min="0" max="1000" step="1" value="0" />
@@ -188,6 +182,15 @@
             </div>
             <div class="timeline-tail-space" aria-hidden="true"></div>
           </div>
+          <details class="export-debug-wrap">
+            <summary>Debug 詳細資訊</summary>
+            <div class="export-debug" aria-live="polite">
+              <div><strong>Debug 路徑:</strong> <span id="exportDebugRoute">待命</span></div>
+              <div><strong>Debug 錯誤碼:</strong> <span id="exportDebugCode">-</span></div>
+              <div><strong>Debug 訊息:</strong> <span id="exportDebugMessage">尚未輸出</span></div>
+              <pre id="exportDebugTrace" class="export-debug-trace">Trace: 尚未輸出</pre>
+            </div>
+          </details>
         </section>
       </section>
     </main>
