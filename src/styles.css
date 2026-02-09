@@ -15,7 +15,7 @@
 
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100vh;
   color: var(--text);
   font-family:
     "Noto Sans CJK TC",
@@ -30,6 +30,7 @@ body {
     radial-gradient(1400px 700px at 85% -10%, #1c355f 0%, transparent 50%),
     radial-gradient(1100px 600px at 10% 0%, #1a3d36 0%, transparent 45%),
     var(--bg);
+  overflow: hidden;
 }
 
 input,
@@ -44,7 +45,7 @@ textarea {
   grid-template-columns: minmax(280px, 360px) 1fr;
   gap: 16px;
   padding: 16px;
-  min-height: 100vh;
+  height: 100vh;
 }
 
 .controls,
@@ -60,6 +61,8 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 h1 {
@@ -98,6 +101,16 @@ button {
 .buttons {
   display: grid;
   gap: 8px;
+}
+
+.buttons-sticky {
+  position: sticky;
+  top: -2px;
+  z-index: 2;
+  padding: 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, #13213a 86%, transparent);
+  border: 1px solid #30486d;
 }
 
 button {
@@ -149,14 +162,23 @@ button:disabled {
 }
 
 @media (max-width: 960px) {
+  body {
+    height: auto;
+    overflow: auto;
+  }
+
   .layout {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
-    min-height: auto;
+    height: auto;
   }
 
   .preview {
     min-height: 56vh;
+  }
+
+  .controls {
+    overflow: visible;
   }
 }
 

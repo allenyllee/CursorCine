@@ -12,6 +12,14 @@
         <h1>CursorCine</h1>
         <p class="sub">Electron 桌面錄影 + 滑鼠跟隨自動 Zoom</p>
 
+        <div class="buttons buttons-sticky">
+          <button id="recordBtn">開始錄影</button>
+          <button id="stopBtn" disabled>停止並下載</button>
+          <button id="refreshBtn">重新整理來源</button>
+        </div>
+
+        <p id="status" class="status">尚未開始錄影</p>
+
         <label>
           錄製來源
           <select id="sourceSelect"></select>
@@ -111,13 +119,6 @@
           </span>
         </label>
 
-        <div class="buttons">
-          <button id="refreshBtn">重新整理來源</button>
-          <button id="recordBtn">開始錄影</button>
-          <button id="stopBtn" disabled>停止並下載</button>
-        </div>
-
-        <p id="status" class="status">尚未開始錄影</p>
       </section>
 
       <section class="preview">
