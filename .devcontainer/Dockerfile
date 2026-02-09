@@ -4,6 +4,7 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         ffmpeg \
+        gh \
         fonts-noto-cjk \
         fonts-wqy-zenhei \
         libasound2 \
