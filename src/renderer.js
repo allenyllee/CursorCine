@@ -1086,7 +1086,9 @@ async function renderTrimmedBlob() {
     appendExportTrace('builtin[' + mode + '] start (audio=' + (includeAudio ? 'on' : 'off') + ')');
     const source = document.createElement('video');
     source.src = editorState.sourceUrl;
-    source.muted = true;
+    // Some Chromium builds mute MediaElementSource output when element.muted=true.
+    source.muted = !includeAudio;
+    source.volume = includeAudio ? 1 : 0;
     source.playsInline = true;
     source.preload = 'auto';
     source.style.position = 'fixed';
@@ -1103,12 +1105,17 @@ async function renderTrimmedBlob() {
     let stopping = false;
     let drawFrame = null;
     let stopReason = 'unknown';
+    let mixAudioContext;
+    let mixAudioSourceNode;
+    let mixAudioDestination;
+    let mixAudioGainNode;
 
     try {
       await waitForEvent(source, 'loadedmetadata');
       appendExportTrace(
         'builtin[' + mode + '] metadata: duration=' + toFiniteNumber(source.duration, 0).toFixed(3) +
-        ', readyState=' + source.readyState
+        ', readyState=' + source.readyState +
+        ', muted=' + source.muted
       );
       await seekVideo(source, editorState.trimStart);
       appendExportTrace('builtin[' + mode + '] seeked: current=' + toFiniteNumber(source.currentTime, 0).toFixed(3));
@@ -1125,13 +1132,6 @@ async function renderTrimmedBlob() {
           ',a=' + sourceStream.getAudioTracks().length + '), output(v=' +
           outputStream.getVideoTracks().length + ',a=' + outputStream.getAudioTracks().length + ')'
         );
-        const sourceAudioTrack = includeAudio ? sourceStream.getAudioTracks()[0] : null;
-        if (sourceAudioTrack && includeAudio) {
-          outputStream.addTrack(sourceAudioTrack);
-          appendExportTrace('builtin[' + mode + '] audio track bridged to output stream');
-        } else if (!includeAudio) {
-          appendExportTrace('builtin[' + mode + '] audio disabled for this attempt');
-        }
 
         // Draw one frame before recorder starts to avoid empty first segment.
         renderCtx.drawImage(source, 0, 0, width, height);
@@ -1142,18 +1142,50 @@ async function renderTrimmedBlob() {
           }
         };
       } else {
-        outputStream = source.captureStream();
-        if (!includeAudio) {
-          for (const audioTrack of outputStream.getAudioTracks()) {
-            audioTrack.stop();
-            outputStream.removeTrack(audioTrack);
-          }
-          appendExportTrace('builtin[' + mode + '] audio tracks removed for this attempt');
+        sourceStream = source.captureStream();
+        outputStream = new MediaStream();
+        const sourceVideoTrack = sourceStream.getVideoTracks()[0];
+        if (sourceVideoTrack) {
+          outputStream.addTrack(sourceVideoTrack);
         }
         appendExportTrace(
-          'builtin[' + mode + '] direct tracks: output(v=' +
+          'builtin[' + mode + '] direct tracks: source(v=' + sourceStream.getVideoTracks().length +
+          ',a=' + sourceStream.getAudioTracks().length + '), output(v=' +
           outputStream.getVideoTracks().length + ',a=' + outputStream.getAudioTracks().length + ')'
         );
+      }
+
+      if (includeAudio) {
+        try {
+          mixAudioContext = new AudioContext();
+          mixAudioSourceNode = mixAudioContext.createMediaElementSource(source);
+          mixAudioDestination = mixAudioContext.createMediaStreamDestination();
+          mixAudioGainNode = mixAudioContext.createGain();
+          mixAudioGainNode.gain.value = 1;
+          mixAudioSourceNode.connect(mixAudioGainNode).connect(mixAudioDestination);
+
+          if (mixAudioContext.state === 'suspended') {
+            await mixAudioContext.resume();
+          }
+
+          const mixedAudioTrack = mixAudioDestination.stream.getAudioTracks()[0];
+          if (mixedAudioTrack) {
+            outputStream.addTrack(mixedAudioTrack);
+            appendExportTrace(
+              'builtin[' + mode + '] audio bridge via AudioContext ok: out(v=' +
+              outputStream.getVideoTracks().length + ',a=' + outputStream.getAudioTracks().length + ')'
+            );
+          } else {
+            appendExportTrace('builtin[' + mode + '] audio bridge via AudioContext has no track');
+          }
+        } catch (audioBridgeError) {
+          appendExportTrace(
+            'builtin[' + mode + '] audio bridge failed: ' +
+            (audioBridgeError && audioBridgeError.message ? audioBridgeError.message : String(audioBridgeError))
+          );
+        }
+      } else {
+        appendExportTrace('builtin[' + mode + '] audio disabled for this attempt');
       }
 
       recorder = createBuiltinMediaRecorder(outputStream, recorderConfig);
@@ -1253,6 +1285,27 @@ async function renderTrimmedBlob() {
       }
       if (outputStream) {
         stopMediaTracks(outputStream);
+      }
+      if (mixAudioSourceNode) {
+        try {
+          mixAudioSourceNode.disconnect();
+        } catch (_error) {
+        }
+      }
+      if (mixAudioGainNode) {
+        try {
+          mixAudioGainNode.disconnect();
+        } catch (_error) {
+        }
+      }
+      if (mixAudioDestination) {
+        try {
+          mixAudioDestination.disconnect();
+        } catch (_error) {
+        }
+      }
+      if (mixAudioContext) {
+        mixAudioContext.close().catch(() => {});
       }
       source.pause();
       source.removeAttribute('src');
