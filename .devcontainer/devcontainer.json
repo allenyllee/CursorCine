@@ -4,11 +4,15 @@
     "dockerfile": "Dockerfile"
   },
   "runArgs": [
-    "--ipc=host"
+    "--ipc=host",
+    "--device=/dev/snd",
+    "--group-add=audio"
   ],
   "mounts": [
     "type=bind,source=/tmp/.X11-unix,target=/tmp/.X11-unix",
     "type=bind,source=${localEnv:XDG_RUNTIME_DIR}/${localEnv:WAYLAND_DISPLAY},target=/tmp/vscode-wayland.sock",
+    "type=bind,source=${localEnv:XDG_RUNTIME_DIR}/pulse/native,target=/tmp/pulse/native",
+    "type=bind,source=${localEnv:HOME}/.config/pulse/cookie,target=/home/node/.config/pulse/cookie,readonly",
     "type=volume,source=cursorcine-codex-home,target=/home/node/.codex",
     "type=volume,source=cursorcine-vscode-server,target=/home/node/.vscode-server",
     "type=volume,source=cursorcine-cursor-server,target=/home/node/.cursor-server"
@@ -29,6 +33,7 @@
     "ELECTRON_DISABLE_SANDBOX": "1",
     "DISPLAY": "${localEnv:DISPLAY}",
     "XDG_RUNTIME_DIR": "/tmp",
-    "WAYLAND_DISPLAY": "vscode-wayland.sock"
+    "WAYLAND_DISPLAY": "vscode-wayland.sock",
+    "PULSE_SERVER": "unix:/tmp/pulse/native"
   }
 }

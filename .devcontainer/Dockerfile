@@ -5,6 +5,7 @@ RUN apt-get update \
         build-essential \
         ffmpeg \
         gh \
+        alsa-utils \
         fonts-noto-cjk \
         fonts-wqy-zenhei \
         libasound2 \
@@ -33,5 +34,6 @@ RUN apt-get update \
         libxshmfence1 \
         libxss1 \
         libxtst6 \
+        pulseaudio-utils \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*
