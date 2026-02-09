@@ -37,6 +37,15 @@
             </label>
 
             <label>
+              剪輯輸出引擎
+              <select id="exportEngineSelect">
+                <option value="auto" selected>自動（優先 ffmpeg，失敗改內建）</option>
+                <option value="ffmpeg">只用 ffmpeg</option>
+                <option value="builtin">只用內建</option>
+              </select>
+            </label>
+
+            <label>
               畫質檔位
               <select id="qualitySelect">
                 <option value="smooth">流暢（較省資源）</option>

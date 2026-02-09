@@ -21,6 +21,7 @@ const zoomInput = document.getElementById('zoomInput');
 const smoothInput = document.getElementById('smoothInput');
 const micInput = document.getElementById('micInput');
 const formatSelect = document.getElementById('formatSelect');
+const exportEngineSelect = document.getElementById('exportEngineSelect');
 const qualitySelect = document.getElementById('qualitySelect');
 const hdrCompEnable = document.getElementById('hdrCompEnable');
 const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
@@ -263,6 +264,11 @@ async function seekVideo(video, time) {
 function getQualityPreset() {
   const key = qualitySelect?.value || DEFAULT_QUALITY_PRESET;
   return QUALITY_PRESETS[key] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+}
+
+function getExportEngineMode() {
+  const mode = exportEngineSelect?.value || 'auto';
+  return mode === 'ffmpeg' || mode === 'builtin' ? mode : 'auto';
 }
 
 function getPenHoldZoom() {
@@ -1084,6 +1090,16 @@ async function exportTrimmedViaFfmpeg() {
   });
 }
 
+async function exportTrimmedViaBuiltin() {
+  const rendered = await renderTrimmedBlob();
+  if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
+    recordingMeta.fallbackFromMp4 = true;
+    recordingMeta.outputExt = rendered.ext;
+    recordingMeta.outputMimeType = rendered.blob.type || 'video/webm';
+  }
+  await exportRecording(rendered.blob);
+}
+
 async function saveEditedClip() {
   if (!editorState.active || editorState.exportBusy) {
     return;
@@ -1098,29 +1114,34 @@ async function saveEditedClip() {
       throw new Error('剪輯範圍無效，請重新調整起訖點。');
     }
 
-    setStatus('正在輸出剪輯片段（ffmpeg）...');
-    const ffmpegResult = await exportTrimmedViaFfmpeg();
-    if (ffmpegResult && ffmpegResult.ok) {
-      setStatus('儲存完成（剪輯輸出）');
-      return;
-    }
+    const mode = getExportEngineMode();
+    if (mode !== 'builtin') {
+      setStatus('正在輸出剪輯片段（ffmpeg）...');
+      const ffmpegResult = await exportTrimmedViaFfmpeg();
+      if (ffmpegResult && ffmpegResult.ok) {
+        setStatus('儲存完成（ffmpeg）');
+        return;
+      }
 
-    if (ffmpegResult && ffmpegResult.reason && ffmpegResult.reason !== 'NO_FFMPEG') {
-      if (ffmpegResult.reason === 'CANCELED') {
+      if (ffmpegResult && ffmpegResult.reason === 'CANCELED') {
         setStatus('已取消儲存');
         return;
       }
-      throw new Error(ffmpegResult.message || 'ffmpeg 剪輯失敗');
+
+      if (mode === 'ffmpeg') {
+        throw new Error((ffmpegResult && ffmpegResult.message) || 'ffmpeg 剪輯失敗');
+      }
+
+      if (ffmpegResult && ffmpegResult.reason && ffmpegResult.reason !== 'NO_FFMPEG') {
+        setStatus('ffmpeg 失敗，改用內建剪輯器輸出...');
+      } else {
+        setStatus('未偵測到 ffmpeg，改用內建剪輯器輸出...');
+      }
+    } else {
+      setStatus('正在輸出剪輯片段（內建）...');
     }
 
-    setStatus('未偵測到 ffmpeg，改用內建剪輯器輸出...');
-    const rendered = await renderTrimmedBlob();
-    if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
-      recordingMeta.fallbackFromMp4 = true;
-      recordingMeta.outputExt = rendered.ext;
-      recordingMeta.outputMimeType = rendered.blob.type || 'video/webm';
-    }
-    await exportRecording(rendered.blob);
+    await exportTrimmedViaBuiltin();
   } catch (error) {
     console.error(error);
     setStatus(`輸出失敗: ${error.message}`);
@@ -1275,6 +1296,7 @@ async function startRecording() {
   sourceSelect.disabled = true;
   micInput.disabled = true;
   formatSelect.disabled = true;
+  exportEngineSelect.disabled = true;
   qualitySelect.disabled = true;
 
   const hasSystemAudio = sourceStream.getAudioTracks().length > 0;
@@ -1318,6 +1340,7 @@ function stopRecording() {
   sourceSelect.disabled = false;
   micInput.disabled = false;
   formatSelect.disabled = false;
+  exportEngineSelect.disabled = false;
   qualitySelect.disabled = false;
 }
 
