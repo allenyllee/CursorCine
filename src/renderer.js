@@ -1004,6 +1004,7 @@ async function renderTrimmedBlob() {
   const recorder = createMediaRecorder(captureStream, recorderConfig, recordingQualityPreset);
   const outputMimeType = recorderConfig.mimeType || (recorderConfig.ext === 'mp4' ? 'video/mp4' : 'video/webm');
   const recordedChunks = [];
+  let stopping = false;
 
   recorder.ondataavailable = (event) => {
     if (event.data && event.data.size > 0) {
@@ -1015,7 +1016,20 @@ async function renderTrimmedBlob() {
     recorder.onstop = () => resolve();
   });
 
+  const stopRecorderSafely = () => {
+    if (stopping || recorder.state === 'inactive') {
+      return;
+    }
+    stopping = true;
+    try {
+      recorder.requestData();
+    } catch (_error) {
+    }
+    recorder.stop();
+  };
+
   await seekVideo(source, editorState.trimStart);
+  renderCtx.drawImage(source, 0, 0, width, height);
   recorder.start(150);
   await source.play();
 
@@ -1023,9 +1037,7 @@ async function renderTrimmedBlob() {
     renderCtx.drawImage(source, 0, 0, width, height);
     if (source.currentTime >= editorState.trimEnd || source.ended) {
       source.pause();
-      if (recorder.state !== 'inactive') {
-        recorder.stop();
-      }
+      stopRecorderSafely();
       return;
     }
     requestAnimationFrame(drawFrame);
@@ -1036,8 +1048,13 @@ async function renderTrimmedBlob() {
   stopMediaTracks(captureStream);
   stopMediaTracks(sourceStream);
 
+  const blob = new Blob(recordedChunks, { type: outputMimeType });
+  if (!blob || blob.size <= 0) {
+    throw new Error('剪輯輸出為空檔，請調整剪輯區段後重試。');
+  }
+
   return {
-    blob: new Blob(recordedChunks, { type: outputMimeType }),
+    blob,
     ext: recorderConfig.ext
   };
 }
@@ -1053,6 +1070,9 @@ async function saveEditedClip() {
     stopEditorPlayback();
     setStatus('正在輸出剪輯片段...');
     const rendered = await renderTrimmedBlob();
+    if (!rendered.blob || rendered.blob.size <= 0) {
+      throw new Error('剪輯輸出為空檔');
+    }
     if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
       recordingMeta.fallbackFromMp4 = true;
       recordingMeta.outputExt = rendered.ext;
@@ -1061,6 +1081,15 @@ async function saveEditedClip() {
     await exportRecording(rendered.blob);
   } catch (error) {
     console.error(error);
+    if (editorState.blob && editorState.blob.size > 0) {
+      setStatus('剪輯輸出失敗，改為儲存原始錄影檔...');
+      try {
+        await exportRecording(editorState.blob);
+        return;
+      } catch (fallbackError) {
+        console.error(fallbackError);
+      }
+    }
     setStatus(`輸出失敗: ${error.message}`);
   } finally {
     editorState.exportBusy = false;
