@@ -17,6 +17,9 @@ const playPauseBtn = document.getElementById('playPauseBtn');
 const previewRangeBtn = document.getElementById('previewRangeBtn');
 const saveClipBtn = document.getElementById('saveClipBtn');
 const discardClipBtn = document.getElementById('discardClipBtn');
+const exportDebugRoute = document.getElementById('exportDebugRoute');
+const exportDebugCode = document.getElementById('exportDebugCode');
+const exportDebugMessage = document.getElementById('exportDebugMessage');
 const zoomInput = document.getElementById('zoomInput');
 const smoothInput = document.getElementById('smoothInput');
 const micInput = document.getElementById('micInput');
@@ -269,6 +272,23 @@ function getQualityPreset() {
 function getExportEngineMode() {
   const mode = exportEngineSelect?.value || 'auto';
   return mode === 'ffmpeg' || mode === 'builtin' ? mode : 'auto';
+}
+
+function setExportDebug(route, code, message) {
+  const safeRoute = route || '待命';
+  const safeCode = code || '-';
+  const safeMessage = message || '尚未輸出';
+
+  if (exportDebugRoute) {
+    exportDebugRoute.textContent = safeRoute;
+  }
+  if (exportDebugCode) {
+    exportDebugCode.textContent = safeCode;
+  }
+  if (exportDebugMessage) {
+    exportDebugMessage.textContent = safeMessage;
+  }
+  console.info('[ExportDebug]', safeRoute, safeCode, safeMessage);
 }
 
 function getPenHoldZoom() {
@@ -943,6 +963,7 @@ function clearEditorState() {
   rawVideo.pause();
   rawVideo.removeAttribute('src');
   rawVideo.load();
+  setExportDebug('待命', '-', '尚未輸出');
   setEditorVisible(false);
 }
 
@@ -966,6 +987,7 @@ async function enterEditorMode(blob, fallbackDurationSec = 0.1) {
   setEditorVisible(true);
   updateTimelineInputs();
   updateEditorButtons();
+  setExportDebug('待命', '-', '請按「儲存定稿」開始輸出');
   setStatus('錄製完成：請在下方時間軸剪輯並回放，定稿後按「儲存定稿」。');
 }
 
@@ -1111,39 +1133,56 @@ async function saveEditedClip() {
     stopEditorPlayback();
     enforceTrimBounds();
     if (!Number.isFinite(editorState.trimStart) || !Number.isFinite(editorState.trimEnd) || editorState.trimEnd <= editorState.trimStart) {
+      setExportDebug('參數檢查', 'INVALID_RANGE', '剪輯起訖點無效');
       throw new Error('剪輯範圍無效，請重新調整起訖點。');
     }
 
     const mode = getExportEngineMode();
     if (mode !== 'builtin') {
       setStatus('正在輸出剪輯片段（ffmpeg）...');
+      setExportDebug('ffmpeg', 'RUNNING', '嘗試使用 ffmpeg 輸出剪輯');
       const ffmpegResult = await exportTrimmedViaFfmpeg();
       if (ffmpegResult && ffmpegResult.ok) {
+        setExportDebug('ffmpeg', 'OK', 'ffmpeg 輸出完成');
         setStatus('儲存完成（ffmpeg）');
         return;
       }
 
       if (ffmpegResult && ffmpegResult.reason === 'CANCELED') {
+        setExportDebug('ffmpeg', 'CANCELED', ffmpegResult.message || '使用者取消儲存');
         setStatus('已取消儲存');
         return;
       }
 
       if (mode === 'ffmpeg') {
+        setExportDebug('ffmpeg', (ffmpegResult && ffmpegResult.reason) || 'FFMPEG_FAILED', (ffmpegResult && ffmpegResult.message) || 'ffmpeg 剪輯失敗');
         throw new Error((ffmpegResult && ffmpegResult.message) || 'ffmpeg 剪輯失敗');
       }
 
       if (ffmpegResult && ffmpegResult.reason && ffmpegResult.reason !== 'NO_FFMPEG') {
+        setExportDebug('ffmpeg -> 內建', ffmpegResult.reason, ffmpegResult.message || 'ffmpeg 失敗，改內建');
         setStatus('ffmpeg 失敗，改用內建剪輯器輸出...');
       } else {
+        setExportDebug('ffmpeg -> 內建', (ffmpegResult && ffmpegResult.reason) || 'NO_FFMPEG', (ffmpegResult && ffmpegResult.message) || '未偵測到 ffmpeg');
         setStatus('未偵測到 ffmpeg，改用內建剪輯器輸出...');
       }
     } else {
       setStatus('正在輸出剪輯片段（內建）...');
+      setExportDebug('內建', 'RUNNING', '使用內建剪輯器輸出');
     }
 
-    await exportTrimmedViaBuiltin();
+    try {
+      await exportTrimmedViaBuiltin();
+      setExportDebug(mode === 'builtin' ? '內建' : 'ffmpeg -> 內建', 'OK', '內建輸出完成');
+    } catch (builtinError) {
+      setExportDebug(mode === 'builtin' ? '內建' : 'ffmpeg -> 內建', 'BUILTIN_FAILED', builtinError.message || '內建輸出失敗');
+      throw builtinError;
+    }
   } catch (error) {
     console.error(error);
+    if (exportDebugCode.textContent === '-' || exportDebugCode.textContent === 'RUNNING') {
+      setExportDebug('未知', 'EXPORT_FAILED', error.message || '輸出失敗');
+    }
     setStatus(`輸出失敗: ${error.message}`);
   } finally {
     editorState.exportBusy = false;
@@ -1451,6 +1490,12 @@ discardClipBtn.addEventListener('click', () => {
   setStatus('已取消剪輯，請重新錄影。');
 });
 
+exportEngineSelect.addEventListener('change', () => {
+  const mode = getExportEngineMode();
+  const label = mode === 'auto' ? '自動（ffmpeg 優先）' : (mode === 'ffmpeg' ? '只用 ffmpeg' : '只用內建');
+  setExportDebug('待命', 'MODE_' + mode.toUpperCase(), '目前模式: ' + label);
+});
+
 zoomInput.addEventListener('input', () => {
   cameraState.maxZoom = Number(zoomInput.value);
   zoomLabel.textContent = `${cameraState.maxZoom.toFixed(1)}x`;
@@ -1536,6 +1581,7 @@ stopBtn.addEventListener('click', stopRecording);
 
 setEditorVisible(false);
 updateEditorButtons();
+setExportDebug('待命', 'MODE_AUTO', '目前模式: 自動（ffmpeg 優先）');
 setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
