@@ -91,6 +91,8 @@ const DRAW_INTERVAL_MS = 16;
 let cursorTimer = 0;
 let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+let recordingStartedAtMs = 0;
+let recordingDurationEstimateSec = 0;
 
 let recordingMeta = {
   outputExt: 'webm',
@@ -209,6 +211,10 @@ function getMediaDuration(video, fallback = 0.1) {
   }
 
   return fallback;
+}
+
+function getEstimatedRecordingDurationSec() {
+  return Math.max(0.1, toFiniteNumber(recordingDurationEstimateSec, 0.1));
 }
 
 function formatClock(seconds) {
@@ -930,7 +936,7 @@ function clearEditorState() {
   setEditorVisible(false);
 }
 
-async function enterEditorMode(blob) {
+async function enterEditorMode(blob, fallbackDurationSec = 0.1) {
   clearEditorState();
   editorState.blob = blob;
   editorState.sourceUrl = URL.createObjectURL(blob);
@@ -942,7 +948,7 @@ async function enterEditorMode(blob) {
   rawVideo.src = editorState.sourceUrl;
   await waitForEvent(rawVideo, 'loadedmetadata');
 
-  editorState.duration = getMediaDuration(rawVideo, 0.1);
+  editorState.duration = Math.max(0.1, getMediaDuration(rawVideo, Math.max(0.1, toFiniteNumber(fallbackDurationSec, 0.1))));
   editorState.trimStart = 0;
   editorState.trimEnd = editorState.duration;
   await seekVideo(rawVideo, 0);
@@ -1071,6 +1077,31 @@ function timelineValueToTime(value) {
   return normalized * duration;
 }
 
+function syncEditorDurationFromMedia() {
+  if (!editorState.active) {
+    return;
+  }
+
+  const mediaDuration = getMediaDuration(rawVideo, 0);
+  if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) {
+    return;
+  }
+
+  // Keep timeline range in sync when browser resolves a better duration later.
+  if (Math.abs(mediaDuration - editorState.duration) < 0.01) {
+    return;
+  }
+
+  const wasAtEnd = Math.abs(editorState.trimEnd - editorState.duration) < 0.05;
+  editorState.duration = mediaDuration;
+
+  if (wasAtEnd) {
+    editorState.trimEnd = mediaDuration;
+  }
+  enforceTrimBounds();
+  updateTimelineInputs();
+}
+
 function syncPenStyleToOverlay() {
   return electronAPI.overlaySetPenStyle({
     color: annotationState.color,
@@ -1153,10 +1184,12 @@ async function startRecording() {
 
   mediaRecorder.onstop = async () => {
     const blob = new Blob(chunks, { type: recordingMeta.outputMimeType });
-    await enterEditorMode(blob);
+    await enterEditorMode(blob, getEstimatedRecordingDurationSec());
   };
 
   mediaRecorder.start();
+  recordingStartedAtMs = performance.now();
+  recordingDurationEstimateSec = 0;
 
   await electronAPI.overlayCreate(selectedSource.display_id);
   await syncPenStyleToOverlay();
@@ -1194,6 +1227,9 @@ async function startRecording() {
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     setStatus('錄製停止中，正在載入剪輯時間軸...');
+    if (recordingStartedAtMs > 0) {
+      recordingDurationEstimateSec = Math.max(0.1, (performance.now() - recordingStartedAtMs) / 1000);
+    }
     mediaRecorder.stop();
   }
 
@@ -1207,6 +1243,7 @@ function stopRecording() {
   outputStream = undefined;
   mediaRecorder = undefined;
   selectedSource = undefined;
+  recordingStartedAtMs = 0;
 
   clearInterval(cursorTimer);
   clearTimeout(drawTimer);
@@ -1289,6 +1326,8 @@ rawVideo.addEventListener('timeupdate', () => {
 rawVideo.addEventListener('play', updateEditorButtons);
 rawVideo.addEventListener('pause', updateEditorButtons);
 rawVideo.addEventListener('ended', updateEditorButtons);
+rawVideo.addEventListener('durationchange', syncEditorDurationFromMedia);
+rawVideo.addEventListener('loadeddata', syncEditorDurationFromMedia);
 
 playPauseBtn.addEventListener('click', () => {
   if (!editorState.active || editorState.exportBusy) {
