@@ -84,6 +84,7 @@ label {
 }
 
 .control-group {
+  flex-shrink: 0;
   border: 1px solid #334a73;
   border-radius: 11px;
   background: #13233e;
@@ -97,6 +98,7 @@ label {
   padding: 11px 14px;
   font-size: 0.95rem;
   font-weight: 700;
+  line-height: 1.35;
   user-select: none;
 }
 
