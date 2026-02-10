@@ -6,6 +6,7 @@ const recordBtn = document.getElementById('recordBtn');
 const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
 const recordingTimeEl = document.getElementById('recordingTime');
+const exportTimeEl = document.getElementById('exportTime');
 const previewCanvas = document.getElementById('previewCanvas');
 const rawVideo = document.getElementById('rawVideo');
 const timelinePanel = document.getElementById('timelinePanel');
@@ -103,6 +104,8 @@ let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 let recordingStartedAtMs = 0;
 let recordingDurationEstimateSec = 0;
 let recordingTimer = 0;
+let exportStartedAtMs = 0;
+let exportTimer = 0;
 let builtinAudioCompatibility = 'unknown';
 
 let recordingMeta = {
@@ -220,6 +223,39 @@ function startRecordingTimer() {
 function stopRecordingTimer() {
   clearInterval(recordingTimer);
   recordingTimer = 0;
+}
+
+function updateExportTimeLabel(seconds = 0) {
+  if (!exportTimeEl) {
+    return;
+  }
+  exportTimeEl.textContent = '輸出執行時間: ' + formatClock(seconds);
+}
+
+function startExportTimer() {
+  exportStartedAtMs = performance.now();
+  updateExportTimeLabel(0);
+  clearInterval(exportTimer);
+  exportTimer = setInterval(() => {
+    if (exportStartedAtMs <= 0) {
+      return;
+    }
+    const elapsed = Math.max(0, (performance.now() - exportStartedAtMs) / 1000);
+    updateExportTimeLabel(elapsed);
+  }, 100);
+}
+
+function stopExportTimer(reset = false) {
+  if (!reset && exportStartedAtMs > 0) {
+    const elapsed = Math.max(0, (performance.now() - exportStartedAtMs) / 1000);
+    updateExportTimeLabel(elapsed);
+  }
+  clearInterval(exportTimer);
+  exportTimer = 0;
+  exportStartedAtMs = 0;
+  if (reset) {
+    updateExportTimeLabel(0);
+  }
 }
 
 function clamp(value, min, max) {
@@ -1067,6 +1103,7 @@ function clearEditorState() {
   setExportDebug('待命', '-', '尚未輸出');
   resetExportTrace('Trace: 尚未輸出');
   setEditorVisible(false);
+  stopExportTimer(true);
 }
 
 async function enterEditorMode(blob, fallbackDurationSec = 0.1) {
@@ -1440,6 +1477,7 @@ async function saveEditedClip() {
   }
   editorState.exportBusy = true;
   updateEditorButtons();
+  stopExportTimer(true);
 
   try {
     resetExportTrace('Trace: 開始輸出');
@@ -1505,6 +1543,7 @@ async function saveEditedClip() {
     }
     setStatus(`輸出失敗: ${error.message}`);
   } finally {
+    stopExportTimer(false);
     editorState.exportBusy = false;
     updateEditorButtons();
   }
@@ -1931,3 +1970,12 @@ loadSources().catch((error) => {
   console.error(error);
   setStatus(`初始化失敗: ${error.message}`);
 });
+
+electronAPI.onExportPhase((payload) => {
+  if (!payload || payload.phase !== 'processing-start') {
+    return;
+  }
+  startExportTimer();
+});
+
+updateExportTimeLabel(0);

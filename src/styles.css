@@ -197,6 +197,13 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.export-time {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #a9d8ff;
+  font-variant-numeric: tabular-nums;
+}
+
 .preview {
   position: relative;
   display: grid;

@@ -15,5 +15,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlayClear: () => ipcRenderer.invoke('overlay:clear'),
   overlayDoubleClickMarker: (payload) => ipcRenderer.invoke('overlay:double-click-marker', payload),
   shouldAutoMinimizeMainWindow: (displayId) => ipcRenderer.invoke('window:should-auto-minimize', displayId),
-  minimizeMainWindow: () => ipcRenderer.invoke('window:minimize-main')
+  minimizeMainWindow: () => ipcRenderer.invoke('window:minimize-main'),
+  onExportPhase: (listener) => {
+    if (typeof listener !== 'function') {
+      return () => {};
+    }
+    const wrapped = (_event, payload) => listener(payload || {});
+    ipcRenderer.on('video:export-phase', wrapped);
+    return () => ipcRenderer.removeListener('video:export-phase', wrapped);
+  }
 });

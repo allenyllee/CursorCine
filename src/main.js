@@ -600,7 +600,7 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle('video:convert-webm-to-mp4', async (_event, payload) => {
+  ipcMain.handle('video:convert-webm-to-mp4', async (event, payload) => {
     if (!hasFfmpeg()) {
       return {
         ok: false,
@@ -628,6 +628,10 @@ app.whenReady().then(() => {
     if (canceled || !filePath) {
       return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
     }
+    event.sender.send('video:export-phase', {
+      phase: 'processing-start',
+      route: 'convert-webm-to-mp4'
+    });
 
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-'));
     const inputPath = path.join(tempDir, `${safeBaseName}.webm`);
@@ -666,7 +670,7 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('video:trim-export', async (_event, payload) => {
+  ipcMain.handle('video:trim-export', async (event, payload) => {
     if (!hasFfmpeg()) {
       return {
         ok: false,
@@ -700,6 +704,10 @@ app.whenReady().then(() => {
     if (canceled || !filePath) {
       return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
     }
+    event.sender.send('video:export-phase', {
+      phase: 'processing-start',
+      route: 'trim-export'
+    });
 
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-trim-'));
     const inputPath = path.join(tempDir, `${safeBaseName}.${inputExt}`);
@@ -762,7 +770,7 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('video:save-file', async (_event, payload) => {
+  ipcMain.handle('video:save-file', async (event, payload) => {
     const bytes = payload && payload.bytes ? payload.bytes : null;
     if (!bytes) {
       return {
@@ -783,6 +791,10 @@ app.whenReady().then(() => {
     if (canceled || !filePath) {
       return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
     }
+    event.sender.send('video:export-phase', {
+      phase: 'processing-start',
+      route: 'save-file'
+    });
 
     try {
       await fs.writeFile(filePath, Buffer.from(bytes));
