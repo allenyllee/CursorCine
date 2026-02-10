@@ -31,6 +31,7 @@ const micInput = document.getElementById('micInput');
 const formatSelect = document.getElementById('formatSelect');
 const exportEngineSelect = document.getElementById('exportEngineSelect');
 const qualitySelect = document.getElementById('qualitySelect');
+const outputQualitySelect = document.getElementById('outputQualitySelect');
 const hdrCompEnable = document.getElementById('hdrCompEnable');
 const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
 const hdrCompStrengthLabel = document.getElementById('hdrCompStrengthLabel');
@@ -85,7 +86,7 @@ const DEFAULT_HDR_COMP_SHARPNESS = 1.0;
 const QUALITY_PRESETS = {
   smooth: { label: '流暢', videoBitrate: 12000000, audioBitrate: 192000 },
   balanced: { label: '平衡', videoBitrate: 22000000, audioBitrate: 256000 },
-  high: { label: '高畫質', videoBitrate: 35000000, audioBitrate: 384000 }
+  high: { label: '高畫質', videoBitrate: 60000000, audioBitrate: 512000 }
 };
 const DEFAULT_QUALITY_PRESET = 'balanced';
 const MIN_TRIM_GAP_SECONDS = 0.1;
@@ -101,7 +102,6 @@ const DRAW_INTERVAL_MS = 16;
 let cursorTimer = 0;
 let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
-let recordingQualityKey = DEFAULT_QUALITY_PRESET;
 let recordingStartedAtMs = 0;
 let recordingDurationEstimateSec = 0;
 let recordingTimer = 0;
@@ -333,6 +333,11 @@ async function seekVideo(video, time) {
 function getQualityPreset() {
   const key = qualitySelect?.value || DEFAULT_QUALITY_PRESET;
   return QUALITY_PRESETS[key] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+}
+
+function getOutputQualityPresetKey() {
+  const key = outputQualitySelect?.value || DEFAULT_QUALITY_PRESET;
+  return QUALITY_PRESETS[key] ? key : DEFAULT_QUALITY_PRESET;
 }
 
 function getExportEngineMode() {
@@ -1455,7 +1460,7 @@ async function exportTrimmedViaFfmpeg() {
     bytes,
     startSec: editorState.trimStart,
     endSec: editorState.trimEnd,
-    qualityPreset: recordingQualityKey,
+    qualityPreset: getOutputQualityPresetKey(),
     requestedFormat: recordingMeta.requestedFormat,
     inputExt: recordingMeta.outputExt,
     baseName: `cursorcine-${timestamp}`
@@ -1497,6 +1502,11 @@ async function saveEditedClip() {
       setStatus('正在輸出剪輯片段（ffmpeg）...');
       setExportDebug('ffmpeg', 'RUNNING', '嘗試使用 ffmpeg 輸出剪輯');
       const ffmpegResult = await exportTrimmedViaFfmpeg();
+      if (ffmpegResult && ffmpegResult.ffmpegCommand) {
+        appendExportTrace('ffmpeg cmd: ' + ffmpegResult.ffmpegCommand);
+      } else if (ffmpegResult && Array.isArray(ffmpegResult.ffmpegArgs) && ffmpegResult.ffmpegArgs.length > 0) {
+        appendExportTrace('ffmpeg args: ' + ffmpegResult.ffmpegArgs.join(' '));
+      }
       if (ffmpegResult && ffmpegResult.ok) {
         setExportDebug('ffmpeg', 'OK', 'ffmpeg 輸出完成');
         setStatus('儲存完成（ffmpeg）');
@@ -1651,7 +1661,6 @@ async function startRecording() {
 
   chunks = [];
   const requestedFormat = formatSelect.value;
-  recordingQualityKey = qualitySelect?.value || DEFAULT_QUALITY_PRESET;
   const qualityPreset = getQualityPreset();
   recordingQualityPreset = qualityPreset;
   const recorderConfig = pickRecorderConfig(requestedFormat);

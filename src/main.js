@@ -8,15 +8,15 @@ const CURSOR_POLL_MS = 16;
 const EXPORT_QUALITY_PRESETS = {
   smooth: {
     mp4: { preset: 'veryfast', crf: '24', audioBitrate: '160k' },
-    webm: { cpuUsed: '6', crf: '34', audioBitrate: '96k' }
+    webm: { codec: 'libvpx-vp9', cpuUsed: '8', crf: '32', audioBitrate: '96k', deadline: 'realtime' }
   },
   balanced: {
-    mp4: { preset: 'veryfast', crf: '21', audioBitrate: '192k' },
-    webm: { cpuUsed: '4', crf: '28', audioBitrate: '128k' }
+    mp4: { preset: 'fast', crf: '20', audioBitrate: '224k' },
+    webm: { codec: 'libvpx-vp9', cpuUsed: '5', crf: '16', audioBitrate: '192k', deadline: 'realtime' }
   },
   high: {
-    mp4: { preset: 'medium', crf: '18', audioBitrate: '256k' },
-    webm: { cpuUsed: '2', crf: '23', audioBitrate: '160k' }
+    mp4: { preset: 'medium', crf: '16', audioBitrate: '256k' },
+    webm: { codec: 'libvpx-vp9', cpuUsed: '2', crf: '18', audioBitrate: '192k', deadline: 'good' }
   }
 };
 const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
@@ -433,6 +433,14 @@ function runFfmpeg(args) {
   });
 }
 
+function quoteShellArg(value) {
+  const raw = String(value);
+  if (/^[a-zA-Z0-9_./:-]+$/.test(raw)) {
+    return raw;
+  }
+  return '"' + raw.replace(/(["\\$`])/g, '\\$1') + '"';
+}
+
 app.whenReady().then(() => {
   initGlobalClickHook();
 
@@ -729,19 +737,18 @@ app.whenReady().then(() => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-trim-'));
     const inputPath = path.join(tempDir, `${safeBaseName}.${inputExt}`);
     const durationSec = Math.max(0.05, endSec - startSec);
+    const ffmpegArgs = [
+      '-y',
+      '-ss',
+      startSec.toFixed(3),
+      '-t',
+      durationSec.toFixed(3),
+      '-i',
+      inputPath
+    ];
 
     try {
       await fs.writeFile(inputPath, Buffer.from(bytes));
-
-      const ffmpegArgs = [
-        '-y',
-        '-ss',
-        startSec.toFixed(3),
-        '-t',
-        durationSec.toFixed(3),
-        '-i',
-        inputPath
-      ];
 
       if (outputExt === 'mp4') {
         const mp4Quality = exportQualityPreset.mp4;
@@ -763,7 +770,9 @@ app.whenReady().then(() => {
         const webmQuality = exportQualityPreset.webm;
         ffmpegArgs.push(
           '-c:v',
-          'libvpx',
+          webmQuality.codec || 'libvpx',
+          '-deadline',
+          webmQuality.deadline || 'good',
           '-cpu-used',
           webmQuality.cpuUsed,
           '-crf',
@@ -775,16 +784,33 @@ app.whenReady().then(() => {
           '-b:a',
           webmQuality.audioBitrate
         );
+        if ((webmQuality.codec || '').toLowerCase() === 'libvpx-vp9') {
+          ffmpegArgs.push(
+            '-row-mt',
+            '1',
+            '-tile-columns',
+            '2',
+            '-frame-parallel',
+            '1'
+          );
+        }
       }
 
       ffmpegArgs.push(filePath);
       await runFfmpeg(ffmpegArgs);
-      return { ok: true, path: filePath, ext: outputExt };
+      return {
+        ok: true,
+        path: filePath,
+        ext: outputExt,
+        ffmpegArgs,
+        ffmpegCommand: 'ffmpeg ' + ffmpegArgs.map(quoteShellArg).join(' ')
+      };
     } catch (error) {
       return {
         ok: false,
         reason: 'TRIM_FAILED',
-        message: error.message || 'ffmpeg 剪輯失敗。'
+        message: error.message || 'ffmpeg 剪輯失敗。',
+        ffmpegArgs
       };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
