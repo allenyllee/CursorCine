@@ -190,6 +190,13 @@ button:disabled {
   color: var(--muted);
 }
 
+.recording-time {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #9fdfc4;
+  font-variant-numeric: tabular-nums;
+}
+
 .preview {
   position: relative;
   display: grid;

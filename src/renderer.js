@@ -5,6 +5,7 @@ const refreshBtn = document.getElementById('refreshBtn');
 const recordBtn = document.getElementById('recordBtn');
 const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
+const recordingTimeEl = document.getElementById('recordingTime');
 const previewCanvas = document.getElementById('previewCanvas');
 const rawVideo = document.getElementById('rawVideo');
 const timelinePanel = document.getElementById('timelinePanel');
@@ -101,6 +102,7 @@ let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 let recordingStartedAtMs = 0;
 let recordingDurationEstimateSec = 0;
+let recordingTimer = 0;
 let builtinAudioCompatibility = 'unknown';
 
 let recordingMeta = {
@@ -195,6 +197,29 @@ const cameraState = {
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function updateRecordingTimeLabel(seconds = 0) {
+  if (!recordingTimeEl) {
+    return;
+  }
+  recordingTimeEl.textContent = '目前錄製時間: ' + formatClock(seconds);
+}
+
+function startRecordingTimer() {
+  clearInterval(recordingTimer);
+  recordingTimer = setInterval(() => {
+    if (recordingStartedAtMs <= 0) {
+      return;
+    }
+    const elapsed = Math.max(0, (performance.now() - recordingStartedAtMs) / 1000);
+    updateRecordingTimeLabel(elapsed);
+  }, 100);
+}
+
+function stopRecordingTimer() {
+  clearInterval(recordingTimer);
+  recordingTimer = 0;
 }
 
 function clamp(value, min, max) {
@@ -1607,6 +1632,8 @@ async function startRecording() {
   mediaRecorder.start();
   recordingStartedAtMs = performance.now();
   recordingDurationEstimateSec = 0;
+  updateRecordingTimeLabel(0);
+  startRecordingTimer();
 
   await electronAPI.overlayCreate(selectedSource.display_id);
   await syncPenStyleToOverlay();
@@ -1647,6 +1674,7 @@ function stopRecording() {
     setStatus('錄製停止中，正在載入剪輯時間軸...');
     if (recordingStartedAtMs > 0) {
       recordingDurationEstimateSec = Math.max(0.1, (performance.now() - recordingStartedAtMs) / 1000);
+      updateRecordingTimeLabel(recordingDurationEstimateSec);
     }
     mediaRecorder.stop();
   }
@@ -1662,6 +1690,10 @@ function stopRecording() {
   mediaRecorder = undefined;
   selectedSource = undefined;
   recordingStartedAtMs = 0;
+  stopRecordingTimer();
+  if (!editorState.active) {
+    updateRecordingTimeLabel(0);
+  }
 
   clearInterval(cursorTimer);
   clearTimeout(drawTimer);
