@@ -5,6 +5,21 @@ const os = require('os');
 const { spawn, spawnSync } = require('child_process');
 
 const CURSOR_POLL_MS = 16;
+const EXPORT_QUALITY_PRESETS = {
+  smooth: {
+    mp4: { preset: 'veryfast', crf: '24', audioBitrate: '160k' },
+    webm: { cpuUsed: '6', crf: '34', audioBitrate: '96k' }
+  },
+  balanced: {
+    mp4: { preset: 'veryfast', crf: '21', audioBitrate: '192k' },
+    webm: { cpuUsed: '4', crf: '28', audioBitrate: '128k' }
+  },
+  high: {
+    mp4: { preset: 'medium', crf: '18', audioBitrate: '256k' },
+    webm: { cpuUsed: '2', crf: '23', audioBitrate: '160k' }
+  }
+};
+const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
 
 let clickHookEnabled = false;
 let clickHookError = '';
@@ -693,6 +708,8 @@ app.whenReady().then(() => {
     const requestedFormat = String(payload && payload.requestedFormat ? payload.requestedFormat : 'webm').toLowerCase() === 'mp4' ? 'mp4' : 'webm';
     const inputExt = String(payload && payload.inputExt ? payload.inputExt : 'webm').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'webm';
     const safeBaseName = String(payload && payload.baseName ? payload.baseName : 'cursorcine-export').replace(/[^a-zA-Z0-9-_]/g, '_');
+    const qualityPresetKey = String(payload && payload.qualityPreset ? payload.qualityPreset : DEFAULT_EXPORT_QUALITY_PRESET);
+    const exportQualityPreset = EXPORT_QUALITY_PRESETS[qualityPresetKey] || EXPORT_QUALITY_PRESETS[DEFAULT_EXPORT_QUALITY_PRESET];
     const outputExt = requestedFormat === 'mp4' ? 'mp4' : 'webm';
 
     const { canceled, filePath } = await dialog.showSaveDialog({
@@ -727,32 +744,36 @@ app.whenReady().then(() => {
       ];
 
       if (outputExt === 'mp4') {
+        const mp4Quality = exportQualityPreset.mp4;
         ffmpegArgs.push(
           '-c:v',
           'libx264',
           '-preset',
-          'veryfast',
+          mp4Quality.preset,
           '-crf',
-          '21',
+          mp4Quality.crf,
           '-pix_fmt',
           'yuv420p',
           '-c:a',
           'aac',
           '-b:a',
-          '192k'
+          mp4Quality.audioBitrate
         );
       } else {
+        const webmQuality = exportQualityPreset.webm;
         ffmpegArgs.push(
           '-c:v',
-          'libvpx-vp9',
+          'libvpx',
+          '-cpu-used',
+          webmQuality.cpuUsed,
           '-crf',
-          '32',
+          webmQuality.crf,
           '-b:v',
           '0',
           '-c:a',
           'libopus',
           '-b:a',
-          '128k'
+          webmQuality.audioBitrate
         );
       }
 

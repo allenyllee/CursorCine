@@ -101,6 +101,7 @@ const DRAW_INTERVAL_MS = 16;
 let cursorTimer = 0;
 let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+let recordingQualityKey = DEFAULT_QUALITY_PRESET;
 let recordingStartedAtMs = 0;
 let recordingDurationEstimateSec = 0;
 let recordingTimer = 0;
@@ -1399,14 +1400,14 @@ async function renderTrimmedBlob() {
 
   const attempts = builtinAudioCompatibility === 'broken'
     ? [
-        { mode: 'canvas', includeAudio: false },
-        { mode: 'direct', includeAudio: false }
+        { mode: 'direct', includeAudio: false },
+        { mode: 'canvas', includeAudio: false }
       ]
     : [
-        { mode: 'canvas', includeAudio: true },
         { mode: 'direct', includeAudio: true },
-        { mode: 'canvas', includeAudio: false },
-        { mode: 'direct', includeAudio: false }
+        { mode: 'canvas', includeAudio: true },
+        { mode: 'direct', includeAudio: false },
+        { mode: 'canvas', includeAudio: false }
       ];
 
   if (builtinAudioCompatibility === 'broken') {
@@ -1454,6 +1455,7 @@ async function exportTrimmedViaFfmpeg() {
     bytes,
     startSec: editorState.trimStart,
     endSec: editorState.trimEnd,
+    qualityPreset: recordingQualityKey,
     requestedFormat: recordingMeta.requestedFormat,
     inputExt: recordingMeta.outputExt,
     baseName: `cursorcine-${timestamp}`
@@ -1621,6 +1623,10 @@ async function startRecording() {
   applyQualityHints(sourceStream);
   micStream = await getMicStreamIfEnabled();
 
+  // Prevent local monitor playback from feeding back into system-audio capture.
+  rawVideo.muted = true;
+  rawVideo.volume = 0;
+  rawVideo.controls = false;
   rawVideo.srcObject = sourceStream;
   await rawVideo.play();
 
@@ -1645,6 +1651,7 @@ async function startRecording() {
 
   chunks = [];
   const requestedFormat = formatSelect.value;
+  recordingQualityKey = qualitySelect?.value || DEFAULT_QUALITY_PRESET;
   const qualityPreset = getQualityPreset();
   recordingQualityPreset = qualityPreset;
   const recorderConfig = pickRecorderConfig(requestedFormat);
