@@ -84,9 +84,9 @@ const DEFAULT_HDR_COMP_ROLLOFF = 0.7;
 const DEFAULT_HDR_COMP_SHARPNESS = 1.0;
 
 const QUALITY_PRESETS = {
-  smooth: { label: '流暢', videoBitrate: 12000000, audioBitrate: 192000 },
-  balanced: { label: '平衡', videoBitrate: 22000000, audioBitrate: 256000 },
-  high: { label: '高畫質', videoBitrate: 60000000, audioBitrate: 512000 }
+  smooth: { label: '流暢', videoBitrate: 1500000, audioBitrate: 64000 },
+  balanced: { label: '平衡', videoBitrate: 16000000, audioBitrate: 192000 },
+  high: { label: '高畫質', videoBitrate: 40000000, audioBitrate: 384000 }
 };
 const DEFAULT_QUALITY_PRESET = 'balanced';
 const MIN_TRIM_GAP_SECONDS = 0.1;
