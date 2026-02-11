@@ -5,6 +5,7 @@ const os = require('os');
 const { spawn, spawnSync } = require('child_process');
 
 const CURSOR_POLL_MS = 16;
+const BLOB_UPLOAD_CHUNK_MAX_BYTES = 8 * 1024 * 1024;
 const EXPORT_QUALITY_PRESETS = {
   smooth: {
     mp4: { preset: 'veryfast', crf: '24', audioBitrate: '160k' },
@@ -38,6 +39,8 @@ let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
 let overlayRecordingActive = false;
 let overlayBounds = null;
+let blobUploadSessionSeq = 1;
+const blobUploadSessions = new Map();
 const OVERLAY_WHEEL_PAUSE_MS = 450;
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -441,6 +444,32 @@ function quoteShellArg(value) {
   return '"' + raw.replace(/(["\\$`])/g, '\\$1') + '"';
 }
 
+function sanitizeBaseName(value, fallback = 'cursorcine-export') {
+  return String(value || fallback).replace(/[^a-zA-Z0-9-_]/g, '_');
+}
+
+function sanitizeExt(value, fallback = 'webm') {
+  return String(value || fallback).replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || fallback;
+}
+
+async function cleanupBlobUploadSession(session, removeOutput) {
+  if (!session) {
+    return;
+  }
+
+  if (session.handle) {
+    await session.handle.close().catch(() => {});
+  }
+
+  if (removeOutput && session.filePath) {
+    await fs.rm(session.filePath, { force: true }).catch(() => {});
+  }
+
+  if (removeOutput && session.tempDir) {
+    await fs.rm(session.tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 app.whenReady().then(() => {
   initGlobalClickHook();
 
@@ -623,77 +652,7 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle('video:convert-webm-to-mp4', async (event, payload) => {
-    if (!hasFfmpeg()) {
-      return {
-        ok: false,
-        reason: 'NO_FFMPEG',
-        message: '找不到 ffmpeg，請先安裝 ffmpeg 並加入 PATH。'
-      };
-    }
-
-    const bytes = payload && payload.bytes ? payload.bytes : null;
-    if (!bytes) {
-      return {
-        ok: false,
-        reason: 'INVALID_INPUT',
-        message: '缺少影片資料。'
-      };
-    }
-
-    const safeBaseName = String(payload.baseName || 'cursorcine-export').replace(/[^a-zA-Z0-9-_]/g, '_');
-    const { canceled, filePath } = await dialog.showSaveDialog({
-      title: '另存 MP4',
-      defaultPath: `${safeBaseName}.mp4`,
-      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
-    });
-
-    if (canceled || !filePath) {
-      return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
-    }
-    event.sender.send('video:export-phase', {
-      phase: 'processing-start',
-      route: 'convert-webm-to-mp4'
-    });
-
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-'));
-    const inputPath = path.join(tempDir, `${safeBaseName}.webm`);
-
-    try {
-      await fs.writeFile(inputPath, Buffer.from(bytes));
-
-      await runFfmpeg([
-        '-y',
-        '-i',
-        inputPath,
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-crf',
-        '21',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '192k',
-        filePath
-      ]);
-
-      return { ok: true, path: filePath };
-    } catch (error) {
-      return {
-        ok: false,
-        reason: 'CONVERT_FAILED',
-        message: error.message || 'MP4 轉檔失敗。'
-      };
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  ipcMain.handle('video:trim-export', async (event, payload) => {
+  async function runTrimExport(event, payload) {
     if (!hasFfmpeg()) {
       return {
         ok: false,
@@ -702,10 +661,10 @@ app.whenReady().then(() => {
       };
     }
 
-    const bytes = payload && payload.bytes ? payload.bytes : null;
+    const inputPath = String(payload && payload.inputPath ? payload.inputPath : '');
     const startSec = Number(payload && payload.startSec);
     const endSec = Number(payload && payload.endSec);
-    if (!bytes || !Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
+    if (!inputPath || !Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
       return {
         ok: false,
         reason: 'INVALID_INPUT',
@@ -714,8 +673,7 @@ app.whenReady().then(() => {
     }
 
     const requestedFormat = String(payload && payload.requestedFormat ? payload.requestedFormat : 'webm').toLowerCase() === 'mp4' ? 'mp4' : 'webm';
-    const inputExt = String(payload && payload.inputExt ? payload.inputExt : 'webm').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'webm';
-    const safeBaseName = String(payload && payload.baseName ? payload.baseName : 'cursorcine-export').replace(/[^a-zA-Z0-9-_]/g, '_');
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
     const qualityPresetKey = String(payload && payload.qualityPreset ? payload.qualityPreset : DEFAULT_EXPORT_QUALITY_PRESET);
     const exportQualityPreset = EXPORT_QUALITY_PRESETS[qualityPresetKey] || EXPORT_QUALITY_PRESETS[DEFAULT_EXPORT_QUALITY_PRESET];
     const outputExt = requestedFormat === 'mp4' ? 'mp4' : 'webm';
@@ -734,8 +692,6 @@ app.whenReady().then(() => {
       route: 'trim-export'
     });
 
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-trim-'));
-    const inputPath = path.join(tempDir, `${safeBaseName}.${inputExt}`);
     const durationSec = Math.max(0.05, endSec - startSec);
     const ffmpegArgs = [
       '-y',
@@ -748,8 +704,6 @@ app.whenReady().then(() => {
     ];
 
     try {
-      await fs.writeFile(inputPath, Buffer.from(bytes));
-
       if (outputExt === 'mp4') {
         const mp4Quality = exportQualityPreset.mp4;
         ffmpegArgs.push(
@@ -813,8 +767,277 @@ app.whenReady().then(() => {
         ffmpegArgs
       };
     } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
+      if (payload && payload.cleanupTempDir) {
+        await fs.rm(payload.cleanupTempDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
+  }
+
+  ipcMain.handle('video:blob-upload-open', async (event, payload) => {
+    const mode = String(payload && payload.mode ? payload.mode : 'temp');
+    const ext = sanitizeExt(payload && payload.ext ? payload.ext : 'webm');
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
+    const route = String(payload && payload.route ? payload.route : 'save-file');
+
+    let filePath = '';
+    let tempDir = '';
+
+    if (mode === 'save') {
+      const title = String(payload && payload.title ? payload.title : '儲存影片');
+      const { canceled, filePath: selectedPath } = await dialog.showSaveDialog({
+        title,
+        defaultPath: `${safeBaseName}.${ext}`,
+        filters: [{ name: `${ext.toUpperCase()} Video`, extensions: [ext] }]
+      });
+      if (canceled || !selectedPath) {
+        return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+      }
+      filePath = selectedPath;
+      event.sender.send('video:export-phase', {
+        phase: 'processing-start',
+        route
+      });
+    } else {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-upload-'));
+      filePath = path.join(tempDir, `${safeBaseName}.${ext}`);
+    }
+
+    try {
+      const handle = await fs.open(filePath, 'w');
+      const sessionId = blobUploadSessionSeq++;
+      blobUploadSessions.set(sessionId, {
+        handle,
+        filePath,
+        tempDir
+      });
+      return {
+        ok: true,
+        sessionId,
+        filePath,
+        tempDir
+      };
+    } catch (error) {
+      if (tempDir) {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+      return {
+        ok: false,
+        reason: 'OPEN_FAILED',
+        message: error && error.message ? error.message : '無法建立輸出檔。'
+      };
+    }
+  });
+
+  ipcMain.handle('video:blob-upload-chunk', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    const session = blobUploadSessions.get(sessionId);
+    if (!session) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '找不到上傳工作階段。' };
+    }
+
+    const bytes = payload && payload.bytes ? payload.bytes : null;
+    const size = Number(bytes && bytes.byteLength ? bytes.byteLength : 0);
+    if (!bytes || size <= 0 || size > BLOB_UPLOAD_CHUNK_MAX_BYTES) {
+      return { ok: false, reason: 'INVALID_CHUNK', message: '上傳區塊無效。' };
+    }
+
+    try {
+      await session.handle.write(Buffer.from(bytes));
+      return { ok: true, wrote: size };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WRITE_FAILED',
+        message: error && error.message ? error.message : '寫入區塊失敗。'
+      };
+    }
+  });
+
+  ipcMain.handle('video:blob-upload-close', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    const abort = Boolean(payload && payload.abort);
+    const session = blobUploadSessions.get(sessionId);
+    if (!session) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '找不到上傳工作階段。' };
+    }
+    blobUploadSessions.delete(sessionId);
+    await cleanupBlobUploadSession(session, abort);
+    return { ok: true, aborted: abort };
+  });
+
+  ipcMain.handle('video:convert-webm-to-mp4', async (event, payload) => {
+    if (!hasFfmpeg()) {
+      return {
+        ok: false,
+        reason: 'NO_FFMPEG',
+        message: '找不到 ffmpeg，請先安裝 ffmpeg 並加入 PATH。'
+      };
+    }
+
+    const bytes = payload && payload.bytes ? payload.bytes : null;
+    if (!bytes) {
+      return {
+        ok: false,
+        reason: 'INVALID_INPUT',
+        message: '缺少影片資料。'
+      };
+    }
+
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-'));
+    const inputPath = path.join(tempDir, `${safeBaseName}.webm`);
+
+    try {
+      await fs.writeFile(inputPath, Buffer.from(bytes));
+      return await (async () => {
+        const { canceled, filePath } = await dialog.showSaveDialog({
+          title: '另存 MP4',
+          defaultPath: `${safeBaseName}.mp4`,
+          filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
+        });
+
+        if (canceled || !filePath) {
+          return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+        }
+
+        event.sender.send('video:export-phase', {
+          phase: 'processing-start',
+          route: 'convert-webm-to-mp4'
+        });
+
+        try {
+          await runFfmpeg([
+            '-y',
+            '-i',
+            inputPath,
+            '-c:v',
+            'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '21',
+            '-pix_fmt',
+            'yuv420p',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '192k',
+            filePath
+          ]);
+          return { ok: true, path: filePath };
+        } catch (error) {
+          return {
+            ok: false,
+            reason: 'CONVERT_FAILED',
+            message: error.message || 'MP4 轉檔失敗。'
+          };
+        }
+      })();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  ipcMain.handle('video:convert-webm-to-mp4-path', async (event, payload) => {
+    if (!hasFfmpeg()) {
+      return {
+        ok: false,
+        reason: 'NO_FFMPEG',
+        message: '找不到 ffmpeg，請先安裝 ffmpeg 並加入 PATH。'
+      };
+    }
+
+    const inputPath = String(payload && payload.inputPath ? payload.inputPath : '');
+    if (!inputPath) {
+      return {
+        ok: false,
+        reason: 'INVALID_INPUT',
+        message: '缺少影片資料。'
+      };
+    }
+
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: '另存 MP4',
+      defaultPath: `${safeBaseName}.mp4`,
+      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
+    });
+
+    if (canceled || !filePath) {
+      return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+    }
+
+    event.sender.send('video:export-phase', {
+      phase: 'processing-start',
+      route: 'convert-webm-to-mp4'
+    });
+
+    try {
+      await runFfmpeg([
+        '-y',
+        '-i',
+        inputPath,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '21',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '192k',
+        filePath
+      ]);
+      return { ok: true, path: filePath };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'CONVERT_FAILED',
+        message: error.message || 'MP4 轉檔失敗。'
+      };
+    } finally {
+      if (payload && payload.cleanupTempDir) {
+        await fs.rm(payload.cleanupTempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  });
+
+  ipcMain.handle('video:trim-export', async (event, payload) => {
+    const bytes = payload && payload.bytes ? payload.bytes : null;
+    const inputExt = sanitizeExt(payload && payload.inputExt ? payload.inputExt : 'webm');
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
+    if (!bytes) {
+      return {
+        ok: false,
+        reason: 'INVALID_INPUT',
+        message: '缺少影片資料。'
+      };
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-trim-'));
+    const inputPath = path.join(tempDir, `${safeBaseName}.${inputExt}`);
+    try {
+      await fs.writeFile(inputPath, Buffer.from(bytes));
+      return await runTrimExport(event, {
+        ...payload,
+        inputPath,
+        cleanupTempDir: tempDir
+      });
+    } catch (error) {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      return {
+        ok: false,
+        reason: 'TRIM_FAILED',
+        message: error && error.message ? error.message : 'ffmpeg 剪輯失敗。'
+      };
+    }
+  });
+
+  ipcMain.handle('video:trim-export-from-path', async (event, payload) => {
+    return runTrimExport(event, payload || {});
   });
 
   ipcMain.handle('video:save-file', async (event, payload) => {
@@ -827,8 +1050,8 @@ app.whenReady().then(() => {
       };
     }
 
-    const ext = String(payload.ext || 'webm').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'webm';
-    const safeBaseName = String(payload.baseName || 'cursorcine-export').replace(/[^a-zA-Z0-9-_]/g, '_');
+    const ext = sanitizeExt(payload && payload.ext ? payload.ext : 'webm');
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
     const { canceled, filePath } = await dialog.showSaveDialog({
       title: '儲存影片',
       defaultPath: `${safeBaseName}.${ext}`,
@@ -865,6 +1088,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  for (const [sessionId, session] of blobUploadSessions) {
+    blobUploadSessions.delete(sessionId);
+    cleanupBlobUploadSession(session, true).catch(() => {});
+  }
   destroyOverlayWindow();
   if (process.platform !== 'darwin') {
     app.quit();

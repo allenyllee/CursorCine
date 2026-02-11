@@ -90,6 +90,7 @@ const QUALITY_PRESETS = {
 };
 const DEFAULT_QUALITY_PRESET = 'balanced';
 const MIN_TRIM_GAP_SECONDS = 0.1;
+const IPC_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 
 let sources = [];
 let sourceStream;
@@ -1055,8 +1056,13 @@ function enforceTrimBounds() {
 
 async function saveBlobToDisk(blob, ext) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  const result = await electronAPI.saveVideoFile(bytes, `cursorcine-${timestamp}`, ext);
+  const result = await uploadBlobToPath(blob, {
+    mode: 'save',
+    title: '儲存影片',
+    baseName: `cursorcine-${timestamp}`,
+    ext,
+    route: 'save-file'
+  });
   if (!result.ok) {
     if (result.reason === 'CANCELED') {
       setStatus('已取消儲存');
@@ -1070,8 +1076,24 @@ async function exportRecording(blob) {
   if (recordingMeta.requestedFormat === 'mp4' && recordingMeta.fallbackFromMp4) {
     setStatus('正在輸出剪輯檔，並用 ffmpeg 轉為 MP4...');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    const result = await electronAPI.convertWebmToMp4(bytes, `cursorcine-${timestamp}`);
+    const uploaded = await uploadBlobToPath(blob, {
+      mode: 'temp',
+      baseName: `cursorcine-${timestamp}`,
+      ext: 'webm'
+    });
+    if (!uploaded.ok) {
+      if (uploaded.reason === 'CANCELED') {
+        setStatus('已取消儲存 MP4');
+        return;
+      }
+      throw new Error(uploaded.message || '暫存影片建立失敗');
+    }
+
+    const result = await electronAPI.convertWebmToMp4FromPath({
+      inputPath: uploaded.filePath,
+      baseName: `cursorcine-${timestamp}`,
+      cleanupTempDir: uploaded.tempDir
+    });
 
     if (result.ok) {
       setStatus('儲存完成（MP4）');
@@ -1090,6 +1112,46 @@ async function exportRecording(blob) {
 
   await saveBlobToDisk(blob, recordingMeta.outputExt);
   setStatus(`儲存完成（${recordingMeta.outputExt.toUpperCase()}）`);
+}
+
+async function uploadBlobToPath(blob, options) {
+  const openResult = await electronAPI.blobUploadOpen(options || {});
+  if (!openResult || !openResult.ok) {
+    return openResult || { ok: false, reason: 'OPEN_FAILED', message: '建立上傳工作階段失敗。' };
+  }
+
+  const sessionId = Number(openResult.sessionId);
+
+  try {
+    let offset = 0;
+    while (offset < blob.size) {
+      const end = Math.min(blob.size, offset + IPC_UPLOAD_CHUNK_BYTES);
+      const chunkBytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
+      const chunkResult = await electronAPI.blobUploadChunk({
+        sessionId,
+        bytes: chunkBytes
+      });
+      if (!chunkResult || !chunkResult.ok) {
+        throw new Error((chunkResult && chunkResult.message) || '寫入區塊失敗。');
+      }
+      offset = end;
+    }
+
+    const closeResult = await electronAPI.blobUploadClose({
+      sessionId,
+      abort: false
+    });
+    if (!closeResult || !closeResult.ok) {
+      throw new Error((closeResult && closeResult.message) || '關閉上傳工作階段失敗。');
+    }
+    return openResult;
+  } catch (error) {
+    await electronAPI.blobUploadClose({
+      sessionId,
+      abort: true
+    }).catch(() => {});
+    throw error;
+  }
 }
 
 function clearEditorState() {
@@ -1455,15 +1517,22 @@ async function exportTrimmedViaFfmpeg() {
   }
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const bytes = new Uint8Array(await editorState.blob.arrayBuffer());
-  return electronAPI.exportTrimmedVideo({
-    bytes,
+  const uploaded = await uploadBlobToPath(editorState.blob, {
+    mode: 'temp',
+    baseName: `cursorcine-${timestamp}`,
+    ext: recordingMeta.outputExt
+  });
+  if (!uploaded.ok) {
+    return uploaded;
+  }
+  return electronAPI.exportTrimmedVideoFromPath({
+    inputPath: uploaded.filePath,
     startSec: editorState.trimStart,
     endSec: editorState.trimEnd,
     qualityPreset: getOutputQualityPresetKey(),
     requestedFormat: recordingMeta.requestedFormat,
-    inputExt: recordingMeta.outputExt,
-    baseName: `cursorcine-${timestamp}`
+    baseName: `cursorcine-${timestamp}`,
+    cleanupTempDir: uploaded.tempDir
   });
 }
 
