@@ -91,6 +91,7 @@ const QUALITY_PRESETS = {
 const DEFAULT_QUALITY_PRESET = 'balanced';
 const MIN_TRIM_GAP_SECONDS = 0.1;
 const IPC_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
+const RECORDING_TIMESLICE_MS = 1000;
 
 let sources = [];
 let sourceStream;
@@ -106,6 +107,9 @@ let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 let recordingStartedAtMs = 0;
 let recordingDurationEstimateSec = 0;
 let recordingTimer = 0;
+let recordingChunkCount = 0;
+let recordingBytes = 0;
+let recordingStopRequestedAtMs = 0;
 let exportStartedAtMs = 0;
 let exportTimer = 0;
 let builtinAudioCompatibility = 'unknown';
@@ -295,6 +299,12 @@ function formatClock(seconds) {
   const secs = Math.floor(safe % 60);
   const tenths = Math.floor((safe - Math.floor(safe)) * 10);
   return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0') + '.' + String(tenths);
+}
+
+function formatBytes(bytes) {
+  const safeBytes = Math.max(0, toFiniteNumber(bytes, 0));
+  const mb = safeBytes / (1024 * 1024);
+  return mb.toFixed(mb >= 100 ? 0 : 1) + ' MB';
 }
 
 function waitForEvent(target, eventName) {
@@ -1729,6 +1739,9 @@ async function startRecording() {
   }
 
   chunks = [];
+  recordingChunkCount = 0;
+  recordingBytes = 0;
+  recordingStopRequestedAtMs = 0;
   const requestedFormat = formatSelect.value;
   const qualityPreset = getQualityPreset();
   recordingQualityPreset = qualityPreset;
@@ -1744,16 +1757,35 @@ async function startRecording() {
 
   mediaRecorder.ondataavailable = (event) => {
     if (event.data.size > 0) {
+      recordingChunkCount += 1;
+      recordingBytes += event.data.size;
       chunks.push(event.data);
+      if (recordingStopRequestedAtMs > 0) {
+        setStatus(
+          '錄製停止中，正在載入剪輯時間軸... 已接收 ' +
+          recordingChunkCount +
+          ' 個片段（' +
+          formatBytes(recordingBytes) +
+          '）'
+        );
+      }
     }
   };
 
   mediaRecorder.onstop = async () => {
+    setStatus(
+      '錄製停止中，正在載入剪輯時間軸... 正在整理 ' +
+      recordingChunkCount +
+      ' 個片段（' +
+      formatBytes(recordingBytes) +
+      '）'
+    );
     const blob = new Blob(chunks, { type: recordingMeta.outputMimeType });
     await enterEditorMode(blob, getEstimatedRecordingDurationSec());
+    recordingStopRequestedAtMs = 0;
   };
 
-  mediaRecorder.start();
+  mediaRecorder.start(RECORDING_TIMESLICE_MS);
   recordingStartedAtMs = performance.now();
   recordingDurationEstimateSec = 0;
   updateRecordingTimeLabel(0);
@@ -1796,9 +1828,14 @@ async function startRecording() {
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     setStatus('錄製停止中，正在載入剪輯時間軸...');
+    recordingStopRequestedAtMs = performance.now();
     if (recordingStartedAtMs > 0) {
       recordingDurationEstimateSec = Math.max(0.1, (performance.now() - recordingStartedAtMs) / 1000);
       updateRecordingTimeLabel(recordingDurationEstimateSec);
+    }
+    try {
+      mediaRecorder.requestData();
+    } catch (_error) {
     }
     mediaRecorder.stop();
   }
