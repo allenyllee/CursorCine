@@ -92,6 +92,8 @@ const DEFAULT_QUALITY_PRESET = 'balanced';
 const MIN_TRIM_GAP_SECONDS = 0.1;
 const IPC_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const RECORDING_TIMESLICE_MS = 1000;
+const BUILTIN_RECORDER_TIMESLICE_MS = 200;
+const BUILTIN_FIRST_CHUNK_TIMEOUT_MS = 2500;
 
 let sources = [];
 let sourceStream;
@@ -1270,6 +1272,7 @@ async function renderTrimmedBlob() {
     let sourceStream;
     let recorder;
     let pollTimer = 0;
+    let firstChunkTimer = 0;
     let stopping = false;
     let drawFrame = null;
     let stopReason = 'unknown';
@@ -1370,6 +1373,10 @@ async function renderTrimmedBlob() {
         totalBytes += size;
         appendExportTrace('builtin[' + mode + '] chunk#' + chunkCount + ': ' + size + ' bytes');
         if (size > 0) {
+          if (firstChunkTimer) {
+            clearTimeout(firstChunkTimer);
+            firstChunkTimer = 0;
+          }
           chunks.push(event.data);
         }
       };
@@ -1416,10 +1423,21 @@ async function renderTrimmedBlob() {
         }, 80);
       };
 
-      recorder.start(200);
-      appendExportTrace('builtin[' + mode + '] recorder.start(200)');
+      recorder.start(BUILTIN_RECORDER_TIMESLICE_MS);
+      appendExportTrace('builtin[' + mode + '] recorder.start(' + BUILTIN_RECORDER_TIMESLICE_MS + ')');
       await source.play();
       appendExportTrace('builtin[' + mode + '] source.play ok');
+      firstChunkTimer = setTimeout(() => {
+        if (stopping || recorder.state === 'inactive' || chunkCount > 0) {
+          return;
+        }
+        stopReason = 'no-first-chunk-timeout';
+        appendExportTrace(
+          'builtin[' + mode + '] no chunk within ' + BUILTIN_FIRST_CHUNK_TIMEOUT_MS + 'ms, fallback to next attempt'
+        );
+        source.pause();
+        stopRecorderSafely();
+      }, BUILTIN_FIRST_CHUNK_TIMEOUT_MS);
 
       pollTimer = setInterval(() => {
         if (mode === 'canvas' && typeof drawFrame === 'function') {
@@ -1436,6 +1454,10 @@ async function renderTrimmedBlob() {
       await completed;
       clearInterval(pollTimer);
       pollTimer = 0;
+      if (firstChunkTimer) {
+        clearTimeout(firstChunkTimer);
+        firstChunkTimer = 0;
+      }
 
       const blob = new Blob(chunks, { type: outputMimeType });
       appendExportTrace('builtin[' + mode + '] blob size=' + blob.size + ' bytes');
@@ -1447,6 +1469,9 @@ async function renderTrimmedBlob() {
     } finally {
       if (pollTimer) {
         clearInterval(pollTimer);
+      }
+      if (firstChunkTimer) {
+        clearTimeout(firstChunkTimer);
       }
       if (sourceStream) {
         stopMediaTracks(sourceStream);
