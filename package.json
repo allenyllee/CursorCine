@@ -1,6 +1,6 @@
 {
   "name": "cursorcine",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Electron desktop recorder with cursor-follow auto zoom",
   "main": "src/main.js",
   "scripts": {
