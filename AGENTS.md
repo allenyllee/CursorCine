@@ -22,3 +22,4 @@
   - Use English only.
 - Quality:
   - Commit messages must be clear, informative, and professional to support readability and project tracking.
+  - When shipping a new version, update `CHANGELOG.md` in the same change set.
