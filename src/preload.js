@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveVideoFile: (bytes, baseName, ext) => ipcRenderer.invoke('video:save-file', { bytes, baseName, ext }),
   exportTrimmedVideo: (payload) => ipcRenderer.invoke('video:trim-export', payload),
   exportTrimmedVideoFromPath: (payload) => ipcRenderer.invoke('video:trim-export-from-path', payload),
+  pickSavePath: (payload) => ipcRenderer.invoke('video:pick-save-path', payload),
   blobUploadOpen: (payload) => ipcRenderer.invoke('video:blob-upload-open', payload),
   blobUploadChunk: (payload) => ipcRenderer.invoke('video:blob-upload-chunk', payload),
   blobUploadClose: (payload) => ipcRenderer.invoke('video:blob-upload-close', payload),

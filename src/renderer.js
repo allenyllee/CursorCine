@@ -1082,7 +1082,46 @@ async function saveBlobToDisk(blob, ext) {
   }
 }
 
-async function exportRecording(blob) {
+async function uploadBlobToOpenSession(blob, openResult) {
+  if (!openResult || !openResult.ok) {
+    return openResult || { ok: false, reason: 'OPEN_FAILED', message: '建立上傳工作階段失敗。' };
+  }
+
+  const sessionId = Number(openResult.sessionId);
+
+  try {
+    let offset = 0;
+    while (offset < blob.size) {
+      const end = Math.min(blob.size, offset + IPC_UPLOAD_CHUNK_BYTES);
+      const chunkBytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
+      const chunkResult = await electronAPI.blobUploadChunk({
+        sessionId,
+        bytes: chunkBytes
+      });
+      if (!chunkResult || !chunkResult.ok) {
+        throw new Error((chunkResult && chunkResult.message) || '寫入區塊失敗。');
+      }
+      offset = end;
+    }
+
+    const closeResult = await electronAPI.blobUploadClose({
+      sessionId,
+      abort: false
+    });
+    if (!closeResult || !closeResult.ok) {
+      throw new Error((closeResult && closeResult.message) || '關閉上傳工作階段失敗。');
+    }
+    return openResult;
+  } catch (error) {
+    await electronAPI.blobUploadClose({
+      sessionId,
+      abort: true
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function exportRecording(blob, preopenedSaveSession) {
   if (recordingMeta.requestedFormat === 'mp4' && recordingMeta.fallbackFromMp4) {
     setStatus('正在輸出剪輯檔，並用 ffmpeg 轉為 MP4...');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1120,48 +1159,17 @@ async function exportRecording(blob) {
     return;
   }
 
-  await saveBlobToDisk(blob, recordingMeta.outputExt);
+  if (preopenedSaveSession && preopenedSaveSession.ok) {
+    await uploadBlobToOpenSession(blob, preopenedSaveSession);
+  } else {
+    await saveBlobToDisk(blob, recordingMeta.outputExt);
+  }
   setStatus(`儲存完成（${recordingMeta.outputExt.toUpperCase()}）`);
 }
 
 async function uploadBlobToPath(blob, options) {
   const openResult = await electronAPI.blobUploadOpen(options || {});
-  if (!openResult || !openResult.ok) {
-    return openResult || { ok: false, reason: 'OPEN_FAILED', message: '建立上傳工作階段失敗。' };
-  }
-
-  const sessionId = Number(openResult.sessionId);
-
-  try {
-    let offset = 0;
-    while (offset < blob.size) {
-      const end = Math.min(blob.size, offset + IPC_UPLOAD_CHUNK_BYTES);
-      const chunkBytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
-      const chunkResult = await electronAPI.blobUploadChunk({
-        sessionId,
-        bytes: chunkBytes
-      });
-      if (!chunkResult || !chunkResult.ok) {
-        throw new Error((chunkResult && chunkResult.message) || '寫入區塊失敗。');
-      }
-      offset = end;
-    }
-
-    const closeResult = await electronAPI.blobUploadClose({
-      sessionId,
-      abort: false
-    });
-    if (!closeResult || !closeResult.ok) {
-      throw new Error((closeResult && closeResult.message) || '關閉上傳工作階段失敗。');
-    }
-    return openResult;
-  } catch (error) {
-    await electronAPI.blobUploadClose({
-      sessionId,
-      abort: true
-    }).catch(() => {});
-    throw error;
-  }
+  return uploadBlobToOpenSession(blob, openResult);
 }
 
 function clearEditorState() {
@@ -1517,7 +1525,7 @@ async function renderTrimmedBlob() {
   throw new Error('剪輯輸出為空檔，請調整剪輯區段後重試。');
 }
 
-async function exportTrimmedViaFfmpeg() {
+async function exportTrimmedViaFfmpeg(outputPath) {
   if (!editorState.blob || editorState.blob.size <= 0) {
     return {
       ok: false,
@@ -1541,19 +1549,20 @@ async function exportTrimmedViaFfmpeg() {
     endSec: editorState.trimEnd,
     qualityPreset: getOutputQualityPresetKey(),
     requestedFormat: recordingMeta.requestedFormat,
+    outputPath: outputPath || '',
     baseName: `cursorcine-${timestamp}`,
     cleanupTempDir: uploaded.tempDir
   });
 }
 
-async function exportTrimmedViaBuiltin() {
+async function exportTrimmedViaBuiltin(preopenedSaveSession) {
   const rendered = await renderTrimmedBlob();
   if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
     recordingMeta.fallbackFromMp4 = true;
     recordingMeta.outputExt = rendered.ext;
     recordingMeta.outputMimeType = rendered.blob.type || 'video/webm';
   }
-  await exportRecording(rendered.blob);
+  await exportRecording(rendered.blob, preopenedSaveSession);
   return rendered;
 }
 
@@ -1564,6 +1573,8 @@ async function saveEditedClip() {
   editorState.exportBusy = true;
   updateEditorButtons();
   stopExportTimer(true);
+
+  let preopenedSaveSession = null;
 
   try {
     resetExportTrace('Trace: 開始輸出');
@@ -1578,9 +1589,26 @@ async function saveEditedClip() {
 
     const mode = getExportEngineMode();
     if (mode !== 'builtin') {
+      const ffmpegOutputExt = recordingMeta.requestedFormat === 'mp4' ? 'mp4' : 'webm';
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      setStatus('請選擇儲存位置...');
+      const picked = await electronAPI.pickSavePath({
+        title: '儲存剪輯影片',
+        baseName: `cursorcine-${timestamp}`,
+        ext: ffmpegOutputExt
+      });
+      if (!picked || !picked.ok) {
+        if (picked && picked.reason === 'CANCELED') {
+          setExportDebug('ffmpeg', 'CANCELED', picked.message || '使用者取消儲存');
+          setStatus('已取消儲存');
+          return;
+        }
+        throw new Error((picked && picked.message) || '建立儲存路徑失敗');
+      }
+
       setStatus('正在輸出剪輯片段（ffmpeg）...');
       setExportDebug('ffmpeg', 'RUNNING', '嘗試使用 ffmpeg 輸出剪輯');
-      const ffmpegResult = await exportTrimmedViaFfmpeg();
+      const ffmpegResult = await exportTrimmedViaFfmpeg(picked.path);
       if (ffmpegResult && ffmpegResult.ffmpegCommand) {
         appendExportTrace('ffmpeg cmd: ' + ffmpegResult.ffmpegCommand);
       } else if (ffmpegResult && Array.isArray(ffmpegResult.ffmpegArgs) && ffmpegResult.ffmpegArgs.length > 0) {
@@ -1616,7 +1644,30 @@ async function saveEditedClip() {
     }
 
     try {
-      const rendered = await exportTrimmedViaBuiltin();
+      if (recordingMeta.requestedFormat !== 'mp4') {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        setStatus('請選擇儲存位置...');
+        preopenedSaveSession = await electronAPI.blobUploadOpen({
+          mode: 'save',
+          title: '儲存影片',
+          baseName: `cursorcine-${timestamp}`,
+          ext: recordingMeta.outputExt,
+          route: 'save-file'
+        });
+
+        if (!preopenedSaveSession || !preopenedSaveSession.ok) {
+          if (preopenedSaveSession && preopenedSaveSession.reason === 'CANCELED') {
+            setExportDebug(mode === 'builtin' ? '內建' : 'ffmpeg -> 內建', 'CANCELED', preopenedSaveSession.message || '使用者取消儲存');
+            setStatus('已取消儲存');
+            return;
+          }
+          throw new Error((preopenedSaveSession && preopenedSaveSession.message) || '建立儲存工作階段失敗');
+        }
+      }
+
+      setStatus('正在輸出剪輯片段（內建）...');
+      const rendered = await exportTrimmedViaBuiltin(preopenedSaveSession);
+      preopenedSaveSession = null;
       const route = mode === 'builtin' ? '內建' : 'ffmpeg -> 內建';
       if (rendered && rendered.includeAudio === false) {
         setExportDebug(route, 'OK_NO_AUDIO', '內建輸出完成（已自動關閉音訊）');
@@ -1634,6 +1685,12 @@ async function saveEditedClip() {
     }
     setStatus(`輸出失敗: ${error.message}`);
   } finally {
+    if (preopenedSaveSession && preopenedSaveSession.ok) {
+      await electronAPI.blobUploadClose({
+        sessionId: Number(preopenedSaveSession.sessionId),
+        abort: true
+      }).catch(() => {});
+    }
     stopExportTimer(false);
     editorState.exportBusy = false;
     updateEditorButtons();

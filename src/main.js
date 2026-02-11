@@ -678,15 +678,20 @@ app.whenReady().then(() => {
     const exportQualityPreset = EXPORT_QUALITY_PRESETS[qualityPresetKey] || EXPORT_QUALITY_PRESETS[DEFAULT_EXPORT_QUALITY_PRESET];
     const outputExt = requestedFormat === 'mp4' ? 'mp4' : 'webm';
 
-    const { canceled, filePath } = await dialog.showSaveDialog({
-      title: '儲存剪輯影片',
-      defaultPath: `${safeBaseName}.${outputExt}`,
-      filters: [{ name: `${outputExt.toUpperCase()} Video`, extensions: [outputExt] }]
-    });
-
-    if (canceled || !filePath) {
-      return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+    const requestedOutputPath = String(payload && payload.outputPath ? payload.outputPath : '');
+    let filePath = requestedOutputPath;
+    if (!filePath) {
+      const saveDialog = await dialog.showSaveDialog({
+        title: '儲存剪輯影片',
+        defaultPath: `${safeBaseName}.${outputExt}`,
+        filters: [{ name: `${outputExt.toUpperCase()} Video`, extensions: [outputExt] }]
+      });
+      if (saveDialog.canceled || !saveDialog.filePath) {
+        return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+      }
+      filePath = saveDialog.filePath;
     }
+
     event.sender.send('video:export-phase', {
       phase: 'processing-start',
       route: 'trim-export'
@@ -1038,6 +1043,21 @@ app.whenReady().then(() => {
 
   ipcMain.handle('video:trim-export-from-path', async (event, payload) => {
     return runTrimExport(event, payload || {});
+  });
+
+  ipcMain.handle('video:pick-save-path', async (_event, payload) => {
+    const ext = sanitizeExt(payload && payload.ext ? payload.ext : 'webm');
+    const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
+    const title = String(payload && payload.title ? payload.title : '儲存影片');
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title,
+      defaultPath: `${safeBaseName}.${ext}`,
+      filters: [{ name: `${ext.toUpperCase()} Video`, extensions: [ext] }]
+    });
+    if (canceled || !filePath) {
+      return { ok: false, reason: 'CANCELED', message: '使用者取消儲存。' };
+    }
+    return { ok: true, path: filePath };
   });
 
   ipcMain.handle('video:save-file', async (event, payload) => {
