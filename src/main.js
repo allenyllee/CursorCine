@@ -41,6 +41,8 @@ let overlayRecordingActive = false;
 let overlayBounds = null;
 let blobUploadSessionSeq = 1;
 const blobUploadSessions = new Map();
+let exportTaskSeq = 1;
+const exportTasks = new Map();
 const OVERLAY_WHEEL_PAUSE_MS = 450;
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -416,17 +418,48 @@ function hasFfmpeg() {
   return result.status === 0;
 }
 
-function runFfmpeg(args) {
+function createExportAbortedError() {
+  const error = new Error('輸出已由使用者中斷。');
+  error.code = 'EXPORT_ABORTED';
+  return error;
+}
+
+function runFfmpeg(args, taskId) {
+  const parsedTaskId = Number(taskId);
+  const hasTask = Number.isFinite(parsedTaskId) && parsedTaskId > 0;
+  const task = hasTask ? exportTasks.get(parsedTaskId) : null;
+
   return new Promise((resolve, reject) => {
+    if (task && task.canceled) {
+      reject(createExportAbortedError());
+      return;
+    }
+
     const proc = spawn('ffmpeg', args, { windowsHide: true });
     let stderr = '';
+
+    if (task) {
+      task.proc = proc;
+    }
 
     proc.stderr.on('data', (chunk) => {
       stderr += chunk.toString();
     });
 
-    proc.on('error', reject);
+    proc.on('error', (error) => {
+      if (task && task.proc === proc) {
+        task.proc = null;
+      }
+      reject(error);
+    });
     proc.on('close', (code) => {
+      if (task && task.proc === proc) {
+        task.proc = null;
+      }
+      if (task && task.canceled) {
+        reject(createExportAbortedError());
+        return;
+      }
       if (code === 0) {
         resolve();
         return;
@@ -652,6 +685,40 @@ app.whenReady().then(() => {
     });
   });
 
+  ipcMain.handle('video:export-task-open', async () => {
+    const taskId = exportTaskSeq++;
+    exportTasks.set(taskId, {
+      canceled: false,
+      proc: null
+    });
+    return { ok: true, taskId };
+  });
+
+  ipcMain.handle('video:export-task-cancel', async (_event, payload) => {
+    const taskId = Number(payload && payload.taskId);
+    const task = exportTasks.get(taskId);
+    if (!task) {
+      return { ok: false, reason: 'INVALID_TASK', message: '找不到輸出工作。' };
+    }
+    task.canceled = true;
+    if (task.proc && !task.proc.killed) {
+      try {
+        task.proc.kill('SIGKILL');
+      } catch (_error) {
+      }
+    }
+    return { ok: true, taskId };
+  });
+
+  ipcMain.handle('video:export-task-close', async (_event, payload) => {
+    const taskId = Number(payload && payload.taskId);
+    if (!Number.isFinite(taskId) || taskId <= 0) {
+      return { ok: false, reason: 'INVALID_TASK', message: '輸出工作識別碼無效。' };
+    }
+    exportTasks.delete(taskId);
+    return { ok: true, taskId };
+  });
+
   async function runTrimExport(event, payload) {
     if (!hasFfmpeg()) {
       return {
@@ -698,6 +765,7 @@ app.whenReady().then(() => {
     });
 
     const durationSec = Math.max(0.05, endSec - startSec);
+    const taskId = Number(payload && payload.taskId);
     const ffmpegArgs = [
       '-y',
       '-ss',
@@ -756,7 +824,7 @@ app.whenReady().then(() => {
       }
 
       ffmpegArgs.push(filePath);
-      await runFfmpeg(ffmpegArgs);
+      await runFfmpeg(ffmpegArgs, taskId);
       return {
         ok: true,
         path: filePath,
@@ -765,6 +833,15 @@ app.whenReady().then(() => {
         ffmpegCommand: 'ffmpeg ' + ffmpegArgs.map(quoteShellArg).join(' ')
       };
     } catch (error) {
+      if (error && error.code === 'EXPORT_ABORTED') {
+        await fs.rm(filePath, { force: true }).catch(() => {});
+        return {
+          ok: false,
+          reason: 'EXPORT_ABORTED',
+          message: '輸出已中斷。',
+          ffmpegArgs
+        };
+      }
       return {
         ok: false,
         reason: 'TRIM_FAILED',
@@ -962,6 +1039,7 @@ app.whenReady().then(() => {
     }
 
     const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
+    const taskId = Number(payload && payload.taskId);
     const { canceled, filePath } = await dialog.showSaveDialog({
       title: '另存 MP4',
       defaultPath: `${safeBaseName}.mp4`,
@@ -995,9 +1073,17 @@ app.whenReady().then(() => {
         '-b:a',
         '192k',
         filePath
-      ]);
+      ], taskId);
       return { ok: true, path: filePath };
     } catch (error) {
+      if (error && error.code === 'EXPORT_ABORTED') {
+        await fs.rm(filePath, { force: true }).catch(() => {});
+        return {
+          ok: false,
+          reason: 'EXPORT_ABORTED',
+          message: '輸出已中斷。'
+        };
+      }
       return {
         ok: false,
         reason: 'CONVERT_FAILED',
@@ -1111,6 +1197,15 @@ app.on('window-all-closed', () => {
   for (const [sessionId, session] of blobUploadSessions) {
     blobUploadSessions.delete(sessionId);
     cleanupBlobUploadSession(session, true).catch(() => {});
+  }
+  for (const [taskId, task] of exportTasks) {
+    exportTasks.delete(taskId);
+    if (task && task.proc && !task.proc.killed) {
+      try {
+        task.proc.kill('SIGKILL');
+      } catch (_error) {
+      }
+    }
   }
   destroyOverlayWindow();
   if (process.platform !== 'darwin') {

@@ -20,6 +20,7 @@ const trimRangeLabel = document.getElementById('trimRangeLabel');
 const playPauseBtn = document.getElementById('playPauseBtn');
 const previewRangeBtn = document.getElementById('previewRangeBtn');
 const saveClipBtn = document.getElementById('saveClipBtn');
+const abortExportBtn = document.getElementById('abortExportBtn');
 const discardClipBtn = document.getElementById('discardClipBtn');
 const exportDebugRoute = document.getElementById('exportDebugRoute');
 const exportDebugCode = document.getElementById('exportDebugCode');
@@ -122,6 +123,8 @@ let recordingStopRequestedAtMs = 0;
 let exportStartedAtMs = 0;
 let exportTimer = 0;
 let builtinAudioCompatibility = 'unknown';
+let exportCancelRequested = false;
+let activeExportTaskId = 0;
 
 let recordingMeta = {
   outputExt: 'webm',
@@ -314,6 +317,42 @@ function formatBytes(bytes) {
   const safeBytes = Math.max(0, toFiniteNumber(bytes, 0));
   const mb = safeBytes / (1024 * 1024);
   return mb.toFixed(mb >= 100 ? 0 : 1) + ' MB';
+}
+
+function createExportAbortedError() {
+  const error = new Error('輸出已中斷。');
+  error.code = 'EXPORT_ABORTED';
+  return error;
+}
+
+function isExportAbortedError(value) {
+  return Boolean(
+    value &&
+    (
+      value.code === 'EXPORT_ABORTED' ||
+      value.reason === 'EXPORT_ABORTED'
+    )
+  );
+}
+
+function throwIfExportAborted() {
+  if (exportCancelRequested) {
+    throw createExportAbortedError();
+  }
+}
+
+function requestExportAbort() {
+  if (!editorState.exportBusy || exportCancelRequested) {
+    return;
+  }
+  exportCancelRequested = true;
+  setExportDebug(exportDebugRoute?.textContent || '輸出', 'ABORTING', '使用者要求中斷輸出');
+  setStatus('正在中斷輸出...');
+  if (activeExportTaskId > 0) {
+    electronAPI.exportTaskCancel({
+      taskId: activeExportTaskId
+    }).catch(() => {});
+  }
 }
 
 function waitForEvent(target, eventName) {
@@ -1037,6 +1076,9 @@ function updateEditorButtons() {
   playPauseBtn.disabled = busy || !editorState.active;
   previewRangeBtn.disabled = busy || !editorState.active;
   saveClipBtn.disabled = busy || !editorState.active;
+  if (abortExportBtn) {
+    abortExportBtn.disabled = !busy;
+  }
   discardClipBtn.disabled = busy || !editorState.active;
 }
 
@@ -1126,8 +1168,10 @@ async function uploadBlobToOpenSession(blob, openResult) {
   const sessionId = Number(openResult.sessionId);
 
   try {
+    throwIfExportAborted();
     let offset = 0;
     while (offset < blob.size) {
+      throwIfExportAborted();
       const end = Math.min(blob.size, offset + IPC_UPLOAD_CHUNK_BYTES);
       const chunkBytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
       const chunkResult = await electronAPI.blobUploadChunk({
@@ -1140,6 +1184,7 @@ async function uploadBlobToOpenSession(blob, openResult) {
       offset = end;
     }
 
+    throwIfExportAborted();
     const closeResult = await electronAPI.blobUploadClose({
       sessionId,
       abort: false
@@ -1157,7 +1202,8 @@ async function uploadBlobToOpenSession(blob, openResult) {
   }
 }
 
-async function exportRecording(blob, preopenedSaveSession) {
+async function exportRecording(blob, preopenedSaveSession, exportTaskId) {
+  throwIfExportAborted();
   if (recordingMeta.requestedFormat === 'mp4' && recordingMeta.fallbackFromMp4) {
     setStatus('正在輸出剪輯檔，並用 ffmpeg 轉為 MP4...');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1177,6 +1223,7 @@ async function exportRecording(blob, preopenedSaveSession) {
     const result = await electronAPI.convertWebmToMp4FromPath({
       inputPath: uploaded.filePath,
       baseName: `cursorcine-${timestamp}`,
+      taskId: exportTaskId || 0,
       cleanupTempDir: uploaded.tempDir
     });
 
@@ -1189,6 +1236,9 @@ async function exportRecording(blob, preopenedSaveSession) {
       setStatus('已取消儲存 MP4');
       return;
     }
+    if (result.reason === 'EXPORT_ABORTED') {
+      throw createExportAbortedError();
+    }
 
     await saveBlobToDisk(blob, 'webm');
     setStatus(`MP4 轉檔失敗，已改存 WebM: ${result.message}`);
@@ -1200,6 +1250,7 @@ async function exportRecording(blob, preopenedSaveSession) {
   } else {
     await saveBlobToDisk(blob, recordingMeta.outputExt);
   }
+  throwIfExportAborted();
   setStatus(`儲存完成（${recordingMeta.outputExt.toUpperCase()}）`);
 }
 
@@ -1219,6 +1270,8 @@ function clearEditorState() {
   editorState.duration = 0;
   editorState.trimStart = 0;
   editorState.trimEnd = 0;
+  exportCancelRequested = false;
+  activeExportTaskId = 0;
   rawVideo.pause();
   rawVideo.removeAttribute('src');
   rawVideo.load();
@@ -1274,6 +1327,7 @@ async function playEditorSegment(fromTrimStart) {
 }
 
 async function renderTrimmedBlob() {
+  throwIfExportAborted();
   const recorderConfig = pickBuiltinRecorderConfig();
   const outputQualityKey = getOutputQualityPresetKey();
   const outputQualityPreset = QUALITY_PRESETS[outputQualityKey] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
@@ -1305,6 +1359,7 @@ async function renderTrimmedBlob() {
   );
 
   async function runBuiltinCapture(mode, includeAudio) {
+    throwIfExportAborted();
     appendExportTrace('builtin[' + mode + '] start (audio=' + (includeAudio ? 'on' : 'off') + ')');
     const source = document.createElement('video');
     source.src = editorState.sourceUrl;
@@ -1335,12 +1390,14 @@ async function renderTrimmedBlob() {
 
     try {
       await waitForEvent(source, 'loadedmetadata');
+      throwIfExportAborted();
       appendExportTrace(
         'builtin[' + mode + '] metadata: duration=' + toFiniteNumber(source.duration, 0).toFixed(3) +
         ', readyState=' + source.readyState +
         ', muted=' + source.muted
       );
       await seekVideo(source, editorState.trimStart);
+      throwIfExportAborted();
       appendExportTrace('builtin[' + mode + '] seeked: current=' + toFiniteNumber(source.currentTime, 0).toFixed(3));
 
       if (mode === 'canvas') {
@@ -1492,6 +1549,12 @@ async function renderTrimmedBlob() {
       }, BUILTIN_FIRST_CHUNK_TIMEOUT_MS);
 
       pollTimer = setInterval(() => {
+        if (exportCancelRequested) {
+          stopReason = 'user-cancel';
+          source.pause();
+          stopRecorderSafely();
+          return;
+        }
         if (mode === 'canvas' && typeof drawFrame === 'function') {
           drawFrame();
         }
@@ -1504,6 +1567,7 @@ async function renderTrimmedBlob() {
       }, 16);
 
       await completed;
+      throwIfExportAborted();
       clearInterval(pollTimer);
       pollTimer = 0;
       if (firstChunkTimer) {
@@ -1577,6 +1641,7 @@ async function renderTrimmedBlob() {
   }
 
   for (const attempt of attempts) {
+    throwIfExportAborted();
     const result = await runBuiltinCapture(attempt.mode, attempt.includeAudio);
     if (result.blob && result.blob.size > 0) {
       if (attempt.includeAudio) {
@@ -1602,7 +1667,8 @@ async function renderTrimmedBlob() {
   throw new Error('剪輯輸出為空檔，請調整剪輯區段後重試。');
 }
 
-async function exportTrimmedViaFfmpeg(outputPath) {
+async function exportTrimmedViaFfmpeg(outputPath, exportTaskId) {
+  throwIfExportAborted();
   if (!editorState.blob || editorState.blob.size <= 0) {
     return {
       ok: false,
@@ -1620,26 +1686,29 @@ async function exportTrimmedViaFfmpeg(outputPath) {
   if (!uploaded.ok) {
     return uploaded;
   }
+  throwIfExportAborted();
   return electronAPI.exportTrimmedVideoFromPath({
     inputPath: uploaded.filePath,
     startSec: editorState.trimStart,
     endSec: editorState.trimEnd,
     qualityPreset: getOutputQualityPresetKey(),
     requestedFormat: recordingMeta.requestedFormat,
+    taskId: exportTaskId || 0,
     outputPath: outputPath || '',
     baseName: `cursorcine-${timestamp}`,
     cleanupTempDir: uploaded.tempDir
   });
 }
 
-async function exportTrimmedViaBuiltin(preopenedSaveSession) {
+async function exportTrimmedViaBuiltin(preopenedSaveSession, exportTaskId) {
+  throwIfExportAborted();
   const rendered = await renderTrimmedBlob();
   if (recordingMeta.requestedFormat === 'mp4' && rendered.ext !== 'mp4') {
     recordingMeta.fallbackFromMp4 = true;
     recordingMeta.outputExt = rendered.ext;
     recordingMeta.outputMimeType = rendered.blob.type || 'video/webm';
   }
-  await exportRecording(rendered.blob, preopenedSaveSession);
+  await exportRecording(rendered.blob, preopenedSaveSession, exportTaskId);
   return rendered;
 }
 
@@ -1648,12 +1717,20 @@ async function saveEditedClip() {
     return;
   }
   editorState.exportBusy = true;
+  exportCancelRequested = false;
   updateEditorButtons();
   stopExportTimer(true);
 
   let preopenedSaveSession = null;
+  activeExportTaskId = 0;
 
   try {
+    const taskOpenResult = await electronAPI.exportTaskOpen();
+    if (!taskOpenResult || !taskOpenResult.ok) {
+      throw new Error((taskOpenResult && taskOpenResult.message) || '建立輸出工作失敗');
+    }
+    activeExportTaskId = Number(taskOpenResult.taskId || 0);
+
     resetExportTrace('Trace: 開始輸出');
     appendExportTrace('saveEditedClip start');
     stopEditorPlayback();
@@ -1682,10 +1759,11 @@ async function saveEditedClip() {
         }
         throw new Error((picked && picked.message) || '建立儲存路徑失敗');
       }
+      throwIfExportAborted();
 
       setStatus('正在輸出剪輯片段（ffmpeg）...');
       setExportDebug('ffmpeg', 'RUNNING', '嘗試使用 ffmpeg 輸出剪輯');
-      const ffmpegResult = await exportTrimmedViaFfmpeg(picked.path);
+      const ffmpegResult = await exportTrimmedViaFfmpeg(picked.path, activeExportTaskId);
       if (ffmpegResult && ffmpegResult.ffmpegCommand) {
         appendExportTrace('ffmpeg cmd: ' + ffmpegResult.ffmpegCommand);
       } else if (ffmpegResult && Array.isArray(ffmpegResult.ffmpegArgs) && ffmpegResult.ffmpegArgs.length > 0) {
@@ -1701,6 +1779,9 @@ async function saveEditedClip() {
         setExportDebug('ffmpeg', 'CANCELED', ffmpegResult.message || '使用者取消儲存');
         setStatus('已取消儲存');
         return;
+      }
+      if (ffmpegResult && ffmpegResult.reason === 'EXPORT_ABORTED') {
+        throw createExportAbortedError();
       }
 
       if (mode === 'ffmpeg') {
@@ -1741,9 +1822,10 @@ async function saveEditedClip() {
           throw new Error((preopenedSaveSession && preopenedSaveSession.message) || '建立儲存工作階段失敗');
         }
       }
+      throwIfExportAborted();
 
       setStatus('正在輸出剪輯片段（內建）...');
-      const rendered = await exportTrimmedViaBuiltin(preopenedSaveSession);
+      const rendered = await exportTrimmedViaBuiltin(preopenedSaveSession, activeExportTaskId);
       preopenedSaveSession = null;
       const route = mode === 'builtin' ? '內建' : 'ffmpeg -> 內建';
       if (rendered && rendered.includeAudio === false) {
@@ -1756,6 +1838,11 @@ async function saveEditedClip() {
       throw builtinError;
     }
   } catch (error) {
+    if (isExportAbortedError(error) || exportCancelRequested) {
+      setExportDebug(exportDebugRoute?.textContent || '輸出', 'CANCELED', '輸出已中斷');
+      setStatus('已中斷輸出');
+      return;
+    }
     console.error(error);
     if (exportDebugCode.textContent === '-' || exportDebugCode.textContent === 'RUNNING') {
       setExportDebug('未知', 'EXPORT_FAILED', error.message || '輸出失敗');
@@ -1768,8 +1855,15 @@ async function saveEditedClip() {
         abort: true
       }).catch(() => {});
     }
+    if (activeExportTaskId > 0) {
+      await electronAPI.exportTaskClose({
+        taskId: activeExportTaskId
+      }).catch(() => {});
+      activeExportTaskId = 0;
+    }
     stopExportTimer(false);
     editorState.exportBusy = false;
+    exportCancelRequested = false;
     updateEditorButtons();
   }
 }
@@ -2105,6 +2199,12 @@ saveClipBtn.addEventListener('click', () => {
     setStatus(`儲存失敗: ${error.message}`);
   });
 });
+
+if (abortExportBtn) {
+  abortExportBtn.addEventListener('click', () => {
+    requestExportAbort();
+  });
+}
 
 discardClipBtn.addEventListener('click', () => {
   stopEditorPlayback();

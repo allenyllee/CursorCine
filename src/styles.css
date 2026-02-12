@@ -378,7 +378,7 @@ button:disabled {
 
 .timeline-actions {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   background: color-mix(in srgb, #0f1b30 96%, black 4%);
   padding-bottom: 8px;
@@ -456,6 +456,13 @@ button:disabled {
 #saveClipBtn {
   background: linear-gradient(120deg, #a4f4c7, #58d89b);
   color: #0d2f20;
+  border: none;
+  font-weight: 700;
+}
+
+#abortExportBtn {
+  background: linear-gradient(120deg, #ffb9b9, #ff7d7d);
+  color: #4c1212;
   border: none;
   font-weight: 700;
 }
