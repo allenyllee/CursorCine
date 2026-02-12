@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.2] - 2026-02-12
+
+### Added
+* Force-abort control for ongoing exports, allowing users to cancel long-running output operations.
+* GitHub Actions supply-chain checks in `.github/workflows/build.yml` via a dedicated `supply-chain` job.
+* PR dependency risk gate using `actions/dependency-review-action` with high-severity and denied-license policies.
+
+### Changed
+* Recording stop flow now reduces stop latency and improves stop-progress feedback.
+* `ffmpeg` export flow now opens the save dialog earlier to fail fast before heavy processing starts.
+* Builtin exporter quality ceiling was raised to improve final output quality in high-quality presets.
+* CI now runs `npm audit --omit=dev --audit-level=high` before version-change detection/build.
+* Build/release flow is blocked when supply-chain checks fail.
+* Build workflow now also runs on `pull_request` to enforce dependency checks earlier.
+* `README.md` now documents CI supply-chain checks and failure behavior for push/PR workflows.
+* Release documentation policy now requires reviewing `README.md` during version bumps.
+* Release metadata bump from `0.5.1` to `0.5.2`.
+
+### Fixed
+* Export now fails fast when the recorder yields no initial chunks, improving error visibility and avoiding invalid follow-up processing.
+
 ## [0.5.1] - 2026-02-11
 
 ### Added
