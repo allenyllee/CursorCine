@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   blobUploadOpen: (payload) => ipcRenderer.invoke('video:blob-upload-open', payload),
   blobUploadChunk: (payload) => ipcRenderer.invoke('video:blob-upload-chunk', payload),
   blobUploadClose: (payload) => ipcRenderer.invoke('video:blob-upload-close', payload),
+  pathToFileUrl: (payload) => ipcRenderer.invoke('path:to-file-url', payload),
+  cleanupTempDir: (payload) => ipcRenderer.invoke('path:cleanup-temp-dir', payload),
   overlayCreate: (displayId) => ipcRenderer.invoke('overlay:create', displayId),
   overlayDestroy: () => ipcRenderer.invoke('overlay:destroy'),
   overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),

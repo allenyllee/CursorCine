@@ -1,7 +1,9 @@
 const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog } = require('electron');
 const path = require('path');
+const fsNative = require('fs');
 const fs = require('fs/promises');
 const os = require('os');
+const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
 
 const CURSOR_POLL_MS = 16;
@@ -41,8 +43,10 @@ let overlayRecordingActive = false;
 let overlayBounds = null;
 let blobUploadSessionSeq = 1;
 const blobUploadSessions = new Map();
+const trackedUploadTempDirs = new Set();
 let exportTaskSeq = 1;
 const exportTasks = new Map();
+let quitCleanupStarted = false;
 const OVERLAY_WHEEL_PAUSE_MS = 450;
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
@@ -271,8 +275,21 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
+  mainWindow.on('close', () => {
+    if (process.platform === 'darwin' || quitCleanupStarted) {
+      return;
+    }
+    quitCleanupStarted = true;
+    runQuitCleanupSync();
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
+    overlayRecordingActive = false;
+    destroyOverlayWindow();
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
   });
 }
 
@@ -485,6 +502,30 @@ function sanitizeExt(value, fallback = 'webm') {
   return String(value || fallback).replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || fallback;
 }
 
+function isSafeCursorcineTempDir(tempDir) {
+  const dir = String(tempDir || '');
+  if (!dir) {
+    return false;
+  }
+  const resolved = path.resolve(dir);
+  const tmpRoot = path.resolve(os.tmpdir());
+  const expectedPrefix = tmpRoot.endsWith(path.sep) ? tmpRoot : tmpRoot + path.sep;
+  return resolved.startsWith(expectedPrefix) && path.basename(resolved).startsWith('cursorcine-upload-');
+}
+
+function trackUploadTempDir(tempDir) {
+  if (isSafeCursorcineTempDir(tempDir)) {
+    trackedUploadTempDirs.add(path.resolve(tempDir));
+  }
+}
+
+function untrackUploadTempDir(tempDir) {
+  if (!tempDir) {
+    return;
+  }
+  trackedUploadTempDirs.delete(path.resolve(String(tempDir)));
+}
+
 async function cleanupBlobUploadSession(session, removeOutput) {
   if (!session) {
     return;
@@ -499,8 +540,135 @@ async function cleanupBlobUploadSession(session, removeOutput) {
   }
 
   if (removeOutput && session.tempDir) {
+    untrackUploadTempDir(session.tempDir);
     await fs.rm(session.tempDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+async function cleanupTrackedUploadTempDirs() {
+  for (const tempDir of trackedUploadTempDirs) {
+    trackedUploadTempDirs.delete(tempDir);
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function cleanupUploadTempDirsByScan() {
+  const tmpRoot = os.tmpdir();
+  const entries = await fs.readdir(tmpRoot, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry || !entry.isDirectory()) {
+      continue;
+    }
+    if (!String(entry.name || '').startsWith('cursorcine-upload-')) {
+      continue;
+    }
+    const dirPath = path.join(tmpRoot, entry.name);
+    if (!isSafeCursorcineTempDir(dirPath)) {
+      continue;
+    }
+    trackedUploadTempDirs.delete(path.resolve(dirPath));
+    await fs.rm(dirPath, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function runQuitCleanup() {
+  for (const [sessionId, session] of blobUploadSessions) {
+    blobUploadSessions.delete(sessionId);
+    await cleanupBlobUploadSession(session, true).catch(() => {});
+  }
+  for (const [taskId, task] of exportTasks) {
+    exportTasks.delete(taskId);
+    if (task && task.proc && !task.proc.killed) {
+      try {
+        task.proc.kill('SIGKILL');
+      } catch (_error) {
+      }
+    }
+  }
+  await cleanupTrackedUploadTempDirs();
+  await cleanupUploadTempDirsByScan();
+  destroyOverlayWindow();
+}
+
+function cleanupBlobUploadSessionSync(session, removeOutput) {
+  if (!session) {
+    return;
+  }
+
+  const fd = Number(session && session.handle ? session.handle.fd : -1);
+  if (Number.isFinite(fd) && fd >= 0) {
+    try {
+      fsNative.closeSync(fd);
+    } catch (_error) {
+    }
+  }
+
+  if (removeOutput && session.filePath) {
+    try {
+      fsNative.rmSync(session.filePath, { force: true });
+    } catch (_error) {
+    }
+  }
+
+  if (removeOutput && session.tempDir) {
+    untrackUploadTempDir(session.tempDir);
+    try {
+      fsNative.rmSync(session.tempDir, { recursive: true, force: true });
+    } catch (_error) {
+    }
+  }
+}
+
+function cleanupUploadTempDirsByScanSync() {
+  const tmpRoot = os.tmpdir();
+  let entries = [];
+  try {
+    entries = fsNative.readdirSync(tmpRoot, { withFileTypes: true });
+  } catch (_error) {
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (!entry || !entry.isDirectory()) {
+      continue;
+    }
+    if (!String(entry.name || '').startsWith('cursorcine-upload-')) {
+      continue;
+    }
+    const dirPath = path.join(tmpRoot, entry.name);
+    if (!isSafeCursorcineTempDir(dirPath)) {
+      continue;
+    }
+    trackedUploadTempDirs.delete(path.resolve(dirPath));
+    try {
+      fsNative.rmSync(dirPath, { recursive: true, force: true });
+    } catch (_error) {
+    }
+  }
+}
+
+function runQuitCleanupSync() {
+  for (const [sessionId, session] of blobUploadSessions) {
+    blobUploadSessions.delete(sessionId);
+    cleanupBlobUploadSessionSync(session, true);
+  }
+  for (const [taskId, task] of exportTasks) {
+    exportTasks.delete(taskId);
+    if (task && task.proc && !task.proc.killed) {
+      try {
+        task.proc.kill('SIGKILL');
+      } catch (_error) {
+      }
+    }
+  }
+  for (const tempDir of trackedUploadTempDirs) {
+    trackedUploadTempDirs.delete(tempDir);
+    try {
+      fsNative.rmSync(tempDir, { recursive: true, force: true });
+    } catch (_error) {
+    }
+  }
+  cleanupUploadTempDirsByScanSync();
+  destroyOverlayWindow();
 }
 
 app.whenReady().then(() => {
@@ -881,6 +1049,7 @@ app.whenReady().then(() => {
       });
     } else {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-upload-'));
+      trackUploadTempDir(tempDir);
       filePath = path.join(tempDir, `${safeBaseName}.${ext}`);
     }
 
@@ -900,6 +1069,7 @@ app.whenReady().then(() => {
       };
     } catch (error) {
       if (tempDir) {
+        untrackUploadTempDir(tempDir);
         await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
       }
       return {
@@ -945,6 +1115,54 @@ app.whenReady().then(() => {
     blobUploadSessions.delete(sessionId);
     await cleanupBlobUploadSession(session, abort);
     return { ok: true, aborted: abort };
+  });
+
+  ipcMain.handle('path:to-file-url', async (_event, payload) => {
+    const filePath = String(payload && payload.filePath ? payload.filePath : '');
+    if (!filePath) {
+      return {
+        ok: false,
+        reason: 'INVALID_PATH',
+        message: '缺少檔案路徑。'
+      };
+    }
+    try {
+      return {
+        ok: true,
+        url: pathToFileURL(filePath).toString()
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'PATH_TO_URL_FAILED',
+        message: error && error.message ? error.message : '無法轉換檔案路徑。'
+      };
+    }
+  });
+
+  ipcMain.handle('path:cleanup-temp-dir', async (_event, payload) => {
+    const tempDir = String(payload && payload.tempDir ? payload.tempDir : '');
+    if (!tempDir) {
+      return { ok: true, skipped: true };
+    }
+    if (!isSafeCursorcineTempDir(tempDir)) {
+      return {
+        ok: false,
+        reason: 'UNSAFE_PATH',
+        message: '拒絕清理非 CursorCine 臨時資料夾。'
+      };
+    }
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      untrackUploadTempDir(tempDir);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'CLEANUP_FAILED',
+        message: error && error.message ? error.message : '臨時資料夾清理失敗。'
+      };
+    }
   });
 
   ipcMain.handle('video:convert-webm-to-mp4', async (event, payload) => {
@@ -1194,21 +1412,19 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  for (const [sessionId, session] of blobUploadSessions) {
-    blobUploadSessions.delete(sessionId);
-    cleanupBlobUploadSession(session, true).catch(() => {});
-  }
-  for (const [taskId, task] of exportTasks) {
-    exportTasks.delete(taskId);
-    if (task && task.proc && !task.proc.killed) {
-      try {
-        task.proc.kill('SIGKILL');
-      } catch (_error) {
-      }
-    }
-  }
-  destroyOverlayWindow();
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', (_event) => {
+  if (quitCleanupStarted) {
+    return;
+  }
+  quitCleanupStarted = true;
+  runQuitCleanupSync();
+});
+
+app.on('will-quit', () => {
+  cleanupUploadTempDirsByScanSync();
 });
