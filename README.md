@@ -92,6 +92,16 @@ npm run dist:linux
 
 產物會輸出到 `dist/` 目錄。
 
+## CI 與供應鏈檢查
+
+GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈檢查：
+
+- `pull_request` 會執行 `actions/dependency-review-action`，阻擋高風險依賴與禁止授權（AGPL/GPL）。
+- `push` / `workflow_dispatch` 會執行 `npm audit --omit=dev --audit-level=high`。
+- 只有供應鏈檢查通過後，才會繼續版本變更判斷與 build/release 流程。
+
+這代表如果依賴存在 `high` 以上漏洞，或稽核流程失敗，CI 會直接中止，不會產生釋出產物。
+
 ## 專案結構
 
 - `src/main.js`: Electron 主程序，提供游標/點擊 IPC、overlay 視窗控制、儲存與 ffmpeg 輸出
