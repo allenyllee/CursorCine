@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.3] - 2026-02-12
+
+### Changed
+* Recording now streams chunks to temporary files during capture, reducing RAM spikes in long sessions.
+* Release metadata bump from `0.5.2` to `0.5.3`.
+
+### Fixed
+* Hardened temporary recording cleanup on app/window shutdown to avoid leftover `cursorcine-upload-*` directories in system temp paths.
+
 ## [0.5.2] - 2026-02-12
 
 ### Added

@@ -25,6 +25,7 @@
 - 停止錄影後自動進入剪輯時間軸，可回放區段、調整起訖點、儲存定稿
 - 剪輯輸出引擎可選：`auto`（ffmpeg 優先）、`ffmpeg`、`builtin`
 - 內建輸出 Debug 面板，顯示路徑、錯誤碼與 trace
+- 錄製資料採用暫存檔串流寫入，長時間錄製可降低記憶體暴增風險
 
 ## 錄製與輸出流程
 
@@ -117,6 +118,7 @@ GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈�
 - 輸出使用瀏覽器 `MediaRecorder`，實際可用編碼會因系統不同而異。
 - 若要使用 `ffmpeg` 剪輯或 `MP4` 轉檔，系統需安裝 `ffmpeg` 並可在命令列執行 `ffmpeg -version`。
 - `auto` 輸出模式下若 `ffmpeg` 失敗，會自動退回內建輸出器。
+- 錄製暫存檔會建立在系統暫存目錄（如 Linux 的 `/tmp/cursorcine-upload-*`），在關閉編輯器或退出程式時會自動清理。
 
 ## 授權條款
 
