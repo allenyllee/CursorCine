@@ -2,13 +2,45 @@ name: Build Executables
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  supply-chain:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency review (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: AGPL-1.0-only, AGPL-3.0-only, GPL-2.0-only, GPL-3.0-only
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: NPM audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
   detect-version-change:
+    needs: supply-chain
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
