@@ -94,6 +94,13 @@ const IPC_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const RECORDING_TIMESLICE_MS = 1000;
 const BUILTIN_RECORDER_TIMESLICE_MS = 200;
 const BUILTIN_FIRST_CHUNK_TIMEOUT_MS = 2500;
+const BUILTIN_OUTPUT_VIDEO_BITRATE_MULTIPLIERS = {
+  smooth: 1.0,
+  balanced: 1.5,
+  high: 2.5
+};
+const BUILTIN_OUTPUT_VIDEO_BITRATE_MAX = 120000000;
+const BUILTIN_OUTPUT_AUDIO_BITRATE_MAX = 512000;
 
 let sources = [];
 let sourceStream;
@@ -812,6 +819,8 @@ function pickRecorderConfig(requestedFormat) {
 
 function pickBuiltinRecorderConfig() {
   const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp9',
     'video/webm;codecs=vp8,opus',
     'video/webm;codecs=vp8',
     'video/webm'
@@ -859,10 +868,35 @@ function createMediaRecorder(stream, recorderConfig, qualityPreset) {
   throw lastError || new Error('Failed to create MediaRecorder');
 }
 
-function createBuiltinMediaRecorder(stream, recorderConfig) {
+function createBuiltinMediaRecorder(stream, recorderConfig, qualityPreset, includeAudio) {
+  const videoBitrate = Number((qualityPreset && qualityPreset.videoBitrate) || 22000000);
+  const audioBitrate = Number((qualityPreset && qualityPreset.audioBitrate) || 256000);
   const optionCandidates = [];
   if (recorderConfig && recorderConfig.mimeType) {
+    if (includeAudio) {
+      optionCandidates.push({
+        mimeType: recorderConfig.mimeType,
+        videoBitsPerSecond: videoBitrate,
+        audioBitsPerSecond: audioBitrate
+      });
+    } else {
+      optionCandidates.push({
+        mimeType: recorderConfig.mimeType,
+        videoBitsPerSecond: videoBitrate
+      });
+    }
     optionCandidates.push({ mimeType: recorderConfig.mimeType });
+  }
+  if (includeAudio) {
+    optionCandidates.push({
+      videoBitsPerSecond: videoBitrate,
+      audioBitsPerSecond: audioBitrate,
+      bitsPerSecond: videoBitrate + audioBitrate
+    });
+  } else {
+    optionCandidates.push({
+      videoBitsPerSecond: videoBitrate
+    });
   }
   optionCandidates.push({});
 
@@ -1241,6 +1275,20 @@ async function playEditorSegment(fromTrimStart) {
 
 async function renderTrimmedBlob() {
   const recorderConfig = pickBuiltinRecorderConfig();
+  const outputQualityKey = getOutputQualityPresetKey();
+  const outputQualityPreset = QUALITY_PRESETS[outputQualityKey] || QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+  const builtinBitrateBoost = Number(BUILTIN_OUTPUT_VIDEO_BITRATE_MULTIPLIERS[outputQualityKey] || 1);
+  const boostedOutputQualityPreset = {
+    label: outputQualityPreset.label + ' +',
+    videoBitrate: Math.min(
+      BUILTIN_OUTPUT_VIDEO_BITRATE_MAX,
+      Math.max(1500000, Math.round(Number(outputQualityPreset.videoBitrate || 22000000) * builtinBitrateBoost))
+    ),
+    audioBitrate: Math.min(
+      BUILTIN_OUTPUT_AUDIO_BITRATE_MAX,
+      Math.max(64000, Math.round(Number(outputQualityPreset.audioBitrate || 256000) * 1.2))
+    )
+  };
   const outputMimeType = recorderConfig.mimeType || 'video/webm';
   const width = rawVideo.videoWidth || previewCanvas.width || 1920;
   const height = rawVideo.videoHeight || previewCanvas.height || 1080;
@@ -1248,6 +1296,10 @@ async function renderTrimmedBlob() {
     'builtin init: format=' + recordingMeta.requestedFormat +
     ', mime=' + (recorderConfig.mimeType || 'auto') +
     ', ext=' + recorderConfig.ext +
+    ', quality=' + outputQualityPreset.label +
+    ', boost=' + builtinBitrateBoost.toFixed(2) + 'x' +
+    ', vBitrate=' + boostedOutputQualityPreset.videoBitrate +
+    ', aBitrate=' + boostedOutputQualityPreset.audioBitrate +
     ', trim=' + editorState.trimStart.toFixed(3) + '->' + editorState.trimEnd.toFixed(3) +
     ', size=' + width + 'x' + height
   );
@@ -1359,7 +1411,7 @@ async function renderTrimmedBlob() {
         appendExportTrace('builtin[' + mode + '] audio disabled for this attempt');
       }
 
-      recorder = createBuiltinMediaRecorder(outputStream, recorderConfig);
+      recorder = createBuiltinMediaRecorder(outputStream, recorderConfig, boostedOutputQualityPreset, includeAudio);
       appendExportTrace(
         'builtin[' + mode + '] recorder created: mime=' + (recorder.mimeType || outputMimeType) +
         ', state=' + recorder.state
