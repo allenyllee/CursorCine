@@ -7,7 +7,7 @@
     "start": "node scripts/start-electron.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
-    "predist:win": "npm run build:native-hdr-win",
+    "predist:win": "node scripts/check-dist-win-env.js && npm run build:native-hdr-win",
     "dist:win": "electron-builder --win nsis",
     "dist:linux": "electron-builder --linux AppImage deb",
     "build:native-hdr-win": "node-gyp rebuild --directory native/windows-hdr-capture"

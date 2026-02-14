@@ -148,6 +148,7 @@ npm run dist:win
 ```
 
 `dist:win` 會自動先執行 `build:native-hdr-win`（透過 `predist:win`），不需手動先跑一次 native 編譯。
+若在 Linux/WSL 執行 `dist:win` 且未安裝 `wine`，前置檢查會直接提示並中止。
 
 只打包 Linux 安裝檔（AppImage + deb）：
 
