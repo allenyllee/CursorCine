@@ -329,6 +329,134 @@ function getDisplayHdrHint(displayId) {
   };
 }
 
+async function runHdrNativeRouteSmoke(payload = {}) {
+  const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+  const displayId = payload && payload.displayId ? payload.displayId : undefined;
+  const result = {
+    ok: false,
+    sourceId,
+    displayId: displayId ? String(displayId) : '',
+    startOk: false,
+    readOk: false,
+    stopOk: false,
+    startReason: '',
+    readReason: '',
+    stopReason: '',
+    width: 0,
+    height: 0,
+    stride: 0,
+    pixelFormat: '',
+    hasFrame: false
+  };
+
+  if (process.platform !== 'win32') {
+    result.startReason = 'NOT_WINDOWS';
+    result.readReason = 'NOT_WINDOWS';
+    result.stopReason = 'NOT_WINDOWS';
+    pushHdrTrace('native-smoke-not-windows', { sourceId });
+    return result;
+  }
+  if (!sourceId) {
+    result.startReason = 'INVALID_INPUT';
+    result.readReason = 'SKIPPED';
+    result.stopReason = 'SKIPPED';
+    pushHdrTrace('native-smoke-invalid-input', {});
+    return result;
+  }
+
+  const bridge = loadWindowsHdrNativeBridge();
+  if (!bridge || typeof bridge.startCapture !== 'function' || typeof bridge.readFrame !== 'function' || typeof bridge.stopCapture !== 'function') {
+    result.startReason = 'NATIVE_UNAVAILABLE';
+    result.readReason = 'SKIPPED';
+    result.stopReason = 'SKIPPED';
+    pushHdrTrace('native-smoke-native-unavailable', {
+      message: windowsHdrNativeLoadError || 'NATIVE_UNAVAILABLE'
+    });
+    return result;
+  }
+
+  let nativeSessionId = 0;
+  try {
+    const displayHint = getDisplayHdrHint(displayId);
+    const start = await Promise.resolve(bridge.startCapture({
+      sourceId,
+      displayId: displayHint.displayId,
+      maxFps: 30,
+      toneMap: { profile: 'rec709-rolloff-v1' },
+      displayHint
+    }));
+    if (!start || !start.ok) {
+      result.startReason = String((start && start.reason) || 'START_FAILED');
+      result.readReason = 'SKIPPED';
+      result.stopReason = 'SKIPPED';
+      pushHdrTrace('native-smoke-start-failed', {
+        reason: result.startReason,
+        message: String((start && start.message) || '')
+      });
+      return result;
+    }
+
+    nativeSessionId = Number(start.nativeSessionId || 0);
+    result.startOk = true;
+    result.startReason = 'OK';
+    result.width = Number(start.width || 0);
+    result.height = Number(start.height || 0);
+    result.stride = Number(start.stride || 0);
+    result.pixelFormat = String(start.pixelFormat || 'BGRA8');
+
+    try {
+      const frame = await Promise.resolve(bridge.readFrame({
+        nativeSessionId,
+        timeoutMs: 200
+      }));
+      if (frame && frame.ok) {
+        result.readOk = true;
+        result.readReason = 'OK';
+        result.hasFrame = Boolean(frame.bytes && frame.bytes.length > 0);
+        result.width = Number(frame.width || result.width || 0);
+        result.height = Number(frame.height || result.height || 0);
+        result.stride = Number(frame.stride || result.stride || 0);
+        result.pixelFormat = String(frame.pixelFormat || result.pixelFormat || 'BGRA8');
+      } else {
+        result.readOk = false;
+        result.readReason = String((frame && frame.reason) || 'READ_FAILED');
+      }
+    } catch (error) {
+      result.readOk = false;
+      result.readReason = error && error.message ? error.message : 'READ_EXCEPTION';
+    }
+  } catch (error) {
+    result.startReason = error && error.message ? error.message : 'START_EXCEPTION';
+    result.readReason = 'SKIPPED';
+  } finally {
+    if (nativeSessionId > 0) {
+      try {
+        await Promise.resolve(bridge.stopCapture({ nativeSessionId }));
+        result.stopOk = true;
+        result.stopReason = 'OK';
+      } catch (error) {
+        result.stopOk = false;
+        result.stopReason = error && error.message ? error.message : 'STOP_EXCEPTION';
+      }
+    } else {
+      result.stopOk = false;
+      result.stopReason = 'SKIPPED';
+    }
+  }
+
+  result.ok = Boolean(result.startOk && result.stopOk);
+  pushHdrTrace('native-smoke-finished', {
+    sourceId: result.sourceId,
+    displayId: result.displayId,
+    ok: result.ok,
+    startOk: result.startOk,
+    readOk: result.readOk,
+    stopOk: result.stopOk,
+    readReason: result.readReason
+  });
+  return result;
+}
+
 async function stopHdrCaptureSession(sessionId) {
   const session = hdrCaptureSessions.get(sessionId);
   if (!session) {
@@ -1656,6 +1784,10 @@ app.whenReady().then(() => {
       ,
       trace: hdrTrace.slice(-80)
     };
+  });
+
+  ipcMain.handle('hdr:native-route-smoke', async (_event, payload) => {
+    return runHdrNativeRouteSmoke(payload || {});
   });
 
   ipcMain.handle('app:copy-text', async (_event, payload) => {

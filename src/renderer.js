@@ -39,6 +39,10 @@ const hdrMappingRuntimeEl = document.getElementById('hdrMappingRuntime');
 const hdrMappingProbeEl = document.getElementById('hdrMappingProbe');
 const hdrMappingDiagEl = document.getElementById('hdrMappingDiag');
 const copyHdrDiagBtn = document.getElementById('copyHdrDiagBtn');
+const runHdrSmokeBtn = document.getElementById('runHdrSmokeBtn');
+const forceNativeOptionTemplate = hdrMappingModeSelect
+  ? Array.from(hdrMappingModeSelect.options || []).find((opt) => opt.value === 'force-native')?.cloneNode(true)
+  : null;
 const hdrCompEnable = document.getElementById('hdrCompEnable');
 const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
 const hdrCompStrengthLabel = document.getElementById('hdrCompStrengthLabel');
@@ -112,6 +116,7 @@ const HDR_NATIVE_READ_TIMEOUT_MS = 80;
 const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 66;
+const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 1500;
 
 let sources = [];
 let sourceStream;
@@ -242,7 +247,9 @@ const nativeHdrState = {
   sharedFrameView: null,
   sharedControlView: null,
   lastSharedFrameSeq: 0,
-  pendingFrame: null
+  pendingFrame: null,
+  firstFrameReceived: false,
+  startupDeadlineMs: 0
 };
 
 const viewState = {
@@ -405,18 +412,26 @@ function updateHdrModeAvailabilityUi() {
   if (!hdrMappingModeSelect) {
     return;
   }
-  const forceOption = Array.from(hdrMappingModeSelect.options || []).find((opt) => opt.value === 'force-native');
-  if (!forceOption) {
-    return;
+  const visible = Boolean(hdrMappingState.nativeEnvFlagEnabled);
+  let forceOption = Array.from(hdrMappingModeSelect.options || []).find((opt) => opt.value === 'force-native');
+  if (!visible && forceOption) {
+    forceOption.remove();
+    forceOption = null;
+  }
+  if (visible && !forceOption && forceNativeOptionTemplate) {
+    hdrMappingModeSelect.appendChild(forceNativeOptionTemplate.cloneNode(true));
+    forceOption = Array.from(hdrMappingModeSelect.options || []).find((opt) => opt.value === 'force-native') || null;
   }
 
   const disabled = !hdrMappingState.nativeRouteEnabled;
-  forceOption.disabled = disabled;
-  forceOption.textContent = disabled
-    ? 'Force Native（暫停：IPC guard）'
-    : 'Force Native（不可用則阻止開始）';
+  if (forceOption) {
+    forceOption.disabled = disabled;
+    forceOption.textContent = disabled
+      ? 'Force Native（暫停：IPC guard）'
+      : 'Force Native（不可用則阻止開始）';
+  }
 
-  if (disabled && normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native') {
+  if ((!visible || disabled) && normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native') {
     hdrMappingState.mode = 'auto';
     hdrMappingModeSelect.value = 'auto';
   }
@@ -468,6 +483,28 @@ async function copyHdrDiagnosticsSnapshot() {
     throw new Error('無法複製 HDR 診斷到剪貼簿。');
   }
   return payload;
+}
+
+async function runHdrNativeSmokeFromUi() {
+  const sourceId = String(sourceSelect && sourceSelect.value ? sourceSelect.value : '');
+  const displayId = selectedSource && selectedSource.display_id ? String(selectedSource.display_id) : '';
+  if (!sourceId) {
+    throw new Error('缺少來源，請先選擇螢幕來源。');
+  }
+  const result = await electronAPI.hdrNativeRouteSmoke({
+    sourceId,
+    displayId
+  });
+  pushHdrDecisionTrace('native-smoke', {
+    sourceId,
+    displayId,
+    ok: Boolean(result && result.ok),
+    startOk: Boolean(result && result.startOk),
+    readOk: Boolean(result && result.readOk),
+    stopOk: Boolean(result && result.stopOk),
+    readReason: String((result && result.readReason) || '')
+  });
+  return result;
 }
 
 function updateRecordingTimeLabel(seconds = 0) {
@@ -1366,6 +1403,8 @@ async function stopNativeHdrCapture() {
   nativeHdrState.sharedControlView = null;
   nativeHdrState.lastSharedFrameSeq = 0;
   nativeHdrState.pendingFrame = null;
+  nativeHdrState.firstFrameReceived = false;
+  nativeHdrState.startupDeadlineMs = 0;
 }
 
 function blitNativeFrameToCanvas(frame) {
@@ -1407,6 +1446,7 @@ function blitNativeFrameToCanvas(frame) {
   nativeHdrState.ctx.putImageData(nativeHdrState.frameImageData, 0, 0);
   nativeHdrState.lastFrameAtMs = performance.now();
   nativeHdrState.frameCount += 1;
+  nativeHdrState.firstFrameReceived = true;
 }
 
 function tryReadNativeFrameFromSharedBuffer() {
@@ -1489,6 +1529,7 @@ async function pollNativeHdrFrame() {
 
   nativeHdrFramePumpRunning = true;
   try {
+    const now = performance.now();
     const pushedResult = tryReadNativeFrameFromPushBuffer();
     if (pushedResult && pushedResult.ok) {
       nativeHdrState.readFailures = 0;
@@ -1503,7 +1544,11 @@ async function pollNativeHdrFrame() {
       blitNativeFrameToCanvas(result);
       return;
     }
-    const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (performance.now() - nativeHdrState.lastFrameAtMs) : 0;
+    const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (now - nativeHdrState.lastFrameAtMs) : 0;
+    if (!nativeHdrState.firstFrameReceived && nativeHdrState.startupDeadlineMs > 0 && now >= nativeHdrState.startupDeadlineMs) {
+      await fallbackNativeToDesktopVideo('STARTUP_NO_FRAME_TIMEOUT');
+      return;
+    }
     if (result === null) {
       if (idleForMs >= HDR_NATIVE_MAX_IDLE_MS) {
         nativeHdrState.readFailures += 1;
@@ -1632,6 +1677,8 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   nativeHdrState.sharedControlView = sharedControlBuffer instanceof SharedArrayBuffer ? new Int32Array(sharedControlBuffer) : null;
   nativeHdrState.lastSharedFrameSeq = 0;
   nativeHdrState.pendingFrame = null;
+  nativeHdrState.firstFrameReceived = false;
+  nativeHdrState.startupDeadlineMs = performance.now() + HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS;
 
   ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
   setHdrRuntimeRoute('native', '目前路徑: Native HDR (Rec.709 Mapping)');
@@ -3225,6 +3272,24 @@ if (copyHdrDiagBtn) {
   });
 }
 
+if (runHdrSmokeBtn) {
+  runHdrSmokeBtn.addEventListener('click', () => {
+    setStatus('正在執行 Native smoke...');
+    runHdrNativeSmokeFromUi()
+      .then((result) => {
+        const ok = Boolean(result && result.ok);
+        const summary = 'start=' + (result && result.startOk ? 'ok' : 'fail') +
+          ', read=' + (result && result.readOk ? 'ok' : 'fail') +
+          ', stop=' + (result && result.stopOk ? 'ok' : 'fail');
+        setStatus((ok ? 'Native smoke 成功。' : 'Native smoke 失敗。') + ' ' + summary);
+        updateHdrDiagStatus();
+      })
+      .catch((error) => {
+        setStatus('Native smoke 失敗: ' + (error && error.message ? error.message : String(error)));
+      });
+  });
+}
+
 sourceSelect.addEventListener('change', () => {
   selectedSource = sources.find((s) => s.id === sourceSelect.value);
   maybeProbeHdrForUi().catch(() => {});
@@ -3326,6 +3391,7 @@ hdrCompState.strength = clamp(Number(hdrCompStrengthInput.value || DEFAULT_HDR_C
 hdrCompState.hue = clamp(Number(hdrCompHueInput.value || DEFAULT_HDR_COMP_HUE), -30, 30);
 hdrCompState.rolloff = clamp(Number(hdrCompRolloffInput.value || DEFAULT_HDR_COMP_ROLLOFF), 0, 1);
 hdrCompState.sharpness = clamp(Number(hdrCompSharpnessInput.value || DEFAULT_HDR_COMP_SHARPNESS), 0, 1);
+updateHdrModeAvailabilityUi();
 
 zoomLabel.textContent = `${cameraState.maxZoom.toFixed(1)}x`;
 smoothLabel.textContent = cameraState.smoothing.toFixed(2);
