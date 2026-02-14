@@ -116,7 +116,7 @@ const HDR_NATIVE_READ_TIMEOUT_MS = 80;
 const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 66;
-const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 1500;
+const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
 
 let sources = [];
 let sourceStream;
@@ -148,7 +148,6 @@ let activeExportTaskId = 0;
 let nativeHdrFramePumpTimer = 0;
 let nativeHdrFramePumpRunning = false;
 let nativeHdrFallbackAttempted = false;
-let unsubscribeHdrNativeFrame = null;
 let hdrExperimentalPollTimer = 0;
 let hdrSmokeAutoRunning = false;
 let hdrSmokeManualRunning = false;
@@ -259,7 +258,9 @@ const nativeHdrState = {
   lastSharedFrameSeq: 0,
   pendingFrame: null,
   firstFrameReceived: false,
-  startupDeadlineMs: 0
+  startupDeadlineMs: 0,
+  frameEndpoint: '',
+  lastHttpFrameSeq: 0
 };
 
 const viewState = {
@@ -509,6 +510,8 @@ async function copyHdrDiagnosticsSnapshot() {
         width: nativeHdrState.width,
         height: nativeHdrState.height,
         stride: nativeHdrState.stride,
+        frameEndpoint: nativeHdrState.frameEndpoint,
+        lastHttpFrameSeq: nativeHdrState.lastHttpFrameSeq,
         readFailures: nativeHdrState.readFailures,
         droppedFrames: nativeHdrState.droppedFrames,
         frameCount: nativeHdrState.frameCount
@@ -1489,6 +1492,8 @@ async function stopNativeHdrCapture() {
   nativeHdrState.pendingFrame = null;
   nativeHdrState.firstFrameReceived = false;
   nativeHdrState.startupDeadlineMs = 0;
+  nativeHdrState.frameEndpoint = '';
+  nativeHdrState.lastHttpFrameSeq = 0;
 }
 
 function blitNativeFrameToCanvas(frame) {
@@ -1577,6 +1582,43 @@ function tryReadNativeFrameFromPushBuffer() {
   return frame;
 }
 
+async function tryReadNativeFrameFromHttpEndpoint() {
+  const endpoint = String(nativeHdrState.frameEndpoint || '');
+  if (!endpoint) {
+    return null;
+  }
+  const url = endpoint + '?minSeq=' + String(Number(nativeHdrState.lastHttpFrameSeq || 0));
+  const response = await fetch(url, {
+    method: 'GET',
+    cache: 'no-store'
+  }).catch(() => null);
+  if (!response || response.status === 204) {
+    return null;
+  }
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: 'HTTP_FRAME_' + String(response.status || 0)
+    };
+  }
+  const frameSeq = Number(response.headers.get('x-hdr-frame-seq') || 0);
+  if (frameSeq <= Number(nativeHdrState.lastHttpFrameSeq || 0)) {
+    return null;
+  }
+  const width = Math.max(1, Number(response.headers.get('x-hdr-width') || nativeHdrState.width || 1));
+  const height = Math.max(1, Number(response.headers.get('x-hdr-height') || nativeHdrState.height || 1));
+  const stride = Math.max(width * 4, Number(response.headers.get('x-hdr-stride') || nativeHdrState.stride || width * 4));
+  const bytes = await response.arrayBuffer();
+  nativeHdrState.lastHttpFrameSeq = frameSeq;
+  return {
+    ok: true,
+    width,
+    height,
+    stride,
+    bytes
+  };
+}
+
 async function fallbackNativeToDesktopVideo(reason) {
   if (nativeHdrFallbackAttempted) {
     return;
@@ -1622,6 +1664,14 @@ async function pollNativeHdrFrame() {
     }
 
     const result = tryReadNativeFrameFromSharedBuffer();
+    if (!result) {
+      const httpResult = await tryReadNativeFrameFromHttpEndpoint();
+      if (httpResult && httpResult.ok) {
+        nativeHdrState.readFailures = 0;
+        blitNativeFrameToCanvas(httpResult);
+        return;
+      }
+    }
 
     if (result && result.ok && result.hasFrame !== false) {
       nativeHdrState.readFailures = 0;
@@ -1763,6 +1813,8 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   nativeHdrState.pendingFrame = null;
   nativeHdrState.firstFrameReceived = false;
   nativeHdrState.startupDeadlineMs = performance.now() + HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS;
+  nativeHdrState.frameEndpoint = String(start.frameEndpoint || '');
+  nativeHdrState.lastHttpFrameSeq = 0;
 
   ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
   setHdrRuntimeRoute('native', '目前路徑: Native HDR (Rec.709 Mapping)');
@@ -1868,7 +1920,9 @@ async function buildCaptureStreams(sourceId, selectedDisplayId) {
   }
 
   if (decision.route === 'native') {
-    sourceStream = await getDesktopAudioStream(sourceId);
+    // Avoid desktop audio-only constraints here; on some Windows/Electron
+    // builds this can trigger renderer termination (bad IPC message 263).
+    sourceStream = await getDesktopStream(sourceId).catch(() => undefined);
     if (!sourceStream) {
       sourceStream = new MediaStream();
     }
@@ -3577,33 +3631,3 @@ electronAPI.onExportPhase((payload) => {
 
 updateExportTimeLabel(0);
 startHdrExperimentalStatePoll();
-
-if (typeof electronAPI.onHdrNativeFrame === 'function') {
-  unsubscribeHdrNativeFrame = electronAPI.onHdrNativeFrame((payload) => {
-    if (!payload || !nativeHdrState.active) {
-      return;
-    }
-    const sessionId = Number(payload.sessionId || 0);
-    if (sessionId <= 0 || sessionId !== nativeHdrState.sessionId) {
-      return;
-    }
-    const bytes = payload.bytes;
-    let normalizedBytes = null;
-    if (bytes instanceof ArrayBuffer) {
-      normalizedBytes = bytes;
-    } else if (ArrayBuffer.isView(bytes)) {
-      const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      normalizedBytes = view.slice().buffer;
-    }
-    if (!(normalizedBytes instanceof ArrayBuffer)) {
-      return;
-    }
-    nativeHdrState.pendingFrame = {
-      ok: true,
-      width: Math.max(1, Number(payload.width || nativeHdrState.width || 1)),
-      height: Math.max(1, Number(payload.height || nativeHdrState.height || 1)),
-      stride: Math.max(4, Number(payload.stride || nativeHdrState.stride || 4)),
-      bytes: normalizedBytes
-    };
-  });
-}

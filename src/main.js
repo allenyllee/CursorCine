@@ -5,6 +5,8 @@ const fs = require('fs/promises');
 const os = require('os');
 const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
+const http = require('http');
+const crypto = require('crypto');
 
 const CURSOR_POLL_MS = 16;
 const BLOB_UPLOAD_CHUNK_MAX_BYTES = 8 * 1024 * 1024;
@@ -27,7 +29,7 @@ const HDR_RUNTIME_MAX_READ_FAILURES = 8;
 const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
 const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '') === '1';
 const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '') === '1';
-const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-ipc-push' : 'control-plane-only';
+const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
 const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 33;
 const HDR_SHARED_CONTROL = {
@@ -79,6 +81,9 @@ let hdrWorkerLastMessage = '';
 let hdrWorkerRequestSeq = 1;
 const hdrWorkerPendingRequests = new Map();
 const hdrTrace = [];
+let hdrFrameServer = null;
+let hdrFrameServerPort = 0;
+const hdrFrameTokens = new Map();
 let hdrNativeSmokeState = {
   ran: false,
   ok: false,
@@ -104,6 +109,78 @@ function pushHdrTrace(type, detail = {}) {
   if (hdrTrace.length > HDR_TRACE_LIMIT) {
     hdrTrace.splice(0, hdrTrace.length - HDR_TRACE_LIMIT);
   }
+}
+
+function ensureHdrFrameServer() {
+  if (hdrFrameServer && hdrFrameServerPort > 0) {
+    return Promise.resolve({ ok: true, port: hdrFrameServerPort });
+  }
+
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      try {
+        const url = new URL(String(req.url || '/'), 'http://127.0.0.1');
+        const pathMatch = /^\/hdr-frame\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
+        if (!pathMatch) {
+          res.statusCode = 404;
+          res.end('not-found');
+          return;
+        }
+        const token = pathMatch[1];
+        const sessionId = Number(hdrFrameTokens.get(token) || 0);
+        if (!sessionId || !hdrSharedSessions.has(sessionId)) {
+          res.statusCode = 404;
+          res.end('invalid-session');
+          return;
+        }
+        const session = hdrSharedSessions.get(sessionId);
+        if (!session || !session.latestFrameBytes || !Buffer.isBuffer(session.latestFrameBytes)) {
+          res.statusCode = 204;
+          res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.end();
+          return;
+        }
+        const minSeq = Number(url.searchParams.get('minSeq') || 0);
+        const frameSeq = Number(session.latestFrameSeq || 0);
+        if (minSeq > 0 && frameSeq <= minSeq) {
+          res.statusCode = 204;
+          res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.end();
+          return;
+        }
+
+        const frame = session.latestFrameBytes;
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('X-Hdr-Frame-Seq', String(frameSeq));
+        res.setHeader('X-Hdr-Width', String(Number(session.latestWidth || session.width || 0)));
+        res.setHeader('X-Hdr-Height', String(Number(session.latestHeight || session.height || 0)));
+        res.setHeader('X-Hdr-Stride', String(Number(session.latestStride || session.stride || 0)));
+        res.setHeader('X-Hdr-Pixel-Format', String(session.latestPixelFormat || 'BGRA8'));
+        res.setHeader('X-Hdr-Timestamp-Ms', String(Number(session.latestTimestampMs || 0)));
+        res.end(frame);
+      } catch (_error) {
+        res.statusCode = 500;
+        res.end('server-error');
+      }
+    });
+
+    server.on('error', () => {
+      resolve({ ok: false, port: 0 });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      hdrFrameServer = server;
+      hdrFrameServerPort = addr && typeof addr === 'object' ? Number(addr.port || 0) : 0;
+      pushHdrTrace('frame-server-start', { port: hdrFrameServerPort });
+      resolve({ ok: hdrFrameServerPort > 0, port: hdrFrameServerPort });
+    });
+  });
 }
 
 function getHdrWorkerStatus() {
@@ -1031,6 +1108,15 @@ async function cleanupUploadTempDirsByScan() {
 }
 
 async function runQuitCleanup() {
+  if (hdrFrameServer) {
+    try {
+      await new Promise((resolve) => hdrFrameServer.close(() => resolve()));
+    } catch (_error) {
+    }
+    hdrFrameServer = null;
+    hdrFrameServerPort = 0;
+    hdrFrameTokens.clear();
+  }
   for (const sessionId of Array.from(hdrSharedSessions.keys())) {
     stopHdrSharedSession(sessionId);
   }
@@ -1113,6 +1199,15 @@ function cleanupUploadTempDirsByScanSync() {
 }
 
 function runQuitCleanupSync() {
+  if (hdrFrameServer) {
+    try {
+      hdrFrameServer.close();
+    } catch (_error) {
+    }
+    hdrFrameServer = null;
+    hdrFrameServerPort = 0;
+    hdrFrameTokens.clear();
+  }
   if (hdrWorkerProcess) {
     try {
       hdrWorkerProcess.kill();
@@ -1156,6 +1251,9 @@ function stopHdrSharedSession(sessionId) {
   }
   hdrSharedSessions.delete(sessionId);
   clearTimeout(session.pumpTimer);
+  if (session.frameToken) {
+    hdrFrameTokens.delete(String(session.frameToken));
+  }
   pushHdrTrace('shared-stop', {
     sessionId,
     nativeSessionId: Number(session.nativeSessionId || 0),
@@ -1218,6 +1316,13 @@ function pumpHdrSharedSession(sessionId) {
       const width = Number(frameResult.width || session.width);
       const height = Number(frameResult.height || session.height);
       const stride = Number(frameResult.stride || session.stride);
+      session.latestFrameSeq = session.frameSeq;
+      session.latestTimestampMs = ts;
+      session.latestWidth = width;
+      session.latestHeight = height;
+      session.latestStride = stride;
+      session.latestPixelFormat = String(frameResult.pixelFormat || 'BGRA8');
+      session.latestFrameBytes = Buffer.from(src);
 
       if (session.frameView && session.controlView) {
         const len = Math.min(src.length, session.frameView.length);
@@ -1232,24 +1337,6 @@ function pumpHdrSharedSession(sessionId) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
-      }
-
-      if (HDR_NATIVE_PUSH_IPC_ENABLED && session.sender && !session.sender.isDestroyed() && typeof session.sender.send === 'function') {
-        const pushLen = Math.min(src.length, HDR_RUNTIME_MAX_FRAME_BYTES);
-        const pushBytes = Buffer.from(src.subarray(0, pushLen));
-        try {
-          session.sender.send('hdr:native-frame', {
-            sessionId,
-            frameSeq: session.frameSeq,
-            width,
-            height,
-            stride,
-            pixelFormat: String(frameResult.pixelFormat || 'BGRA8'),
-            timestampMs: ts,
-            bytes: pushBytes
-          });
-        } catch (_error) {
-        }
       }
 
       session.readFailures = 0;
@@ -1642,8 +1729,14 @@ app.whenReady().then(() => {
       const width = Math.max(1, Number(startResult.width || 1));
       const height = Math.max(1, Number(startResult.height || 1));
       const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
+      const frameServer = await ensureHdrFrameServer();
+      const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
 
       const sessionId = hdrSharedSessionSeq++;
+      const frameToken = crypto.randomBytes(12).toString('base64url');
+      const frameEndpoint = frameToken && port > 0
+        ? 'http://127.0.0.1:' + String(port) + '/hdr-frame/' + frameToken
+        : '';
       hdrSharedSessions.set(sessionId, {
         bridge,
         sender: _event.sender,
@@ -1661,8 +1754,23 @@ app.whenReady().then(() => {
         lastFrameAt: 0,
         lastError: '',
         lastReason: 'STARTED',
+        frameToken,
+        frameEndpoint,
+        latestFrameSeq: 0,
+        latestTimestampMs: 0,
+        latestWidth: width,
+        latestHeight: height,
+        latestStride: stride,
+        latestPixelFormat: String(startResult.pixelFormat || 'BGRA8'),
+        latestFrameBytes: null,
         pumpTimer: 0
       });
+      if (frameToken) {
+        hdrFrameTokens.set(frameToken, sessionId);
+      }
+      // HTTP pull mode does not require shared-buffer bind.
+      // Start pumping immediately so renderer can fetch frames right away.
+      pumpHdrSharedSession(sessionId);
       pushHdrTrace('shared-start-ok', {
         sessionId,
         nativeSessionId: Number(startResult.nativeSessionId || 0),
@@ -1676,7 +1784,9 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
-        pixelFormat: String(startResult.pixelFormat || 'BGRA8')
+        pixelFormat: String(startResult.pixelFormat || 'BGRA8'),
+        frameEndpoint,
+        frameToken
       };
     } catch (error) {
       pushHdrTrace('shared-start-exception', {
@@ -1771,6 +1881,7 @@ app.whenReady().then(() => {
         readFailures: Number(session.readFailures || 0),
         totalReadFailures: Number(session.totalReadFailures || 0),
         bytesPumped: Number(session.bytesPumped || 0),
+        frameEndpoint: String(session.frameEndpoint || ''),
         lastReason: String(session.lastReason || ''),
         lastError: String(session.lastError || ''),
         startedAt: Number(session.startedAt || 0),
@@ -1809,6 +1920,7 @@ app.whenReady().then(() => {
           readFailures: Number(sessionObj.readFailures || 0),
           totalReadFailures: Number(sessionObj.totalReadFailures || 0),
           bytesPumped: Number(sessionObj.bytesPumped || 0),
+          frameEndpoint: String(sessionObj.frameEndpoint || ''),
           lastReason: String(sessionObj.lastReason || ''),
           lastError: String(sessionObj.lastError || ''),
           startedAt: Number(sessionObj.startedAt || 0),
