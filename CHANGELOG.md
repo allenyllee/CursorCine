@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] - 2026-02-14
+
+### Added
+* Windows experimental Native HDR->SDR recording route with renderer routing modes (`auto` / `off` / `force-native`) and automatic fallback.
+* Windows native capture addon scaffold under `native/windows-hdr-capture/` with probe/start/read/stop bridge API and build wiring.
+* Native route diagnostics tooling: probe/runtime labels, per-attempt counters, decision trace, one-click diagnostics JSON copy, and manual smoke test control.
+* Native route smoke-gating and source-aware route enablement checks to prevent unsafe live activation.
+* Utility scripts for startup and packaging checks: `scripts/start-electron.js` and `scripts/check-dist-win-env.js`.
+
+### Changed
+* Native live frame transport moved away from unsafe payload IPC to an HTTP-pull session path with guarded control-plane IPC.
+* Native route defaults are now enabled unless explicitly disabled via `CURSORCINE_ENABLE_HDR_NATIVE_IPC=0` / `CURSORCINE_ENABLE_HDR_NATIVE_LIVE=0`.
+* `dist:win` now auto-builds the Windows native addon via `predist:win` before NSIS packaging.
+* Export fallback flow now reuses the originally selected save path when switching from `ffmpeg` to builtin output.
+* Camera/render pipeline smoothing and pacing were tuned (higher native polling cadence, `requestAnimationFrame` draw loop, native frame-aware redraw skip).
+* Native frame pipeline now outputs `RGBA8` to reduce per-frame conversion overhead and improve runtime smoothness.
+
+### Fixed
+* Prevented renderer termination scenarios tied to earlier native live IPC payload flow (`bad IPC message 263`) by introducing guarded routing and safer transport.
+* Corrected native capture color handling and display-bounds DPI mapping issues causing color artifacts or cropped/offset frames on some Windows displays.
+* Improved native startup stability by starting shared-session frame pumping immediately and relaxing no-frame startup timeout handling.
+* Added explicit fail-fast packaging feedback for `dist:win` on Linux/WSL when `wine` is missing.
+* Release metadata bump from `0.5.3` to `0.6.0`.
+
 ## [0.5.3] - 2026-02-12
 
 ### Changed
