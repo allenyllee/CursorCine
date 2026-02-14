@@ -151,6 +151,7 @@ let nativeHdrFallbackAttempted = false;
 let unsubscribeHdrNativeFrame = null;
 let hdrExperimentalPollTimer = 0;
 let hdrSmokeAutoRunning = false;
+let hdrSmokeManualRunning = false;
 const extraCaptureStreams = [];
 const hdrDecisionTrace = [];
 const HDR_DECISION_TRACE_LIMIT = 120;
@@ -443,6 +444,11 @@ function updateHdrModeAvailabilityUi() {
   if ((!visible || disabled) && normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native') {
     hdrMappingState.mode = 'auto';
     hdrMappingModeSelect.value = 'auto';
+  }
+
+  if (runHdrSmokeBtn) {
+    const recordingActive = Boolean(mediaRecorder && mediaRecorder.state === 'recording');
+    runHdrSmokeBtn.disabled = !hdrMappingState.nativeEnvFlagEnabled || recordingActive || hdrSmokeAutoRunning || hdrSmokeManualRunning;
   }
 }
 
@@ -1756,17 +1762,18 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
   }
 
   if (!hdrMappingState.nativeRouteEnabled) {
+    const disabledReason = hdrMappingState.nativeRouteReason || 'NATIVE_ROUTE_DISABLED';
     if (mode === 'force-native') {
-      pushHdrDecisionTrace('resolve-route', { mode, route: 'blocked', reason: 'NATIVE_ROUTE_DISABLED' });
+      pushHdrDecisionTrace('resolve-route', { mode, route: 'blocked', reason: disabledReason });
       return {
         route: 'blocked',
-        reason: 'NATIVE_ROUTE_DISABLED',
-        message: 'Force Native 暫時停用：' + (hdrMappingState.nativeRouteReason || 'NATIVE_ROUTE_DISABLED')
+        reason: disabledReason,
+        message: 'Force Native 暫時停用：' + disabledReason
       };
     }
-    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' });
-    noteHdrFallback('NATIVE_ROUTE_DISABLED');
-    return { route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' };
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: disabledReason });
+    noteHdrFallback(disabledReason);
+    return { route: 'fallback', reason: disabledReason };
   }
 
   const probe = await probeHdrNativeSupport(sourceId, selectedDisplayId);
@@ -1875,7 +1882,7 @@ async function maybeProbeHdrForUi() {
     setHdrProbeStatus('Probe: Native 停用（' + reason + stage + '）');
     return;
   }
-  if (!isRecording) {
+  if (!(mediaRecorder && mediaRecorder.state === 'recording')) {
     setHdrRuntimeRoute('fallback', '目前路徑: 待命（實驗 Native 可用，尚未啟動擷取）');
   }
   await probeHdrNativeSupport(sourceId, selectedSource.display_id);
@@ -1935,7 +1942,7 @@ async function loadHdrExperimentalState() {
   const shouldAutoSmoke =
     hdrMappingState.nativeEnvFlagEnabled &&
     !hdrMappingState.nativeSmokeRan &&
-    !isRecording &&
+    !(mediaRecorder && mediaRecorder.state === 'recording') &&
     !hdrSmokeAutoRunning &&
     getCurrentSelectedSource() &&
     String(getCurrentSelectedSource().id || '') !== '';
@@ -3373,6 +3380,11 @@ if (copyHdrDiagBtn) {
 
 if (runHdrSmokeBtn) {
   runHdrSmokeBtn.addEventListener('click', () => {
+    if (hdrSmokeManualRunning) {
+      return;
+    }
+    hdrSmokeManualRunning = true;
+    updateHdrModeAvailabilityUi();
     setStatus('正在執行 Native smoke...');
     runHdrNativeSmokeFromUi()
       .then(async (result) => {
@@ -3386,6 +3398,10 @@ if (runHdrSmokeBtn) {
       })
       .catch((error) => {
         setStatus('Native smoke 失敗: ' + (error && error.message ? error.message : String(error)));
+      })
+      .finally(() => {
+        hdrSmokeManualRunning = false;
+        updateHdrModeAvailabilityUi();
       });
   });
 }
