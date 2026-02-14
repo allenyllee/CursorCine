@@ -26,6 +26,9 @@
 - 剪輯輸出引擎可選：`auto`（ffmpeg 優先）、`ffmpeg`、`builtin`
 - 內建輸出 Debug 面板，顯示路徑、錯誤碼與 trace
 - 錄製資料採用暫存檔串流寫入，長時間錄製可降低記憶體暴增風險
+- Windows 實驗性 Native HDR->SDR 路由（Auto / Off / Force Native），含 Probe、Smoke 與自動回退
+- HDR 診斷資訊可一鍵複製（包含 runtime route、probe、session/frame counters、fallback 原因）
+- `auto` 匯出模式在 `ffmpeg` 失敗時，會改用內建輸出，並沿用第一次選擇的儲存路徑（不重複跳出存檔視窗）
 
 ## 錄製與輸出流程
 
@@ -43,6 +46,65 @@
 ```bash
 npm install
 npm start
+```
+
+在 Windows PowerShell 若遇到 `npm` 指令被 execution policy 阻擋，請改用：
+
+```powershell
+npm.cmd install
+npm.cmd start
+```
+
+## Windows Native HDR（實驗）
+
+目前 Windows 版提供實驗性 Native HDR 路由（使用本機 Node-API addon + Electron IPC）：
+
+- `Auto`：可用時走 Native；不可用時自動回退既有錄影
+- `Off`：固定走既有錄影（fallback）
+- `Force Native`：要求走 Native；若不可用則阻止開始
+
+UI 提供：
+
+- `Probe` 狀態（是否可用、是否疑似 HDR 螢幕）
+- `Run Native Smoke`（快速驗證 start/read/stop）
+- `Copy HDR Diagnostics JSON`（輸出目前判斷與統計）
+
+注意：
+
+- Linux 仍固定走 fallback 路由；Native HDR 路由目前僅支援 Windows。
+- 打包後執行檔預設啟用 Native 路由旗標；要停用可設：
+  - `CURSORCINE_ENABLE_HDR_NATIVE_IPC=0`
+  - `CURSORCINE_ENABLE_HDR_NATIVE_LIVE=0`
+
+## Windows 編譯 Native 模組需求
+
+若要編譯 `native/windows-hdr-capture`，請先安裝：
+
+1. Node.js（建議 LTS 或目前專案可用版本）
+2. Python 3.11（建議 3.11.x；`node-gyp@9` 在 3.12 可能遇到 `distutils` 問題）
+3. Visual Studio 2022 Build Tools，並勾選：
+   - `Desktop development with C++`
+   - `MSVC v143 x64/x86 build tools`
+   - `C++ Clang tools for Windows`（提供 `ClangCL` toolset）
+   - `Windows 10/11 SDK`
+4. `ffmpeg`（非編譯必要，但匯出 `ffmpeg` 路徑需要）
+
+編譯步驟（PowerShell）：
+
+```powershell
+npm.cmd install
+npm.cmd run build:native-hdr-win
+```
+
+若看到 `MSB8020: 找不到 ClangCL 的建置工具 (平台工具集='ClangCL')`：
+
+- 代表 VS Build Tools 尚未安裝 ClangCL 元件
+- 回到 Visual Studio Installer，補安裝 `C++ Clang tools for Windows`
+
+啟動：
+
+```powershell
+npm.cmd start
 ```
 
 ## Dev Container 開發
