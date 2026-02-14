@@ -13,9 +13,24 @@ const state = {
     pixelFormat: "BGRA8",
   },
   latestFrameBytes: null,
+  sharedFrameBuffer: null,
+  sharedControlBuffer: null,
+  sharedFrameView: null,
+  sharedControlView: null,
   pumpTimer: 0,
   bridge: null,
   bridgeError: "",
+};
+
+const CONTROL_INDEX = {
+  STATUS: 0,
+  FRAME_SEQ: 1,
+  WIDTH: 2,
+  HEIGHT: 3,
+  STRIDE: 4,
+  BYTE_LENGTH: 5,
+  TS_LOW: 6,
+  TS_HIGH: 7,
 };
 
 function emit(message) {
@@ -65,6 +80,42 @@ function clearPumpTimer() {
   state.pumpTimer = 0;
 }
 
+function ensureSharedBuffers(frameByteLength) {
+  const safeLength = Math.max(1024 * 1024, Number(frameByteLength || 0));
+  if (!state.sharedFrameBuffer || !state.sharedFrameView || state.sharedFrameView.length < safeLength) {
+    state.sharedFrameBuffer = new SharedArrayBuffer(safeLength);
+    state.sharedFrameView = new Uint8Array(state.sharedFrameBuffer);
+  }
+  if (!state.sharedControlBuffer || !state.sharedControlView) {
+    state.sharedControlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 16);
+    state.sharedControlView = new Int32Array(state.sharedControlBuffer);
+    state.sharedControlView.fill(0);
+  }
+}
+
+function writeFrameToSharedBuffer(result, bytes) {
+  if (!bytes || !bytes.length) {
+    return;
+  }
+  ensureSharedBuffers(bytes.length);
+  const len = Math.min(bytes.length, state.sharedFrameView.length);
+  state.sharedFrameView.set(bytes.subarray(0, len), 0);
+
+  const seq = state.frameSeq;
+  const ts = Number(result && result.timestampMs ? result.timestampMs : Date.now());
+  const tsLow = ts >>> 0;
+  const tsHigh = Math.floor(ts / 4294967296) >>> 0;
+
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.WIDTH, Number(result && result.width ? result.width : 0));
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.HEIGHT, Number(result && result.height ? result.height : 0));
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.STRIDE, Number(result && result.stride ? result.stride : 0));
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.BYTE_LENGTH, len);
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.TS_LOW, tsLow);
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.TS_HIGH, tsHigh);
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.FRAME_SEQ, seq);
+  Atomics.store(state.sharedControlView, CONTROL_INDEX.STATUS, 1);
+}
+
 async function stopCaptureInternal() {
   clearPumpTimer();
   if (!state.session) {
@@ -112,6 +163,7 @@ async function pumpFrameLoop() {
           stride: Number(result.stride || 0),
           pixelFormat: String(result.pixelFormat || "BGRA8"),
         };
+        writeFrameToSharedBuffer(result, state.latestFrameBytes);
       }
     }
   } catch (_error) {
@@ -169,6 +221,8 @@ async function handleRequest(requestId, command, payload) {
       stride: Number(result.stride || 0),
       pixelFormat: String(result.pixelFormat || "BGRA8"),
     };
+    const frameBytes = Math.max(1, state.lastFrameMeta.height) * Math.max(4, state.lastFrameMeta.stride);
+    ensureSharedBuffers(frameBytes);
     pumpFrameLoop().catch(() => {});
     response(requestId, true, {
       nativeSessionId: state.session.nativeSessionId,
@@ -176,6 +230,8 @@ async function handleRequest(requestId, command, payload) {
       height: state.lastFrameMeta.height,
       stride: state.lastFrameMeta.stride,
       pixelFormat: state.lastFrameMeta.pixelFormat,
+      sharedFrameBuffer: state.sharedFrameBuffer,
+      sharedControlBuffer: state.sharedControlBuffer,
     });
     return;
   }

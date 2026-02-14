@@ -32,10 +32,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hdrWorkerCaptureStop: () => ipcRenderer.invoke('hdr:worker-capture-stop'),
   hdrWorkerFrameMeta: () => ipcRenderer.invoke('hdr:worker-frame-meta'),
   hdrWorkerFrameRead: () => ipcRenderer.invoke('hdr:worker-frame-read'),
+  hdrSharedStart: (payload) => ipcRenderer.invoke('hdr:shared-start', payload),
+  hdrSharedBind: (payload) => ipcRenderer.invoke('hdr:shared-bind', payload),
+  hdrSharedStop: (payload) => ipcRenderer.invoke('hdr:shared-stop', payload),
+  hdrExperimentalState: () => ipcRenderer.invoke('hdr:experimental-state'),
   hdrProbeWindows: (payload) => ipcRenderer.invoke('hdr:probe', payload),
   hdrCaptureStart: (payload) => ipcRenderer.invoke('hdr:start', payload),
   hdrCaptureReadFrame: (payload) => ipcRenderer.invoke('hdr:read-frame', payload),
   hdrCaptureStop: (payload) => ipcRenderer.invoke('hdr:stop', payload),
+  onHdrNativeFrame: (listener) => {
+    if (typeof listener !== 'function') {
+      return () => {};
+    }
+    const wrapped = (_event, payload) => listener(payload || {});
+    ipcRenderer.on('hdr:native-frame', wrapped);
+    return () => ipcRenderer.removeListener('hdr:native-frame', wrapped);
+  },
   shouldAutoMinimizeMainWindow: (displayId) => ipcRenderer.invoke('window:should-auto-minimize', displayId),
   minimizeMainWindow: () => ipcRenderer.invoke('window:minimize-main'),
   onExportPhase: (listener) => {

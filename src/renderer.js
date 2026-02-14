@@ -110,7 +110,6 @@ const HDR_NATIVE_READ_TIMEOUT_MS = 80;
 const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 66;
-const HDR_NATIVE_ROUTE_ENABLED = false;
 
 let sources = [];
 let sourceStream;
@@ -141,6 +140,7 @@ let activeExportTaskId = 0;
 let nativeHdrFramePumpTimer = 0;
 let nativeHdrFramePumpRunning = false;
 let nativeHdrFallbackAttempted = false;
+let unsubscribeHdrNativeFrame = null;
 const extraCaptureStreams = [];
 
 let recordingMeta = {
@@ -196,7 +196,10 @@ const hdrMappingState = {
   runtimeRoute: 'fallback',
   probeSupported: false,
   probeHdrActive: false,
-  probeReason: 'NOT_PROBED'
+  probeReason: 'NOT_PROBED',
+  nativeRouteEnabled: false,
+  nativeRouteReason: 'UNINITIALIZED',
+  nativeRouteStage: ''
 };
 
 const nativeHdrState = {
@@ -213,7 +216,13 @@ const nativeHdrState = {
   frameCount: 0,
   canvas: null,
   ctx: null,
-  frameImageData: null
+  frameImageData: null,
+  sharedFrameBuffer: null,
+  sharedControlBuffer: null,
+  sharedFrameView: null,
+  sharedControlView: null,
+  lastSharedFrameSeq: 0,
+  pendingFrame: null
 };
 
 const viewState = {
@@ -1174,8 +1183,11 @@ function stopNativeHdrFramePump() {
 async function stopNativeHdrCapture() {
   stopNativeHdrFramePump();
 
-  await electronAPI.hdrWorkerCaptureStop().catch(() => {});
-  await electronAPI.hdrWorkerStop().catch(() => {});
+  if (nativeHdrState.sessionId > 0) {
+    await electronAPI.hdrSharedStop({
+      sessionId: nativeHdrState.sessionId
+    }).catch(() => {});
+  }
 
   nativeHdrState.active = false;
   nativeHdrState.sessionId = 0;
@@ -1189,6 +1201,12 @@ async function stopNativeHdrCapture() {
   nativeHdrState.lastFrameAtMs = 0;
   nativeHdrState.frameCount = 0;
   nativeHdrState.frameImageData = null;
+  nativeHdrState.sharedFrameBuffer = null;
+  nativeHdrState.sharedControlBuffer = null;
+  nativeHdrState.sharedFrameView = null;
+  nativeHdrState.sharedControlView = null;
+  nativeHdrState.lastSharedFrameSeq = 0;
+  nativeHdrState.pendingFrame = null;
 }
 
 function blitNativeFrameToCanvas(frame) {
@@ -1232,6 +1250,50 @@ function blitNativeFrameToCanvas(frame) {
   nativeHdrState.frameCount += 1;
 }
 
+function tryReadNativeFrameFromSharedBuffer() {
+  const control = nativeHdrState.sharedControlView;
+  const frameView = nativeHdrState.sharedFrameView;
+  if (!control || !frameView) {
+    return null;
+  }
+
+  const status = Atomics.load(control, 0);
+  if (status !== 1) {
+    return null;
+  }
+
+  const frameSeq = Atomics.load(control, 1);
+  if (frameSeq <= nativeHdrState.lastSharedFrameSeq) {
+    return null;
+  }
+
+  const width = Math.max(1, Atomics.load(control, 2));
+  const height = Math.max(1, Atomics.load(control, 3));
+  const stride = Math.max(width * 4, Atomics.load(control, 4));
+  const byteLength = Math.max(0, Atomics.load(control, 5));
+  if (byteLength <= 0 || byteLength > frameView.length) {
+    return null;
+  }
+
+  nativeHdrState.lastSharedFrameSeq = frameSeq;
+  return {
+    ok: true,
+    width,
+    height,
+    stride,
+    bytes: frameView.slice(0, byteLength)
+  };
+}
+
+function tryReadNativeFrameFromPushBuffer() {
+  const frame = nativeHdrState.pendingFrame;
+  if (!frame) {
+    return null;
+  }
+  nativeHdrState.pendingFrame = null;
+  return frame;
+}
+
 async function fallbackNativeToDesktopVideo(reason) {
   if (nativeHdrFallbackAttempted) {
     return;
@@ -1267,19 +1329,29 @@ async function pollNativeHdrFrame() {
 
   nativeHdrFramePumpRunning = true;
   try {
-    const result = await electronAPI.hdrWorkerFrameRead();
+    const pushedResult = tryReadNativeFrameFromPushBuffer();
+    if (pushedResult && pushedResult.ok) {
+      nativeHdrState.readFailures = 0;
+      blitNativeFrameToCanvas(pushedResult);
+      return;
+    }
+
+    const result = tryReadNativeFrameFromSharedBuffer();
 
     if (result && result.ok && result.hasFrame !== false) {
       nativeHdrState.readFailures = 0;
       blitNativeFrameToCanvas(result);
       return;
     }
-    if (result && result.ok && result.hasFrame === false) {
+    const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (performance.now() - nativeHdrState.lastFrameAtMs) : 0;
+    if (result === null) {
+      if (idleForMs >= HDR_NATIVE_MAX_IDLE_MS) {
+        nativeHdrState.readFailures += 1;
+      }
       return;
     }
 
     nativeHdrState.readFailures += 1;
-    const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (performance.now() - nativeHdrState.lastFrameAtMs) : 0;
     const hardFallback =
       result &&
       (result.reason === 'FRAME_TOO_LARGE' ||
@@ -1318,31 +1390,38 @@ async function probeHdrNativeSupport(sourceId, displayId) {
   hdrMappingState.probeSupported = Boolean(probe && probe.supported);
   hdrMappingState.probeHdrActive = Boolean(probe && probe.hdrActive);
   hdrMappingState.probeReason = String((probe && probe.reason) || (probe && probe.supported ? 'OK' : 'UNKNOWN'));
+  const isolated = typeof window !== 'undefined' && window.crossOriginIsolated === true;
+  const isoTag = isolated ? 'SAB:OK' : 'SAB:OFF';
 
   if (probe && probe.supported) {
-    setHdrProbeStatus('Probe: Native 可用（' + (probe.hdrActive ? 'HDR 螢幕' : 'SDR/未知') + '）');
+    setHdrProbeStatus('Probe: Native 可用（' + (probe.hdrActive ? 'HDR 螢幕' : 'SDR/未知') + '，' + isoTag + '）');
   } else if (probe && probe.reason === 'LOCAL_BRIDGE_UNAVAILABLE') {
-    setHdrProbeStatus('Probe: Native 不可用（LOCAL_BRIDGE_UNAVAILABLE）');
+    setHdrProbeStatus('Probe: Native 不可用（LOCAL_BRIDGE_UNAVAILABLE，' + isoTag + '）');
   } else {
-    setHdrProbeStatus('Probe: Native 不可用（' + hdrMappingState.probeReason + '）');
+    setHdrProbeStatus('Probe: Native 不可用（' + hdrMappingState.probeReason + '，' + isoTag + '）');
   }
 
   return probe || { ok: false, supported: false, reason: 'UNKNOWN' };
 }
 
 async function tryStartNativeHdrCapture(sourceId, displayId) {
-  await electronAPI.hdrWorkerStart({
-    mode: 'capture'
-  }).catch(() => {});
-
-  const start = await electronAPI.hdrWorkerCaptureStart({
-    sourceId,
-    displayId,
-    maxFps: 60,
-    toneMap: {
-      profile: 'rec709-rolloff-v1'
-    }
-  });
+  let start = null;
+  try {
+    start = await electronAPI.hdrSharedStart({
+      sourceId,
+      displayId,
+      maxFps: 60,
+      toneMap: {
+        profile: 'rec709-rolloff-v1'
+      }
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'SHARED_START_CLONE_ERROR',
+      message: error && error.message ? error.message : 'Shared start IPC clone error'
+    };
+  }
 
   if (!start || !start.ok) {
     return {
@@ -1351,12 +1430,17 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
       message: (start && start.message) || '無法啟動 Native HDR 擷取。'
     };
   }
+  const width = Math.max(1, Number(start.width || 1));
+  const height = Math.max(1, Number(start.height || 1));
+  const stride = Math.max(width * 4, Number(start.stride || width * 4));
+  const sharedFrameBuffer = start.sharedFrameBuffer;
+  const sharedControlBuffer = start.sharedControlBuffer;
 
   nativeHdrState.active = true;
-  nativeHdrState.sessionId = 1;
-  nativeHdrState.width = Math.max(1, Number(start.width || 1));
-  nativeHdrState.height = Math.max(1, Number(start.height || 1));
-  nativeHdrState.stride = Math.max(nativeHdrState.width * 4, Number(start.stride || nativeHdrState.width * 4));
+  nativeHdrState.sessionId = Number(start.sessionId || 0);
+  nativeHdrState.width = width;
+  nativeHdrState.height = height;
+  nativeHdrState.stride = stride;
   nativeHdrState.sourceId = sourceId;
   nativeHdrState.displayId = String(displayId || '');
   nativeHdrState.readFailures = 0;
@@ -1364,6 +1448,12 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   nativeHdrState.lastFrameAtMs = 0;
   nativeHdrState.frameCount = 0;
   nativeHdrFallbackAttempted = false;
+  nativeHdrState.sharedFrameBuffer = sharedFrameBuffer;
+  nativeHdrState.sharedControlBuffer = sharedControlBuffer;
+  nativeHdrState.sharedFrameView = sharedFrameBuffer instanceof SharedArrayBuffer ? new Uint8Array(sharedFrameBuffer) : null;
+  nativeHdrState.sharedControlView = sharedControlBuffer instanceof SharedArrayBuffer ? new Int32Array(sharedControlBuffer) : null;
+  nativeHdrState.lastSharedFrameSeq = 0;
+  nativeHdrState.pendingFrame = null;
 
   ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
   setHdrRuntimeRoute('native', '目前路徑: Native HDR (Rec.709 Mapping)');
@@ -1379,12 +1469,12 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     return { route: 'fallback', reason: 'MODE_OFF' };
   }
 
-  if (!HDR_NATIVE_ROUTE_ENABLED) {
+  if (!hdrMappingState.nativeRouteEnabled) {
     if (mode === 'force-native') {
       return {
         route: 'blocked',
         reason: 'NATIVE_ROUTE_DISABLED',
-        message: 'Force Native 暫時停用：目前 raw frame IPC 在此環境會觸發 renderer 終止（bad IPC message 263）。'
+        message: 'Force Native 暫時停用：' + (hdrMappingState.nativeRouteReason || 'NATIVE_ROUTE_DISABLED')
       };
     }
     return { route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' };
@@ -1411,6 +1501,15 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     return { route: 'native', reason: 'NATIVE_OK' };
   }
 
+  const nonBlockingNativeFailure =
+    nativeStart.reason === 'SHARED_START_CLONE_ERROR' ||
+    nativeStart.reason === 'WORKER_CAPTURE_START_FAILED' ||
+    /could not be cloned/i.test(String(nativeStart.message || ''));
+  if (nonBlockingNativeFailure) {
+    setHdrProbeStatus('Probe: Native 暫停（共享記憶體 IPC 尚未完成）');
+    return { route: 'fallback', reason: nativeStart.reason || 'START_FAILED' };
+  }
+
   if (mode === 'force-native') {
     return {
       route: 'blocked',
@@ -1426,7 +1525,16 @@ async function buildCaptureStreams(sourceId, selectedDisplayId) {
   const decision = await resolveCaptureRoute(sourceId, selectedDisplayId);
 
   if (decision.route === 'blocked') {
-    throw new Error(decision.message || 'Native HDR 路徑不可用。');
+    const reason = decision && decision.message ? String(decision.message) : 'Native HDR 路徑不可用。';
+    await stopNativeHdrCapture();
+    sourceStream = await getDesktopStream(sourceId);
+    applyQualityHints(sourceStream);
+    micStream = await getMicStreamIfEnabled();
+    rawVideo.srcObject = sourceStream;
+    await rawVideo.play();
+    setHdrRuntimeRoute('fallback', '目前路徑: Fallback（Native 不可用，自動回退）');
+    setStatus('Native HDR 不可用，已自動回退既有錄影管線。原因: ' + reason);
+    return { route: 'fallback', reason: 'BLOCKED_FALLBACK' };
   }
 
   if (decision.route === 'native') {
@@ -1459,11 +1567,26 @@ async function maybeProbeHdrForUi() {
     setHdrProbeStatus('Probe: 模式關閉');
     return;
   }
-  if (!HDR_NATIVE_ROUTE_ENABLED) {
-    setHdrProbeStatus('Probe: Native 停用（避免 bad IPC message 263）');
+  if (!hdrMappingState.nativeRouteEnabled) {
+    const reason = hdrMappingState.nativeRouteReason || 'NATIVE_ROUTE_DISABLED';
+    const stage = hdrMappingState.nativeRouteStage ? ('，stage=' + hdrMappingState.nativeRouteStage) : '';
+    setHdrProbeStatus('Probe: Native 停用（' + reason + stage + '）');
     return;
   }
   await probeHdrNativeSupport(sourceId, selectedSource.display_id);
+}
+
+async function loadHdrExperimentalState() {
+  const result = await electronAPI.hdrExperimentalState().catch(() => null);
+  if (!result || !result.ok) {
+    hdrMappingState.nativeRouteEnabled = false;
+    hdrMappingState.nativeRouteReason = 'HDR_EXPERIMENTAL_STATE_UNAVAILABLE';
+    hdrMappingState.nativeRouteStage = '';
+    return;
+  }
+  hdrMappingState.nativeRouteEnabled = Boolean(result.nativeRouteEnabled);
+  hdrMappingState.nativeRouteReason = String(result.reason || (result.nativeRouteEnabled ? 'OK' : 'NATIVE_ROUTE_DISABLED'));
+  hdrMappingState.nativeRouteStage = String(result.stage || '');
 }
 
 async function getMicStreamIfEnabled() {
@@ -2970,7 +3093,10 @@ updateHdrCompUi();
 setHdrRuntimeRoute('fallback', '目前路徑: Fallback（待命）');
 setHdrProbeStatus('Probe: 尚未探測');
 
-loadSources().catch((error) => {
+Promise.resolve()
+  .then(() => loadHdrExperimentalState())
+  .then(() => loadSources())
+  .catch((error) => {
   console.error(error);
   setStatus(`初始化失敗: ${error.message}`);
 });
@@ -2990,3 +3116,33 @@ electronAPI.onExportPhase((payload) => {
 });
 
 updateExportTimeLabel(0);
+
+if (typeof electronAPI.onHdrNativeFrame === 'function') {
+  unsubscribeHdrNativeFrame = electronAPI.onHdrNativeFrame((payload) => {
+    if (!payload || !nativeHdrState.active) {
+      return;
+    }
+    const sessionId = Number(payload.sessionId || 0);
+    if (sessionId <= 0 || sessionId !== nativeHdrState.sessionId) {
+      return;
+    }
+    const bytes = payload.bytes;
+    let normalizedBytes = null;
+    if (bytes instanceof ArrayBuffer) {
+      normalizedBytes = bytes;
+    } else if (ArrayBuffer.isView(bytes)) {
+      const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      normalizedBytes = view.slice().buffer;
+    }
+    if (!(normalizedBytes instanceof ArrayBuffer)) {
+      return;
+    }
+    nativeHdrState.pendingFrame = {
+      ok: true,
+      width: Math.max(1, Number(payload.width || nativeHdrState.width || 1)),
+      height: Math.max(1, Number(payload.height || nativeHdrState.height || 1)),
+      stride: Math.max(4, Number(payload.stride || nativeHdrState.stride || 4)),
+      bytes: normalizedBytes
+    };
+  });
+}
