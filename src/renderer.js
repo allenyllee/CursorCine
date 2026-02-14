@@ -125,9 +125,16 @@ let outputStream;
 let mediaRecorder;
 let drawTimer = 0;
 const DRAW_INTERVAL_MS = 16;
+const DRAW_EPSILON = 0.25;
 let cursorTimer = 0;
 let cursorUpdateInFlight = false;
 let lastDrawNow = 0;
+let lastDrawnNativeFrameCount = 0;
+let lastDrawnViewportX = 0;
+let lastDrawnViewportY = 0;
+let lastDrawnZoom = 1;
+let lastDrawnGlowX = 0;
+let lastDrawnGlowY = 0;
 let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 let recordingStartedAtMs = 0;
@@ -1142,13 +1149,13 @@ function drawLoop() {
   const sw = dims.width;
   const sh = dims.height;
   if (!sw || !sh) {
-    drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
+    drawTimer = requestAnimationFrame(drawLoop);
     return;
   }
 
   const captureSource = getCaptureVideoSource();
   if (!captureSource) {
-    drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
+    drawTimer = requestAnimationFrame(drawLoop);
     return;
   }
 
@@ -1164,6 +1171,23 @@ function drawLoop() {
   viewState.cropH = cropH;
   viewState.outputW = sw;
   viewState.outputH = sh;
+
+  const nativeActive = nativeHdrState.active;
+  const hasNewNativeFrame = nativeActive && nativeHdrState.frameCount !== lastDrawnNativeFrameCount;
+  const cameraMoved =
+    Math.abs(cameraState.viewportX - lastDrawnViewportX) > DRAW_EPSILON ||
+    Math.abs(cameraState.viewportY - lastDrawnViewportY) > DRAW_EPSILON ||
+    Math.abs(cameraState.zoom - lastDrawnZoom) > 0.002;
+  const glowMoved =
+    Math.abs(glowState.x - lastDrawnGlowX) > DRAW_EPSILON ||
+    Math.abs(glowState.y - lastDrawnGlowY) > DRAW_EPSILON;
+  const markerActive = now < doubleClickMarkerState.activeUntil;
+  const shouldDraw = !nativeActive || hasNewNativeFrame || cameraMoved || glowMoved || markerActive;
+
+  if (!shouldDraw) {
+    drawTimer = requestAnimationFrame(drawLoop);
+    return;
+  }
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
@@ -1189,7 +1213,13 @@ function drawLoop() {
     drawCursorGlow(glowState.x, glowState.y);
   }
 
-  drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
+  lastDrawnNativeFrameCount = nativeHdrState.frameCount;
+  lastDrawnViewportX = cameraState.viewportX;
+  lastDrawnViewportY = cameraState.viewportY;
+  lastDrawnZoom = cameraState.zoom;
+  lastDrawnGlowX = glowState.x;
+  lastDrawnGlowY = glowState.y;
+  drawTimer = requestAnimationFrame(drawLoop);
 }
 
 function stopMediaTracks(stream) {
@@ -3289,9 +3319,15 @@ async function startRecording() {
   cursorUpdateInFlight = false;
   cursorTimer = setInterval(updateCursorFromMain, 16);
 
-  clearTimeout(drawTimer);
+  cancelAnimationFrame(drawTimer);
   drawTimer = 0;
   lastDrawNow = 0;
+  lastDrawnNativeFrameCount = 0;
+  lastDrawnViewportX = 0;
+  lastDrawnViewportY = 0;
+  lastDrawnZoom = 1;
+  lastDrawnGlowX = 0;
+  lastDrawnGlowY = 0;
   drawLoop();
 
   const minimizeDecision = await electronAPI.shouldAutoMinimizeMainWindow(selectedSource.display_id).catch(() => ({ ok: false, shouldMinimize: true }));
@@ -3361,11 +3397,17 @@ function stopRecording() {
   }
 
   clearInterval(cursorTimer);
-  clearTimeout(drawTimer);
+  cancelAnimationFrame(drawTimer);
   cursorTimer = 0;
   drawTimer = 0;
   cursorUpdateInFlight = false;
   lastDrawNow = 0;
+  lastDrawnNativeFrameCount = 0;
+  lastDrawnViewportX = 0;
+  lastDrawnViewportY = 0;
+  lastDrawnZoom = 1;
+  lastDrawnGlowX = 0;
+  lastDrawnGlowY = 0;
   electronAPI.overlayDestroy().catch(() => {});
 
   recordBtn.disabled = false;
