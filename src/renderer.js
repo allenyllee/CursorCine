@@ -38,6 +38,7 @@ const hdrMappingModeSelect = document.getElementById('hdrMappingModeSelect');
 const hdrMappingRuntimeEl = document.getElementById('hdrMappingRuntime');
 const hdrMappingProbeEl = document.getElementById('hdrMappingProbe');
 const hdrMappingDiagEl = document.getElementById('hdrMappingDiag');
+const copyHdrDiagBtn = document.getElementById('copyHdrDiagBtn');
 const hdrCompEnable = document.getElementById('hdrCompEnable');
 const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
 const hdrCompStrengthLabel = document.getElementById('hdrCompStrengthLabel');
@@ -399,6 +400,53 @@ function updateHdrModeAvailabilityUi() {
     hdrMappingState.mode = 'auto';
     hdrMappingModeSelect.value = 'auto';
   }
+}
+
+async function copyHdrDiagnosticsSnapshot() {
+  const sourceId = String(sourceSelect && sourceSelect.value ? sourceSelect.value : '');
+  const displayId = selectedSource && selectedSource.display_id ? String(selectedSource.display_id) : '';
+  const probe = sourceId
+    ? await electronAPI.hdrProbeWindows({ sourceId, displayId }).catch(() => null)
+    : null;
+  const mainSnapshot = await electronAPI.hdrDiagnosticsSnapshot().catch(() => null);
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    ui: {
+      sourceId,
+      displayId,
+      hdrMappingMode: hdrMappingState.mode,
+      hdrRuntimeRoute: hdrMappingState.runtimeRoute,
+      hdrRuntimeStatusMessage,
+      hdrProbeStatusMessage,
+      hdrDiagStatusMessage,
+      nativeRouteEnabled: hdrMappingState.nativeRouteEnabled,
+      nativeRouteReason: hdrMappingState.nativeRouteReason,
+      nativeRouteStage: hdrMappingState.nativeRouteStage,
+      fallbackCount: hdrMappingState.fallbackCount,
+      nativeStartAttempts: hdrMappingState.nativeStartAttempts,
+      nativeStartFailures: hdrMappingState.nativeStartFailures,
+      lastFallbackReason: hdrMappingState.lastFallbackReason,
+      lastFallbackAt: hdrMappingState.lastFallbackAt,
+      nativeState: {
+        active: nativeHdrState.active,
+        sessionId: nativeHdrState.sessionId,
+        width: nativeHdrState.width,
+        height: nativeHdrState.height,
+        stride: nativeHdrState.stride,
+        readFailures: nativeHdrState.readFailures,
+        droppedFrames: nativeHdrState.droppedFrames,
+        frameCount: nativeHdrState.frameCount
+      }
+    },
+    probe,
+    main: mainSnapshot
+  };
+  const text = JSON.stringify(payload, null, 2);
+  const copyResult = await electronAPI.copyText({ text }).catch(() => ({ ok: false }));
+  if (!copyResult || !copyResult.ok) {
+    throw new Error('無法複製 HDR 診斷到剪貼簿。');
+  }
+  return payload;
 }
 
 function updateRecordingTimeLabel(seconds = 0) {
@@ -3115,6 +3163,18 @@ if (hdrMappingModeSelect) {
       return;
     }
     maybeProbeHdrForUi().catch(() => {});
+  });
+}
+
+if (copyHdrDiagBtn) {
+  copyHdrDiagBtn.addEventListener('click', () => {
+    copyHdrDiagnosticsSnapshot()
+      .then(() => {
+        setStatus('HDR 診斷已複製到剪貼簿。');
+      })
+      .catch((error) => {
+        setStatus('複製 HDR 診斷失敗: ' + (error && error.message ? error.message : String(error)));
+      });
   });
 }
 

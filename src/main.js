@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog, utilityProcess, session } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog, utilityProcess, session, clipboard } = require('electron');
 const path = require('path');
 const fsNative = require('fs');
 const fs = require('fs/promises');
@@ -1563,6 +1563,52 @@ app.whenReady().then(() => {
         sharedSessions: sessions
       }
     };
+  });
+
+  ipcMain.handle('hdr:diagnostics-snapshot', async () => {
+    const experimental = await (async () => {
+      const sessions = [];
+      for (const [sessionId, sessionObj] of hdrSharedSessions) {
+        sessions.push({
+          sessionId,
+          frameSeq: Number(sessionObj.frameSeq || 0),
+          readFailures: Number(sessionObj.readFailures || 0),
+          totalReadFailures: Number(sessionObj.totalReadFailures || 0),
+          bytesPumped: Number(sessionObj.bytesPumped || 0),
+          lastReason: String(sessionObj.lastReason || ''),
+          lastError: String(sessionObj.lastError || ''),
+          startedAt: Number(sessionObj.startedAt || 0),
+          lastFrameAt: Number(sessionObj.lastFrameAt || 0),
+          nativeSessionId: Number(sessionObj.nativeSessionId || 0)
+        });
+      }
+      return {
+        nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+        stage: HDR_NATIVE_PIPELINE_STAGE,
+        reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
+        envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
+        envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+        diagnostics: {
+          sharedSessionCount: sessions.length,
+          sharedSessions: sessions
+        }
+      };
+    })();
+
+    return {
+      ok: true,
+      timestamp: Date.now(),
+      platform: process.platform,
+      appVersion: app.getVersion(),
+      worker: getHdrWorkerStatus(),
+      experimental
+    };
+  });
+
+  ipcMain.handle('app:copy-text', async (_event, payload) => {
+    const text = String(payload && payload.text ? payload.text : '');
+    clipboard.writeText(text);
+    return { ok: true, length: text.length };
   });
 
   ipcMain.handle('hdr:probe', async (_event, payload) => {
