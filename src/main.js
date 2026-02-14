@@ -78,6 +78,19 @@ let hdrWorkerLastMessage = '';
 let hdrWorkerRequestSeq = 1;
 const hdrWorkerPendingRequests = new Map();
 const hdrTrace = [];
+let hdrNativeSmokeState = {
+  ran: false,
+  ok: false,
+  timestamp: 0,
+  sourceId: '',
+  displayId: '',
+  startOk: false,
+  readOk: false,
+  stopOk: false,
+  startReason: '',
+  readReason: '',
+  stopReason: ''
+};
 const OVERLAY_WHEEL_PAUSE_MS = 450;
 let crossOriginIsolationHeadersInstalled = false;
 
@@ -354,6 +367,7 @@ async function runHdrNativeRouteSmoke(payload = {}) {
     result.readReason = 'NOT_WINDOWS';
     result.stopReason = 'NOT_WINDOWS';
     pushHdrTrace('native-smoke-not-windows', { sourceId });
+    hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
     return result;
   }
   if (!sourceId) {
@@ -361,6 +375,7 @@ async function runHdrNativeRouteSmoke(payload = {}) {
     result.readReason = 'SKIPPED';
     result.stopReason = 'SKIPPED';
     pushHdrTrace('native-smoke-invalid-input', {});
+    hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
     return result;
   }
 
@@ -372,6 +387,7 @@ async function runHdrNativeRouteSmoke(payload = {}) {
     pushHdrTrace('native-smoke-native-unavailable', {
       message: windowsHdrNativeLoadError || 'NATIVE_UNAVAILABLE'
     });
+    hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
     return result;
   }
 
@@ -393,6 +409,7 @@ async function runHdrNativeRouteSmoke(payload = {}) {
         reason: result.startReason,
         message: String((start && start.message) || '')
       });
+      hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
       return result;
     }
 
@@ -445,6 +462,13 @@ async function runHdrNativeRouteSmoke(payload = {}) {
   }
 
   result.ok = Boolean(result.startOk && result.stopOk);
+  hdrNativeSmokeState = {
+    ...hdrNativeSmokeState,
+    ...result,
+    ran: true,
+    ok: Boolean(result.ok),
+    timestamp: Date.now()
+  };
   pushHdrTrace('native-smoke-finished', {
     sourceId: result.sourceId,
     displayId: result.displayId,
@@ -1731,11 +1755,14 @@ app.whenReady().then(() => {
     }
     return {
       ok: true,
-      nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+      nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED && hdrNativeSmokeState.ok,
       stage: HDR_NATIVE_PIPELINE_STAGE,
-      reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
+      reason: !HDR_NATIVE_PUSH_IPC_ENABLED
+        ? 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
+        : (!hdrNativeSmokeState.ok ? (hdrNativeSmokeState.ran ? 'NATIVE_SMOKE_FAILED' : 'NATIVE_SMOKE_REQUIRED') : ''),
       envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
       envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+      smoke: { ...hdrNativeSmokeState },
       diagnostics: {
         sharedSessionCount: sessions.length,
         sharedSessions: sessions,
