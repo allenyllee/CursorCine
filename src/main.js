@@ -25,8 +25,8 @@ const EXPORT_QUALITY_PRESETS = {
 const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
 const HDR_RUNTIME_MAX_READ_FAILURES = 8;
 const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
-const HDR_NATIVE_PUSH_IPC_ENABLED = false;
-const HDR_NATIVE_PIPELINE_STAGE = 'control-plane-only';
+const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '') === '1';
+const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-ipc-push' : 'control-plane-only';
 const HDR_SHARED_POLL_INTERVAL_MS = 33;
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
@@ -1556,6 +1556,8 @@ app.whenReady().then(() => {
       nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       stage: HDR_NATIVE_PIPELINE_STAGE,
       reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
+      envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
+      envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       diagnostics: {
         sharedSessionCount: sessions.length,
         sharedSessions: sessions

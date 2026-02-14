@@ -213,6 +213,8 @@ const hdrMappingState = {
   mainTopReadFailures: 0,
   mainTopLastReason: '',
   mainTopLastError: '',
+  nativeEnvFlag: '',
+  nativeEnvFlagEnabled: false,
   recordingAttemptSeq: 0,
   recordingAttemptStartedAt: 0
 };
@@ -353,6 +355,8 @@ function updateHdrDiagStatus(message) {
     ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
+    ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
+    ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
     ', lastFallback=' + fallbackReason + '@' + fallbackTime;
   updateHdrMappingStatusUi();
 }
@@ -1686,6 +1690,8 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopReadFailures = 0;
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
+    hdrMappingState.nativeEnvFlag = '';
+    hdrMappingState.nativeEnvFlagEnabled = false;
     updateHdrModeAvailabilityUi();
     updateHdrDiagStatus();
     return;
@@ -1707,6 +1713,8 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
+  hdrMappingState.nativeEnvFlag = String(result.envFlag || '');
+  hdrMappingState.nativeEnvFlagEnabled = Boolean(result.envFlagEnabled);
   updateHdrModeAvailabilityUi();
   updateHdrDiagStatus();
 }
