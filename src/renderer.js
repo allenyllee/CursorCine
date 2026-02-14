@@ -146,6 +146,8 @@ let nativeHdrFallbackAttempted = false;
 let unsubscribeHdrNativeFrame = null;
 let hdrExperimentalPollTimer = 0;
 const extraCaptureStreams = [];
+const hdrDecisionTrace = [];
+const HDR_DECISION_TRACE_LIMIT = 120;
 
 let recordingMeta = {
   outputExt: 'webm',
@@ -362,6 +364,17 @@ function updateHdrDiagStatus(message) {
   updateHdrMappingStatusUi();
 }
 
+function pushHdrDecisionTrace(type, detail = {}) {
+  hdrDecisionTrace.push({
+    ts: Date.now(),
+    type: String(type || 'unknown'),
+    detail: detail && typeof detail === 'object' ? detail : { value: String(detail || '') }
+  });
+  if (hdrDecisionTrace.length > HDR_DECISION_TRACE_LIMIT) {
+    hdrDecisionTrace.splice(0, hdrDecisionTrace.length - HDR_DECISION_TRACE_LIMIT);
+  }
+}
+
 function resetHdrDiagForRecordingAttempt() {
   hdrMappingState.recordingAttemptSeq += 1;
   hdrMappingState.recordingAttemptStartedAt = Date.now();
@@ -371,6 +384,9 @@ function resetHdrDiagForRecordingAttempt() {
   hdrMappingState.lastFallbackReason = '';
   hdrMappingState.lastFallbackAt = 0;
   nativeHdrState.readFailures = 0;
+  pushHdrDecisionTrace('recording-attempt-reset', {
+    attempt: hdrMappingState.recordingAttemptSeq
+  });
   updateHdrDiagStatus();
 }
 
@@ -378,6 +394,10 @@ function noteHdrFallback(reason) {
   hdrMappingState.fallbackCount += 1;
   hdrMappingState.lastFallbackReason = String(reason || 'UNKNOWN');
   hdrMappingState.lastFallbackAt = Date.now();
+  pushHdrDecisionTrace('fallback', {
+    reason: hdrMappingState.lastFallbackReason,
+    attempt: hdrMappingState.recordingAttemptSeq
+  });
   updateHdrDiagStatus();
 }
 
@@ -436,7 +456,8 @@ async function copyHdrDiagnosticsSnapshot() {
         readFailures: nativeHdrState.readFailures,
         droppedFrames: nativeHdrState.droppedFrames,
         frameCount: nativeHdrState.frameCount
-      }
+      },
+      decisionTrace: hdrDecisionTrace.slice(-80)
     },
     probe,
     main: mainSnapshot
@@ -1540,6 +1561,14 @@ async function probeHdrNativeSupport(sourceId, displayId) {
     setHdrProbeStatus('Probe: Native 不可用（' + hdrMappingState.probeReason + '，' + isoTag + '）');
   }
 
+  pushHdrDecisionTrace('probe', {
+    sourceId,
+    displayId: String(displayId || ''),
+    supported: Boolean(probe && probe.supported),
+    hdrActive: Boolean(probe && probe.hdrActive),
+    reason: String((probe && probe.reason) || '')
+  });
+
   return probe || { ok: false, supported: false, reason: 'UNKNOWN' };
 }
 
@@ -1574,6 +1603,11 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
       message: (start && start.message) || '無法啟動 Native HDR 擷取。'
     };
   }
+  pushHdrDecisionTrace('native-start-ok', {
+    sessionId: Number(start.sessionId || 0),
+    width: Math.max(1, Number(start.width || 1)),
+    height: Math.max(1, Number(start.height || 1))
+  });
   const width = Math.max(1, Number(start.width || 1));
   const height = Math.max(1, Number(start.height || 1));
   const stride = Math.max(width * 4, Number(start.stride || width * 4));
@@ -1609,18 +1643,21 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
 async function resolveCaptureRoute(sourceId, selectedDisplayId) {
   const mode = normalizeHdrMappingMode(hdrMappingState.mode);
   if (mode === 'off') {
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: 'MODE_OFF' });
     setHdrProbeStatus('Probe: 模式關閉');
     return { route: 'fallback', reason: 'MODE_OFF' };
   }
 
   if (!hdrMappingState.nativeRouteEnabled) {
     if (mode === 'force-native') {
+      pushHdrDecisionTrace('resolve-route', { mode, route: 'blocked', reason: 'NATIVE_ROUTE_DISABLED' });
       return {
         route: 'blocked',
         reason: 'NATIVE_ROUTE_DISABLED',
         message: 'Force Native 暫時停用：' + (hdrMappingState.nativeRouteReason || 'NATIVE_ROUTE_DISABLED')
       };
     }
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' });
     noteHdrFallback('NATIVE_ROUTE_DISABLED');
     return { route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' };
   }
@@ -1628,23 +1665,27 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
   const probe = await probeHdrNativeSupport(sourceId, selectedDisplayId);
   if (!probe.supported) {
     if (mode === 'force-native') {
+      pushHdrDecisionTrace('resolve-route', { mode, route: 'blocked', reason: probe.reason || 'NATIVE_UNAVAILABLE' });
       return {
         route: 'blocked',
         reason: probe.reason || 'NATIVE_UNAVAILABLE',
         message: probe.message || 'Force Native 但 native backend 不可用。'
       };
     }
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: probe.reason || 'NATIVE_UNAVAILABLE' });
     noteHdrFallback(probe.reason || 'NATIVE_UNAVAILABLE');
     return { route: 'fallback', reason: probe.reason || 'NATIVE_UNAVAILABLE' };
   }
 
   if (mode === 'auto' && !probe.hdrActive) {
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: probe.reason || 'HDR_INACTIVE' });
     noteHdrFallback(probe.reason || 'HDR_INACTIVE');
     return { route: 'fallback', reason: probe.reason || 'HDR_INACTIVE' };
   }
 
   const nativeStart = await tryStartNativeHdrCapture(sourceId, selectedDisplayId);
   if (nativeStart.ok) {
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'native', reason: 'NATIVE_OK' });
     return { route: 'native', reason: 'NATIVE_OK' };
   }
 
@@ -1653,12 +1694,14 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     nativeStart.reason === 'WORKER_CAPTURE_START_FAILED' ||
     /could not be cloned/i.test(String(nativeStart.message || ''));
   if (nonBlockingNativeFailure) {
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: nativeStart.reason || 'START_FAILED' });
     setHdrProbeStatus('Probe: Native 暫停（共享記憶體 IPC 尚未完成）');
     noteHdrFallback(nativeStart.reason || 'START_FAILED');
     return { route: 'fallback', reason: nativeStart.reason || 'START_FAILED' };
   }
 
   if (mode === 'force-native') {
+    pushHdrDecisionTrace('resolve-route', { mode, route: 'blocked', reason: nativeStart.reason || 'START_FAILED' });
     return {
       route: 'blocked',
       reason: nativeStart.reason || 'START_FAILED',
@@ -1666,6 +1709,7 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     };
   }
 
+  pushHdrDecisionTrace('resolve-route', { mode, route: 'fallback', reason: nativeStart.reason || 'START_FAILED' });
   noteHdrFallback(nativeStart.reason || 'START_FAILED');
   return { route: 'fallback', reason: nativeStart.reason || 'START_FAILED' };
 }

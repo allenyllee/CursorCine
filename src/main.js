@@ -27,6 +27,7 @@ const HDR_RUNTIME_MAX_READ_FAILURES = 8;
 const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
 const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '') === '1';
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-ipc-push' : 'control-plane-only';
+const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 33;
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
@@ -76,8 +77,20 @@ let hdrWorkerLastExitSignal = '';
 let hdrWorkerLastMessage = '';
 let hdrWorkerRequestSeq = 1;
 const hdrWorkerPendingRequests = new Map();
+const hdrTrace = [];
 const OVERLAY_WHEEL_PAUSE_MS = 450;
 let crossOriginIsolationHeadersInstalled = false;
+
+function pushHdrTrace(type, detail = {}) {
+  hdrTrace.push({
+    ts: Date.now(),
+    type: String(type || 'unknown'),
+    detail: detail && typeof detail === 'object' ? detail : { value: String(detail || '') }
+  });
+  if (hdrTrace.length > HDR_TRACE_LIMIT) {
+    hdrTrace.splice(0, hdrTrace.length - HDR_TRACE_LIMIT);
+  }
+}
 
 function getHdrWorkerStatus() {
   return {
@@ -990,6 +1003,13 @@ function stopHdrSharedSession(sessionId) {
   }
   hdrSharedSessions.delete(sessionId);
   clearTimeout(session.pumpTimer);
+  pushHdrTrace('shared-stop', {
+    sessionId,
+    nativeSessionId: Number(session.nativeSessionId || 0),
+    frameSeq: Number(session.frameSeq || 0),
+    totalReadFailures: Number(session.totalReadFailures || 0),
+    lastReason: String(session.lastReason || '')
+  });
 
   if (!session.bridge || typeof session.bridge.stopCapture !== 'function') {
     return { ok: true, stopped: true };
@@ -1095,6 +1115,10 @@ function pumpHdrSharedSession(sessionId) {
     session.totalReadFailures += 1;
     session.lastReason = 'READ_EXCEPTION';
     session.lastError = error && error.message ? error.message : 'READ_EXCEPTION';
+    pushHdrTrace('shared-read-exception', {
+      sessionId,
+      message: session.lastError
+    });
     if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
       Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
     }
@@ -1424,11 +1448,15 @@ app.whenReady().then(() => {
     const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
     const displayId = payload && payload.displayId ? payload.displayId : undefined;
     if (!sourceId) {
+      pushHdrTrace('shared-start-invalid-input', {});
       return { ok: false, reason: 'INVALID_INPUT', message: '缺少來源識別碼。' };
     }
 
     const bridge = loadWindowsHdrNativeBridge();
     if (!bridge || typeof bridge.startCapture !== 'function' || typeof bridge.readFrame !== 'function') {
+      pushHdrTrace('shared-start-native-unavailable', {
+        message: windowsHdrNativeLoadError || 'NATIVE_UNAVAILABLE'
+      });
       return {
         ok: false,
         reason: 'NATIVE_UNAVAILABLE',
@@ -1447,6 +1475,10 @@ app.whenReady().then(() => {
       }));
 
       if (!startResult || !startResult.ok) {
+        pushHdrTrace('shared-start-failed', {
+          reason: String((startResult && startResult.reason) || 'START_FAILED'),
+          message: String((startResult && startResult.message) || '')
+        });
         return {
           ok: false,
           reason: String((startResult && startResult.reason) || 'START_FAILED'),
@@ -1478,6 +1510,13 @@ app.whenReady().then(() => {
         lastReason: 'STARTED',
         pumpTimer: 0
       });
+      pushHdrTrace('shared-start-ok', {
+        sessionId,
+        nativeSessionId: Number(startResult.nativeSessionId || 0),
+        width,
+        height,
+        stride
+      });
       return {
         ok: true,
         sessionId,
@@ -1487,6 +1526,9 @@ app.whenReady().then(() => {
         pixelFormat: String(startResult.pixelFormat || 'BGRA8')
       };
     } catch (error) {
+      pushHdrTrace('shared-start-exception', {
+        message: error && error.message ? error.message : 'START_FAILED'
+      });
       return {
         ok: false,
         reason: 'START_FAILED',
@@ -1498,16 +1540,19 @@ app.whenReady().then(() => {
   ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
     const sessionId = Number(payload && payload.sessionId);
     if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      pushHdrTrace('shared-bind-invalid-session', { sessionId });
       return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
     }
     const session = hdrSharedSessions.get(sessionId);
     if (!session) {
+      pushHdrTrace('shared-bind-missing-session', { sessionId });
       return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
     }
 
     const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
     const sharedControlBuffer = payload && payload.sharedControlBuffer;
     if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      pushHdrTrace('shared-bind-invalid-buffer', { sessionId });
       return {
         ok: false,
         reason: 'INVALID_SHARED_BUFFER',
@@ -1523,6 +1568,11 @@ app.whenReady().then(() => {
     clearTimeout(session.pumpTimer);
     session.pumpTimer = 0;
     pumpHdrSharedSession(sessionId);
+    pushHdrTrace('shared-bind-ok', {
+      sessionId,
+      frameBytes: Number(sharedFrameBuffer.byteLength || 0),
+      controlBytes: Number(sharedControlBuffer.byteLength || 0)
+    });
 
     return { ok: true, bound: true };
   });
@@ -1560,7 +1610,8 @@ app.whenReady().then(() => {
       envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       diagnostics: {
         sharedSessionCount: sessions.length,
-        sharedSessions: sessions
+        sharedSessions: sessions,
+        trace: hdrTrace.slice(-80)
       }
     };
   });
@@ -1602,6 +1653,8 @@ app.whenReady().then(() => {
       appVersion: app.getVersion(),
       worker: getHdrWorkerStatus(),
       experimental
+      ,
+      trace: hdrTrace.slice(-80)
     };
   });
 
