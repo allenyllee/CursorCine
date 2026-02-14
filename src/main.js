@@ -2356,7 +2356,17 @@ app.whenReady().then(() => {
     let filePath = '';
     let tempDir = '';
 
-    if (mode === 'save') {
+    if (mode === 'path') {
+      const selectedPath = String(payload && payload.filePath ? payload.filePath : '');
+      if (!selectedPath) {
+        return { ok: false, reason: 'INVALID_PATH', message: '缺少輸出路徑。' };
+      }
+      filePath = selectedPath;
+      event.sender.send('video:export-phase', {
+        phase: 'processing-start',
+        route
+      });
+    } else if (mode === 'save') {
       const title = String(payload && payload.title ? payload.title : '儲存影片');
       const { canceled, filePath: selectedPath } = await dialog.showSaveDialog({
         title,

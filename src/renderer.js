@@ -2876,6 +2876,7 @@ async function saveEditedClip() {
   stopExportTimer(true);
 
   let preopenedSaveSession = null;
+  let preselectedOutputPath = '';
   activeExportTaskId = 0;
 
   try {
@@ -2914,6 +2915,7 @@ async function saveEditedClip() {
         throw new Error((picked && picked.message) || '建立儲存路徑失敗');
       }
       throwIfExportAborted();
+      preselectedOutputPath = String(picked.path || '');
 
       setStatus('正在輸出剪輯片段（ffmpeg）...');
       setExportDebug('ffmpeg', 'RUNNING', '嘗試使用 ffmpeg 輸出剪輯');
@@ -2958,14 +2960,22 @@ async function saveEditedClip() {
     try {
       if (recordingMeta.requestedFormat !== 'mp4') {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        setStatus('請選擇儲存位置...');
-        preopenedSaveSession = await electronAPI.blobUploadOpen({
-          mode: 'save',
-          title: '儲存影片',
-          baseName: `cursorcine-${timestamp}`,
-          ext: recordingMeta.outputExt,
-          route: 'save-file'
-        });
+        setStatus(preselectedOutputPath ? '沿用先前儲存位置...' : '請選擇儲存位置...');
+        const openPayload = preselectedOutputPath
+          ? {
+              mode: 'path',
+              filePath: preselectedOutputPath,
+              ext: recordingMeta.outputExt,
+              route: 'save-file'
+            }
+          : {
+              mode: 'save',
+              title: '儲存影片',
+              baseName: `cursorcine-${timestamp}`,
+              ext: recordingMeta.outputExt,
+              route: 'save-file'
+            };
+        preopenedSaveSession = await electronAPI.blobUploadOpen(openPayload);
 
         if (!preopenedSaveSession || !preopenedSaveSession.ok) {
           if (preopenedSaveSession && preopenedSaveSession.reason === 'CANCELED') {
