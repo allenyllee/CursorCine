@@ -4,11 +4,13 @@
   "description": "Electron desktop recorder with cursor-follow auto zoom",
   "main": "src/main.js",
   "scripts": {
-    "start": "env -u ELECTRON_RUN_AS_NODE electron --no-sandbox --disable-setuid-sandbox .",
+    "start": "node scripts/start-electron.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
+    "predist:win": "node scripts/check-dist-win-env.js && npm run build:native-hdr-win",
     "dist:win": "electron-builder --win nsis",
-    "dist:linux": "electron-builder --linux AppImage deb"
+    "dist:linux": "electron-builder --linux AppImage deb",
+    "build:native-hdr-win": "node-gyp rebuild --directory native/windows-hdr-capture"
   },
   "author": {
     "name": "allenyl",
@@ -31,6 +33,7 @@
     },
     "files": [
       "src/**/*",
+      "native/windows-hdr-capture/**/*",
       "package.json"
     ],
     "win": {

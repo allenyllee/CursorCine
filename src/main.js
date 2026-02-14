@@ -1,10 +1,12 @@
-const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog, utilityProcess, session, clipboard } = require('electron');
 const path = require('path');
 const fsNative = require('fs');
 const fs = require('fs/promises');
 const os = require('os');
 const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
+const http = require('http');
+const crypto = require('crypto');
 
 const CURSOR_POLL_MS = 16;
 const BLOB_UPLOAD_CHUNK_MAX_BYTES = 8 * 1024 * 1024;
@@ -23,6 +25,23 @@ const EXPORT_QUALITY_PRESETS = {
   }
 };
 const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
+const HDR_RUNTIME_MAX_READ_FAILURES = 8;
+const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
+const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '1') !== '0';
+const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '1') !== '0';
+const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
+const HDR_TRACE_LIMIT = 120;
+const HDR_SHARED_POLL_INTERVAL_MS = 16;
+const HDR_SHARED_CONTROL = {
+  STATUS: 0,
+  FRAME_SEQ: 1,
+  WIDTH: 2,
+  HEIGHT: 3,
+  STRIDE: 4,
+  BYTE_LENGTH: 5,
+  TS_LOW: 6,
+  TS_HIGH: 7
+};
 
 let clickHookEnabled = false;
 let clickHookError = '';
@@ -47,7 +66,527 @@ const trackedUploadTempDirs = new Set();
 let exportTaskSeq = 1;
 const exportTasks = new Map();
 let quitCleanupStarted = false;
+let windowsHdrNativeBridge = null;
+let windowsHdrNativeLoadError = '';
+let hdrCaptureSessionSeq = 1;
+const hdrCaptureSessions = new Map();
+let hdrSharedSessionSeq = 1;
+const hdrSharedSessions = new Map();
+let hdrWorkerProcess = null;
+let hdrWorkerState = 'stopped';
+let hdrWorkerLastError = '';
+let hdrWorkerLastExitCode = null;
+let hdrWorkerLastExitSignal = '';
+let hdrWorkerLastMessage = '';
+let hdrWorkerRequestSeq = 1;
+const hdrWorkerPendingRequests = new Map();
+const hdrTrace = [];
+let hdrFrameServer = null;
+let hdrFrameServerPort = 0;
+const hdrFrameTokens = new Map();
+let hdrNativeSmokeState = {
+  ran: false,
+  ok: false,
+  timestamp: 0,
+  sourceId: '',
+  displayId: '',
+  startOk: false,
+  readOk: false,
+  stopOk: false,
+  startReason: '',
+  readReason: '',
+  stopReason: ''
+};
 const OVERLAY_WHEEL_PAUSE_MS = 450;
+let crossOriginIsolationHeadersInstalled = false;
+
+function pushHdrTrace(type, detail = {}) {
+  hdrTrace.push({
+    ts: Date.now(),
+    type: String(type || 'unknown'),
+    detail: detail && typeof detail === 'object' ? detail : { value: String(detail || '') }
+  });
+  if (hdrTrace.length > HDR_TRACE_LIMIT) {
+    hdrTrace.splice(0, hdrTrace.length - HDR_TRACE_LIMIT);
+  }
+}
+
+function ensureHdrFrameServer() {
+  if (hdrFrameServer && hdrFrameServerPort > 0) {
+    return Promise.resolve({ ok: true, port: hdrFrameServerPort });
+  }
+
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      try {
+        const url = new URL(String(req.url || '/'), 'http://127.0.0.1');
+        const pathMatch = /^\/hdr-frame\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
+        if (!pathMatch) {
+          res.statusCode = 404;
+          res.end('not-found');
+          return;
+        }
+        const token = pathMatch[1];
+        const sessionId = Number(hdrFrameTokens.get(token) || 0);
+        if (!sessionId || !hdrSharedSessions.has(sessionId)) {
+          res.statusCode = 404;
+          res.end('invalid-session');
+          return;
+        }
+        const session = hdrSharedSessions.get(sessionId);
+        if (!session || !session.latestFrameBytes || !Buffer.isBuffer(session.latestFrameBytes)) {
+          res.statusCode = 204;
+          res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.end();
+          return;
+        }
+        const minSeq = Number(url.searchParams.get('minSeq') || 0);
+        const frameSeq = Number(session.latestFrameSeq || 0);
+        if (minSeq > 0 && frameSeq <= minSeq) {
+          res.statusCode = 204;
+          res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.end();
+          return;
+        }
+
+        const frame = session.latestFrameBytes;
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('X-Hdr-Frame-Seq', String(frameSeq));
+        res.setHeader('X-Hdr-Width', String(Number(session.latestWidth || session.width || 0)));
+        res.setHeader('X-Hdr-Height', String(Number(session.latestHeight || session.height || 0)));
+        res.setHeader('X-Hdr-Stride', String(Number(session.latestStride || session.stride || 0)));
+        res.setHeader('X-Hdr-Pixel-Format', String(session.latestPixelFormat || 'RGBA8'));
+        res.setHeader('X-Hdr-Timestamp-Ms', String(Number(session.latestTimestampMs || 0)));
+        res.end(frame);
+      } catch (_error) {
+        res.statusCode = 500;
+        res.end('server-error');
+      }
+    });
+
+    server.on('error', () => {
+      resolve({ ok: false, port: 0 });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      hdrFrameServer = server;
+      hdrFrameServerPort = addr && typeof addr === 'object' ? Number(addr.port || 0) : 0;
+      pushHdrTrace('frame-server-start', { port: hdrFrameServerPort });
+      resolve({ ok: hdrFrameServerPort > 0, port: hdrFrameServerPort });
+    });
+  });
+}
+
+function getHdrWorkerStatus() {
+  return {
+    ok: true,
+    state: hdrWorkerState,
+    hasProcess: Boolean(hdrWorkerProcess),
+    lastError: hdrWorkerLastError || '',
+    lastExitCode: hdrWorkerLastExitCode,
+    lastExitSignal: hdrWorkerLastExitSignal || '',
+    lastMessage: hdrWorkerLastMessage || ''
+  };
+}
+
+function wireHdrWorkerProcess(proc) {
+  proc.on('message', (message) => {
+    if (!message || typeof message !== 'object') {
+      return;
+    }
+    const type = String(message.type || '');
+    if (type === 'ready') {
+      hdrWorkerState = 'running';
+      hdrWorkerLastError = '';
+      hdrWorkerLastMessage = 'ready';
+      return;
+    }
+    if (type === 'error') {
+      hdrWorkerState = 'error';
+      hdrWorkerLastError = String(message.error || 'worker error');
+      hdrWorkerLastMessage = hdrWorkerLastError;
+      return;
+    }
+    if (type === 'log') {
+      hdrWorkerLastMessage = String(message.message || '');
+      return;
+    }
+    if (type === 'response') {
+      const requestId = Number(message.requestId || 0);
+      const pending = hdrWorkerPendingRequests.get(requestId);
+      if (!pending) {
+        return;
+      }
+      hdrWorkerPendingRequests.delete(requestId);
+      clearTimeout(pending.timer);
+      if (message.ok) {
+        pending.resolve(message);
+      } else {
+        pending.reject(new Error(String(message.message || message.reason || 'Worker request failed')));
+      }
+    }
+  });
+
+  proc.on('exit', (code, signal) => {
+    hdrWorkerLastExitCode = Number.isFinite(code) ? code : null;
+    hdrWorkerLastExitSignal = signal ? String(signal) : '';
+    if (hdrWorkerState !== 'stopped') {
+      hdrWorkerState = code === 0 ? 'stopped' : 'error';
+    }
+    if (code !== 0) {
+      hdrWorkerLastError = 'HDR worker exited unexpectedly (' + String(code) + ')';
+    }
+    for (const [requestId, pending] of hdrWorkerPendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('HDR worker exited before response'));
+      hdrWorkerPendingRequests.delete(requestId);
+    }
+    hdrWorkerProcess = null;
+  });
+}
+
+async function hdrWorkerRequest(command, payload = {}, timeoutMs = 5000) {
+  if (!hdrWorkerProcess) {
+    const start = await startHdrWorker();
+    if (!start || !start.hasProcess) {
+      throw new Error((start && start.lastError) || 'HDR worker unavailable');
+    }
+  }
+
+  const proc = hdrWorkerProcess;
+  if (!proc || typeof proc.postMessage !== 'function') {
+    throw new Error('HDR worker process unavailable');
+  }
+
+  const requestId = hdrWorkerRequestSeq++;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      hdrWorkerPendingRequests.delete(requestId);
+      reject(new Error('HDR worker request timeout: ' + command));
+    }, Math.max(100, Number(timeoutMs || 5000)));
+
+    hdrWorkerPendingRequests.set(requestId, {
+      resolve,
+      reject,
+      timer
+    });
+
+    proc.postMessage({
+      type: 'request',
+      requestId,
+      command,
+      payload
+    });
+  });
+}
+
+async function startHdrWorker(payload = {}) {
+  if (hdrWorkerProcess) {
+    return {
+      ...getHdrWorkerStatus(),
+      started: false,
+      reason: 'ALREADY_RUNNING'
+    };
+  }
+
+  if (!utilityProcess || typeof utilityProcess.fork !== 'function') {
+    hdrWorkerState = 'error';
+    hdrWorkerLastError = 'utilityProcess API unavailable';
+    return {
+      ...getHdrWorkerStatus(),
+      started: false,
+      reason: 'UNAVAILABLE'
+    };
+  }
+
+  try {
+    const workerPath = path.join(__dirname, 'hdr-worker.js');
+    const proc = utilityProcess.fork(workerPath, {
+      serviceName: 'cursorcine-hdr-worker'
+    });
+
+    hdrWorkerProcess = proc;
+    hdrWorkerState = 'starting';
+    hdrWorkerLastError = '';
+    hdrWorkerLastExitCode = null;
+    hdrWorkerLastExitSignal = '';
+    hdrWorkerLastMessage = 'spawned';
+    wireHdrWorkerProcess(proc);
+
+    if (typeof proc.postMessage === 'function') {
+      proc.postMessage({
+        type: 'init',
+        payload
+      });
+    }
+
+    return {
+      ...getHdrWorkerStatus(),
+      started: true
+    };
+  } catch (error) {
+    hdrWorkerState = 'error';
+    hdrWorkerLastError = error && error.message ? error.message : 'Failed to start HDR worker';
+    hdrWorkerProcess = null;
+    return {
+      ...getHdrWorkerStatus(),
+      started: false,
+      reason: 'START_FAILED'
+    };
+  }
+}
+
+async function stopHdrWorker() {
+  if (!hdrWorkerProcess) {
+    hdrWorkerState = 'stopped';
+    return {
+      ...getHdrWorkerStatus(),
+      stopped: true,
+      reason: 'NO_PROCESS'
+    };
+  }
+
+  const proc = hdrWorkerProcess;
+  hdrWorkerState = 'stopping';
+  try {
+    for (const [requestId, pending] of hdrWorkerPendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('HDR worker stopping'));
+      hdrWorkerPendingRequests.delete(requestId);
+    }
+    if (typeof proc.postMessage === 'function') {
+      proc.postMessage({ type: 'stop' });
+    }
+    proc.kill();
+  } catch (_error) {
+  } finally {
+    hdrWorkerProcess = null;
+    hdrWorkerState = 'stopped';
+  }
+
+  return {
+    ...getHdrWorkerStatus(),
+    stopped: true
+  };
+}
+
+function loadWindowsHdrNativeBridge() {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  if (windowsHdrNativeBridge) {
+    return windowsHdrNativeBridge;
+  }
+  if (windowsHdrNativeLoadError) {
+    return null;
+  }
+
+  try {
+    const mod = require(path.join(__dirname, '..', 'native', 'windows-hdr-capture'));
+    windowsHdrNativeBridge = mod;
+    return windowsHdrNativeBridge;
+  } catch (error) {
+    windowsHdrNativeLoadError = error && error.message ? error.message : 'load failed';
+    return null;
+  }
+}
+
+function getDisplayHdrHint(displayId) {
+  const display = getTargetDisplay(displayId);
+  const colorDepth = Number(display && display.colorDepth ? display.colorDepth : 0);
+  const colorSpace = String(display && display.colorSpace ? display.colorSpace : '');
+  const hdrByDepth = colorDepth >= 30;
+  const hdrByColorSpace = /hdr|pq|hlg|2020|scRGB/i.test(colorSpace);
+  const bounds = display && display.bounds ? display.bounds : { x: 0, y: 0, width: 0, height: 0 };
+
+  return {
+    displayId: String(display && display.id ? display.id : ''),
+    scaleFactor: Number(display && display.scaleFactor ? display.scaleFactor : 1),
+    bounds: {
+      x: Number(bounds.x || 0),
+      y: Number(bounds.y || 0),
+      width: Number(bounds.width || 0),
+      height: Number(bounds.height || 0)
+    },
+    colorDepth,
+    colorSpace,
+    isHdrLikely: hdrByDepth || hdrByColorSpace
+  };
+}
+
+async function runHdrNativeRouteSmoke(payload = {}) {
+  const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+  const displayId = payload && payload.displayId ? payload.displayId : undefined;
+  const result = {
+    ok: false,
+    sourceId,
+    displayId: displayId ? String(displayId) : '',
+    startOk: false,
+    readOk: false,
+    stopOk: false,
+    startReason: '',
+    readReason: '',
+    stopReason: '',
+    width: 0,
+    height: 0,
+    stride: 0,
+    pixelFormat: '',
+    hasFrame: false
+  };
+
+  if (process.platform !== 'win32') {
+    result.startReason = 'NOT_WINDOWS';
+    result.readReason = 'NOT_WINDOWS';
+    result.stopReason = 'NOT_WINDOWS';
+    pushHdrTrace('native-smoke-not-windows', { sourceId });
+    hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
+    return result;
+  }
+  if (!sourceId) {
+    result.startReason = 'INVALID_INPUT';
+    result.readReason = 'SKIPPED';
+    result.stopReason = 'SKIPPED';
+    pushHdrTrace('native-smoke-invalid-input', {});
+    hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
+    return result;
+  }
+
+  const bridge = loadWindowsHdrNativeBridge();
+  if (!bridge || typeof bridge.startCapture !== 'function' || typeof bridge.readFrame !== 'function' || typeof bridge.stopCapture !== 'function') {
+    result.startReason = 'NATIVE_UNAVAILABLE';
+    result.readReason = 'SKIPPED';
+    result.stopReason = 'SKIPPED';
+    pushHdrTrace('native-smoke-native-unavailable', {
+      message: windowsHdrNativeLoadError || 'NATIVE_UNAVAILABLE'
+    });
+    hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
+    return result;
+  }
+
+  let nativeSessionId = 0;
+  try {
+    const displayHint = getDisplayHdrHint(displayId);
+    const physicalW = Math.max(1, Math.round(Number(displayHint.bounds.width || 1) * Number(displayHint.scaleFactor || 1)));
+    const physicalH = Math.max(1, Math.round(Number(displayHint.bounds.height || 1) * Number(displayHint.scaleFactor || 1)));
+    const start = await Promise.resolve(bridge.startCapture({
+      sourceId,
+      displayId: displayHint.displayId,
+      maxFps: 30,
+      maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
+      toneMap: { profile: 'rec709-rolloff-v1', rolloff: 0.0, saturation: 1.0 },
+      displayHint
+    }));
+    if (!start || !start.ok) {
+      result.startReason = String((start && start.reason) || 'START_FAILED');
+      result.readReason = 'SKIPPED';
+      result.stopReason = 'SKIPPED';
+      pushHdrTrace('native-smoke-start-failed', {
+        reason: result.startReason,
+        message: String((start && start.message) || '')
+      });
+      hdrNativeSmokeState = { ...hdrNativeSmokeState, ...result, ran: true, ok: false, timestamp: Date.now() };
+      return result;
+    }
+
+    nativeSessionId = Number(start.nativeSessionId || 0);
+    result.startOk = true;
+    result.startReason = 'OK';
+    result.width = Number(start.width || 0);
+    result.height = Number(start.height || 0);
+    result.stride = Number(start.stride || 0);
+    result.pixelFormat = String(start.pixelFormat || 'RGBA8');
+
+    try {
+      const frame = await Promise.resolve(bridge.readFrame({
+        nativeSessionId,
+        timeoutMs: 200
+      }));
+      if (frame && frame.ok) {
+        result.readOk = true;
+        result.readReason = 'OK';
+        result.hasFrame = Boolean(frame.bytes && frame.bytes.length > 0);
+        result.width = Number(frame.width || result.width || 0);
+        result.height = Number(frame.height || result.height || 0);
+        result.stride = Number(frame.stride || result.stride || 0);
+        result.pixelFormat = String(frame.pixelFormat || result.pixelFormat || 'RGBA8');
+      } else {
+        result.readOk = false;
+        result.readReason = String((frame && frame.reason) || 'READ_FAILED');
+      }
+    } catch (error) {
+      result.readOk = false;
+      result.readReason = error && error.message ? error.message : 'READ_EXCEPTION';
+    }
+  } catch (error) {
+    result.startReason = error && error.message ? error.message : 'START_EXCEPTION';
+    result.readReason = 'SKIPPED';
+  } finally {
+    if (nativeSessionId > 0) {
+      try {
+        await Promise.resolve(bridge.stopCapture({ nativeSessionId }));
+        result.stopOk = true;
+        result.stopReason = 'OK';
+      } catch (error) {
+        result.stopOk = false;
+        result.stopReason = error && error.message ? error.message : 'STOP_EXCEPTION';
+      }
+    } else {
+      result.stopOk = false;
+      result.stopReason = 'SKIPPED';
+    }
+  }
+
+  result.ok = Boolean(result.startOk && result.stopOk);
+  hdrNativeSmokeState = {
+    ...hdrNativeSmokeState,
+    ...result,
+    ran: true,
+    ok: Boolean(result.ok),
+    timestamp: Date.now()
+  };
+  pushHdrTrace('native-smoke-finished', {
+    sourceId: result.sourceId,
+    displayId: result.displayId,
+    ok: result.ok,
+    startOk: result.startOk,
+    readOk: result.readOk,
+    stopOk: result.stopOk,
+    readReason: result.readReason
+  });
+  return result;
+}
+
+async function stopHdrCaptureSession(sessionId) {
+  const session = hdrCaptureSessions.get(sessionId);
+  if (!session) {
+    return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 擷取工作階段。' };
+  }
+
+  hdrCaptureSessions.delete(sessionId);
+
+  if (!session.bridge || typeof session.bridge.stopCapture !== 'function') {
+    return { ok: true, stopped: true };
+  }
+
+  try {
+    await Promise.resolve(session.bridge.stopCapture({
+      nativeSessionId: session.nativeSessionId
+    }));
+    return { ok: true, stopped: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'STOP_FAILED',
+      message: error && error.message ? error.message : '停止 HDR 擷取失敗。'
+    };
+  }
+}
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
   return code === 29 || code === 3613;
@@ -572,6 +1111,22 @@ async function cleanupUploadTempDirsByScan() {
 }
 
 async function runQuitCleanup() {
+  if (hdrFrameServer) {
+    try {
+      await new Promise((resolve) => hdrFrameServer.close(() => resolve()));
+    } catch (_error) {
+    }
+    hdrFrameServer = null;
+    hdrFrameServerPort = 0;
+    hdrFrameTokens.clear();
+  }
+  for (const sessionId of Array.from(hdrSharedSessions.keys())) {
+    stopHdrSharedSession(sessionId);
+  }
+  await stopHdrWorker().catch(() => {});
+  for (const sessionId of Array.from(hdrCaptureSessions.keys())) {
+    await stopHdrCaptureSession(sessionId).catch(() => {});
+  }
   for (const [sessionId, session] of blobUploadSessions) {
     blobUploadSessions.delete(sessionId);
     await cleanupBlobUploadSession(session, true).catch(() => {});
@@ -647,6 +1202,27 @@ function cleanupUploadTempDirsByScanSync() {
 }
 
 function runQuitCleanupSync() {
+  if (hdrFrameServer) {
+    try {
+      hdrFrameServer.close();
+    } catch (_error) {
+    }
+    hdrFrameServer = null;
+    hdrFrameServerPort = 0;
+    hdrFrameTokens.clear();
+  }
+  if (hdrWorkerProcess) {
+    try {
+      hdrWorkerProcess.kill();
+    } catch (_error) {
+    }
+    hdrWorkerProcess = null;
+  }
+  hdrWorkerState = 'stopped';
+  for (const sessionId of Array.from(hdrSharedSessions.keys())) {
+    stopHdrSharedSession(sessionId);
+  }
+  hdrCaptureSessions.clear();
   for (const [sessionId, session] of blobUploadSessions) {
     blobUploadSessions.delete(sessionId);
     cleanupBlobUploadSessionSync(session, true);
@@ -671,7 +1247,156 @@ function runQuitCleanupSync() {
   destroyOverlayWindow();
 }
 
+function stopHdrSharedSession(sessionId) {
+  const session = hdrSharedSessions.get(sessionId);
+  if (!session) {
+    return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
+  }
+  hdrSharedSessions.delete(sessionId);
+  clearTimeout(session.pumpTimer);
+  if (session.frameToken) {
+    hdrFrameTokens.delete(String(session.frameToken));
+  }
+  pushHdrTrace('shared-stop', {
+    sessionId,
+    nativeSessionId: Number(session.nativeSessionId || 0),
+    frameSeq: Number(session.frameSeq || 0),
+    totalReadFailures: Number(session.totalReadFailures || 0),
+    lastReason: String(session.lastReason || '')
+  });
+
+  if (!session.bridge || typeof session.bridge.stopCapture !== 'function') {
+    return { ok: true, stopped: true };
+  }
+  try {
+    session.bridge.stopCapture({
+      nativeSessionId: session.nativeSessionId
+    });
+    return {
+      ok: true,
+      stopped: true,
+      diagnostics: {
+        sessionId,
+        frameSeq: Number(session.frameSeq || 0),
+        totalReadFailures: Number(session.totalReadFailures || 0),
+        readFailures: Number(session.readFailures || 0),
+        lastError: String(session.lastError || ''),
+        lastReason: String(session.lastReason || ''),
+        startedAt: Number(session.startedAt || 0),
+        lastFrameAt: Number(session.lastFrameAt || 0),
+        bytesPumped: Number(session.bytesPumped || 0)
+      }
+    };
+  } catch (error) {
+    session.lastError = error && error.message ? error.message : 'STOP_FAILED';
+    return {
+      ok: false,
+      reason: 'STOP_FAILED',
+      message: error && error.message ? error.message : '停止 HDR 共享擷取失敗。'
+    };
+  }
+}
+
+function pumpHdrSharedSession(sessionId) {
+  const session = hdrSharedSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+  try {
+    const frameResult = session.bridge.readFrame({
+      nativeSessionId: session.nativeSessionId,
+      timeoutMs: 80
+    });
+
+    if (frameResult && frameResult.ok && frameResult.bytes) {
+      const bytes = frameResult.bytes;
+      const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      session.frameSeq += 1;
+      session.lastFrameAt = Date.now();
+      const ts = Number(frameResult.timestampMs || Date.now());
+      const tsLow = ts >>> 0;
+      const tsHigh = Math.floor(ts / 4294967296) >>> 0;
+      const width = Number(frameResult.width || session.width);
+      const height = Number(frameResult.height || session.height);
+      const stride = Number(frameResult.stride || session.stride);
+      session.latestFrameSeq = session.frameSeq;
+      session.latestTimestampMs = ts;
+      session.latestWidth = width;
+      session.latestHeight = height;
+      session.latestStride = stride;
+      session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
+      session.latestFrameBytes = Buffer.from(src);
+
+      if (session.frameView && session.controlView) {
+        const len = Math.min(src.length, session.frameView.length);
+        session.frameView.set(src.subarray(0, len), 0);
+        session.bytesPumped += len;
+
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.WIDTH, width);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.HEIGHT, height);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STRIDE, stride);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.BYTE_LENGTH, len);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_LOW, tsLow);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
+      }
+
+      session.readFailures = 0;
+      session.lastReason = 'FRAME_OK';
+      session.lastError = '';
+    } else {
+      session.readFailures += 1;
+      session.totalReadFailures += 1;
+      session.lastReason = 'NO_FRAME';
+      if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
+      }
+    }
+  } catch (error) {
+    session.readFailures += 1;
+    session.totalReadFailures += 1;
+    session.lastReason = 'READ_EXCEPTION';
+    session.lastError = error && error.message ? error.message : 'READ_EXCEPTION';
+    pushHdrTrace('shared-read-exception', {
+      sessionId,
+      message: session.lastError
+    });
+    if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
+      Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
+    }
+  } finally {
+    if (hdrSharedSessions.has(sessionId)) {
+      session.pumpTimer = setTimeout(() => {
+        pumpHdrSharedSession(sessionId);
+      }, HDR_SHARED_POLL_INTERVAL_MS);
+    }
+  }
+}
+
+function installCrossOriginIsolationHeaders() {
+  if (crossOriginIsolationHeadersInstalled) {
+    return;
+  }
+  const defaultSession = session && session.defaultSession ? session.defaultSession : null;
+  if (!defaultSession || !defaultSession.webRequest) {
+    return;
+  }
+
+  crossOriginIsolationHeadersInstalled = true;
+  defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders = { ...(details.responseHeaders || {}) };
+    responseHeaders['Cross-Origin-Opener-Policy'] = ['same-origin'];
+    responseHeaders['Cross-Origin-Embedder-Policy'] = ['require-corp'];
+    responseHeaders['Cross-Origin-Resource-Policy'] = ['cross-origin'];
+    callback({
+      responseHeaders
+    });
+  });
+}
+
 app.whenReady().then(() => {
+  installCrossOriginIsolationHeaders();
   initGlobalClickHook();
 
   ipcMain.handle('cursor:get', (_event, displayId) => {
@@ -853,6 +1578,605 @@ app.whenReady().then(() => {
     });
   });
 
+  ipcMain.handle('hdr:worker-status', async () => {
+    return getHdrWorkerStatus();
+  });
+
+  ipcMain.handle('hdr:worker-start', async (_event, payload) => {
+    return startHdrWorker(payload || {});
+  });
+
+  ipcMain.handle('hdr:worker-stop', async () => {
+    return stopHdrWorker();
+  });
+
+  ipcMain.handle('hdr:worker-capture-start', async (_event, payload) => {
+    try {
+      const displayId = payload && payload.displayId ? payload.displayId : undefined;
+      const displayHint = getDisplayHdrHint(displayId);
+      const workerPayload = {
+        ...(payload || {}),
+        displayId: displayHint.displayId,
+        displayHint
+      };
+      const result = await hdrWorkerRequest('capture-start', workerPayload, 8000);
+      return {
+        ok: true,
+        width: Number(result.width || 0),
+        height: Number(result.height || 0),
+        stride: Number(result.stride || 0),
+        pixelFormat: String(result.pixelFormat || 'RGBA8'),
+        sharedFrameBuffer: result.sharedFrameBuffer || null,
+        sharedControlBuffer: result.sharedControlBuffer || null
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_CAPTURE_START_FAILED',
+        message: error && error.message ? error.message : 'Worker capture start failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:worker-capture-stop', async () => {
+    try {
+      await hdrWorkerRequest('capture-stop', {}, 4000);
+      return { ok: true, stopped: true };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_CAPTURE_STOP_FAILED',
+        message: error && error.message ? error.message : 'Worker capture stop failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:worker-frame-meta', async () => {
+    try {
+      const result = await hdrWorkerRequest('frame-meta', {}, 2000);
+      return {
+        ok: true,
+        frameSeq: Number(result.frameSeq || 0),
+        lastFrameAt: Number(result.lastFrameAt || 0),
+        hasFrame: Boolean(result.hasFrame),
+        meta: result.meta || {}
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_FRAME_META_FAILED',
+        message: error && error.message ? error.message : 'Worker frame meta failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:worker-frame-read', async () => {
+    try {
+      const result = await hdrWorkerRequest('frame-read', {}, 3000);
+      const frameBytes = result.bytes || null;
+      let safeBytes = null;
+      if (Buffer.isBuffer(frameBytes)) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof Uint8Array) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof ArrayBuffer) {
+        safeBytes = Buffer.from(frameBytes);
+      }
+      return {
+        ok: true,
+        hasFrame: Boolean(result.hasFrame),
+        frameSeq: Number(result.frameSeq || 0),
+        lastFrameAt: Number(result.lastFrameAt || 0),
+        width: Number(result.width || 0),
+        height: Number(result.height || 0),
+        stride: Number(result.stride || 0),
+        pixelFormat: String(result.pixelFormat || 'RGBA8'),
+        bytes: safeBytes
+          ? safeBytes.buffer.slice(safeBytes.byteOffset, safeBytes.byteOffset + safeBytes.byteLength)
+          : null
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_FRAME_READ_FAILED',
+        message: error && error.message ? error.message : 'Worker frame read failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:shared-start', async (_event, payload) => {
+    if (process.platform !== 'win32') {
+      return { ok: false, reason: 'NOT_WINDOWS', message: '僅支援 Windows。' };
+    }
+    const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const displayId = payload && payload.displayId ? payload.displayId : undefined;
+    if (!sourceId) {
+      pushHdrTrace('shared-start-invalid-input', {});
+      return { ok: false, reason: 'INVALID_INPUT', message: '缺少來源識別碼。' };
+    }
+
+    const bridge = loadWindowsHdrNativeBridge();
+    if (!bridge || typeof bridge.startCapture !== 'function' || typeof bridge.readFrame !== 'function') {
+      pushHdrTrace('shared-start-native-unavailable', {
+        message: windowsHdrNativeLoadError || 'NATIVE_UNAVAILABLE'
+      });
+      return {
+        ok: false,
+        reason: 'NATIVE_UNAVAILABLE',
+        message: windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。'
+      };
+    }
+
+    try {
+      const displayHint = getDisplayHdrHint(displayId);
+      const physicalW = Math.max(1, Math.round(Number(displayHint.bounds.width || 1) * Number(displayHint.scaleFactor || 1)));
+      const physicalH = Math.max(1, Math.round(Number(displayHint.bounds.height || 1) * Number(displayHint.scaleFactor || 1)));
+      const startResult = await Promise.resolve(bridge.startCapture({
+        sourceId,
+        displayId: displayHint.displayId,
+        maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+        maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
+        toneMap: payload && payload.toneMap ? payload.toneMap : {},
+        displayHint
+      }));
+
+      if (!startResult || !startResult.ok) {
+        pushHdrTrace('shared-start-failed', {
+          reason: String((startResult && startResult.reason) || 'START_FAILED'),
+          message: String((startResult && startResult.message) || '')
+        });
+        return {
+          ok: false,
+          reason: String((startResult && startResult.reason) || 'START_FAILED'),
+          message: String((startResult && startResult.message) || '啟動 HDR 共享擷取失敗。')
+        };
+      }
+
+      const width = Math.max(1, Number(startResult.width || 1));
+      const height = Math.max(1, Number(startResult.height || 1));
+      const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
+      const frameServer = await ensureHdrFrameServer();
+      const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
+
+      const sessionId = hdrSharedSessionSeq++;
+      const frameToken = crypto.randomBytes(12).toString('base64url');
+      const frameEndpoint = frameToken && port > 0
+        ? 'http://127.0.0.1:' + String(port) + '/hdr-frame/' + frameToken
+        : '';
+      hdrSharedSessions.set(sessionId, {
+        bridge,
+        sender: _event.sender,
+        nativeSessionId: Number(startResult.nativeSessionId || 0),
+        width,
+        height,
+        stride,
+        frameView: null,
+        controlView: null,
+        frameSeq: 0,
+        readFailures: 0,
+        totalReadFailures: 0,
+        bytesPumped: 0,
+        startedAt: Date.now(),
+        lastFrameAt: 0,
+        lastError: '',
+        lastReason: 'STARTED',
+        frameToken,
+        frameEndpoint,
+        latestFrameSeq: 0,
+        latestTimestampMs: 0,
+        latestWidth: width,
+        latestHeight: height,
+        latestStride: stride,
+        latestPixelFormat: String(startResult.pixelFormat || 'RGBA8'),
+        latestFrameBytes: null,
+        pumpTimer: 0
+      });
+      if (frameToken) {
+        hdrFrameTokens.set(frameToken, sessionId);
+      }
+      // HTTP pull mode does not require shared-buffer bind.
+      // Start pumping immediately so renderer can fetch frames right away.
+      pumpHdrSharedSession(sessionId);
+      pushHdrTrace('shared-start-ok', {
+        sessionId,
+        nativeSessionId: Number(startResult.nativeSessionId || 0),
+        width,
+        height,
+        stride
+      });
+      return {
+        ok: true,
+        sessionId,
+        width,
+        height,
+        stride,
+        pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
+        frameEndpoint,
+        frameToken
+      };
+    } catch (error) {
+      pushHdrTrace('shared-start-exception', {
+        message: error && error.message ? error.message : 'START_FAILED'
+      });
+      return {
+        ok: false,
+        reason: 'START_FAILED',
+        message: error && error.message ? error.message : '啟動 HDR 共享擷取失敗。'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      pushHdrTrace('shared-bind-invalid-session', { sessionId });
+      return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
+    }
+    const session = hdrSharedSessions.get(sessionId);
+    if (!session) {
+      pushHdrTrace('shared-bind-missing-session', { sessionId });
+      return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
+    }
+
+    const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
+    const sharedControlBuffer = payload && payload.sharedControlBuffer;
+    if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      pushHdrTrace('shared-bind-invalid-buffer', { sessionId });
+      return {
+        ok: false,
+        reason: 'INVALID_SHARED_BUFFER',
+        message: '共享記憶體建立失敗或環境不支援。'
+      };
+    }
+
+    session.frameView = new Uint8Array(sharedFrameBuffer);
+    session.controlView = new Int32Array(sharedControlBuffer);
+    session.controlView.fill(0);
+    session.frameSeq = 0;
+    session.readFailures = 0;
+    clearTimeout(session.pumpTimer);
+    session.pumpTimer = 0;
+    pumpHdrSharedSession(sessionId);
+    pushHdrTrace('shared-bind-ok', {
+      sessionId,
+      frameBytes: Number(sharedFrameBuffer.byteLength || 0),
+      controlBytes: Number(sharedControlBuffer.byteLength || 0)
+    });
+
+    return { ok: true, bound: true };
+  });
+
+  ipcMain.handle('hdr:shared-stop', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
+    }
+    return stopHdrSharedSession(sessionId);
+  });
+
+  ipcMain.handle('hdr:experimental-state', async (_event, payload) => {
+    const requestedSourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const requestedDisplayId = String(payload && payload.displayId ? payload.displayId : '');
+    const smokeSourceId = String(hdrNativeSmokeState.sourceId || '');
+    const smokeDisplayId = String(hdrNativeSmokeState.displayId || '');
+    const smokeMatchesRequestedSource = requestedSourceId
+      ? (
+        smokeSourceId === requestedSourceId &&
+        (!requestedDisplayId || !smokeDisplayId || smokeDisplayId === requestedDisplayId)
+      )
+      : Boolean(hdrNativeSmokeState.ok);
+    const nativeRouteEnabled = HDR_NATIVE_PUSH_IPC_ENABLED &&
+      HDR_NATIVE_LIVE_ROUTE_ENABLED &&
+      hdrNativeSmokeState.ok &&
+      smokeMatchesRequestedSource;
+    const reason = !HDR_NATIVE_PUSH_IPC_ENABLED
+      ? 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
+      : (!HDR_NATIVE_LIVE_ROUTE_ENABLED
+        ? 'NATIVE_LIVE_ROUTE_DISABLED'
+        : (!hdrNativeSmokeState.ran
+          ? 'NATIVE_SMOKE_REQUIRED'
+          : (!hdrNativeSmokeState.ok
+            ? 'NATIVE_SMOKE_FAILED'
+            : (!smokeMatchesRequestedSource ? 'NATIVE_SMOKE_STALE' : ''))));
+
+    const sessions = [];
+    for (const [sessionId, session] of hdrSharedSessions) {
+      sessions.push({
+        sessionId,
+        frameSeq: Number(session.frameSeq || 0),
+        readFailures: Number(session.readFailures || 0),
+        totalReadFailures: Number(session.totalReadFailures || 0),
+        bytesPumped: Number(session.bytesPumped || 0),
+        frameEndpoint: String(session.frameEndpoint || ''),
+        lastReason: String(session.lastReason || ''),
+        lastError: String(session.lastError || ''),
+        startedAt: Number(session.startedAt || 0),
+        lastFrameAt: Number(session.lastFrameAt || 0),
+        nativeSessionId: Number(session.nativeSessionId || 0)
+      });
+    }
+    return {
+      ok: true,
+      nativeRouteEnabled,
+      stage: HDR_NATIVE_PIPELINE_STAGE,
+      reason,
+      envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
+      envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+      liveEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_LIVE',
+      liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
+      requestedSourceId,
+      requestedDisplayId,
+      smokeMatchesRequestedSource,
+      smoke: { ...hdrNativeSmokeState },
+      diagnostics: {
+        sharedSessionCount: sessions.length,
+        sharedSessions: sessions,
+        trace: hdrTrace.slice(-80)
+      }
+    };
+  });
+
+  ipcMain.handle('hdr:diagnostics-snapshot', async () => {
+    const experimental = await (async () => {
+      const sessions = [];
+      for (const [sessionId, sessionObj] of hdrSharedSessions) {
+        sessions.push({
+          sessionId,
+          frameSeq: Number(sessionObj.frameSeq || 0),
+          readFailures: Number(sessionObj.readFailures || 0),
+          totalReadFailures: Number(sessionObj.totalReadFailures || 0),
+          bytesPumped: Number(sessionObj.bytesPumped || 0),
+          frameEndpoint: String(sessionObj.frameEndpoint || ''),
+          lastReason: String(sessionObj.lastReason || ''),
+          lastError: String(sessionObj.lastError || ''),
+          startedAt: Number(sessionObj.startedAt || 0),
+          lastFrameAt: Number(sessionObj.lastFrameAt || 0),
+          nativeSessionId: Number(sessionObj.nativeSessionId || 0)
+        });
+      }
+      return {
+        nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+        stage: HDR_NATIVE_PIPELINE_STAGE,
+        reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
+        envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
+        envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+        diagnostics: {
+          sharedSessionCount: sessions.length,
+          sharedSessions: sessions
+        }
+      };
+    })();
+
+    return {
+      ok: true,
+      timestamp: Date.now(),
+      platform: process.platform,
+      appVersion: app.getVersion(),
+      worker: getHdrWorkerStatus(),
+      experimental
+      ,
+      trace: hdrTrace.slice(-80)
+    };
+  });
+
+  ipcMain.handle('hdr:native-route-smoke', async (_event, payload) => {
+    return runHdrNativeRouteSmoke(payload || {});
+  });
+
+  ipcMain.handle('app:copy-text', async (_event, payload) => {
+    const text = String(payload && payload.text ? payload.text : '');
+    clipboard.writeText(text);
+    return { ok: true, length: text.length };
+  });
+
+  ipcMain.handle('hdr:probe', async (_event, payload) => {
+    const displayId = payload && payload.displayId ? payload.displayId : undefined;
+    const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const displayHint = getDisplayHdrHint(displayId);
+
+    if (process.platform !== 'win32') {
+      return {
+        ok: true,
+        supported: false,
+        reason: 'NOT_WINDOWS',
+        sourceId,
+        display: displayHint
+      };
+    }
+
+    const bridge = loadWindowsHdrNativeBridge();
+    if (!bridge || typeof bridge.probe !== 'function') {
+      return {
+        ok: true,
+        supported: false,
+        reason: 'NATIVE_UNAVAILABLE',
+        sourceId,
+        display: displayHint,
+        nativeLoadError: windowsHdrNativeLoadError || ''
+      };
+    }
+
+    try {
+      const result = await Promise.resolve(bridge.probe({
+        sourceId,
+        displayId: displayHint.displayId,
+        displayHint
+      }));
+      const supported = Boolean(result && result.supported);
+      return {
+        ok: true,
+        supported,
+        sourceId,
+        display: displayHint,
+        hdrActive: Boolean(result && result.hdrActive),
+        nativeBackend: String((result && result.nativeBackend) || 'windows-hdr-capture'),
+        reason: supported ? '' : String((result && result.reason) || 'NATIVE_UNAVAILABLE'),
+        details: result && typeof result === 'object' ? result : {}
+      };
+    } catch (error) {
+      return {
+        ok: true,
+        supported: false,
+        reason: 'PROBE_FAILED',
+        sourceId,
+        display: displayHint,
+        message: error && error.message ? error.message : 'HDR probe failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:start', async (_event, payload) => {
+    if (process.platform !== 'win32') {
+      return { ok: false, reason: 'NOT_WINDOWS', message: '僅支援 Windows 原生 HDR 擷取。' };
+    }
+
+    const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const displayId = payload && payload.displayId ? payload.displayId : undefined;
+    if (!sourceId) {
+      return { ok: false, reason: 'INVALID_INPUT', message: '缺少來源識別碼。' };
+    }
+
+    const bridge = loadWindowsHdrNativeBridge();
+    if (!bridge || typeof bridge.startCapture !== 'function') {
+      return {
+        ok: false,
+        reason: 'NATIVE_UNAVAILABLE',
+        message: windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。'
+      };
+    }
+
+    try {
+      const displayHint = getDisplayHdrHint(displayId);
+      const startResult = await Promise.resolve(bridge.startCapture({
+        sourceId,
+        displayId: displayHint.displayId,
+        maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+        toneMap: payload && payload.toneMap ? payload.toneMap : {},
+        displayHint
+      }));
+
+      if (!startResult || !startResult.ok) {
+        return {
+          ok: false,
+          reason: String((startResult && startResult.reason) || 'START_FAILED'),
+          message: String((startResult && startResult.message) || '啟動 HDR 原生擷取失敗。')
+        };
+      }
+
+      const sessionId = hdrCaptureSessionSeq++;
+      hdrCaptureSessions.set(sessionId, {
+        bridge,
+        sourceId,
+        displayId: displayHint.displayId,
+        nativeSessionId: startResult.nativeSessionId,
+        readFailures: 0,
+        startedAt: Date.now()
+      });
+
+      return {
+        ok: true,
+        sessionId,
+        width: Number(startResult.width || 0),
+        height: Number(startResult.height || 0),
+        pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
+        colorSpace: String(startResult.colorSpace || 'Rec.709'),
+        toneMap: startResult.toneMap || {},
+        hdrActive: Boolean(startResult.hdrActive),
+        nativeBackend: String(startResult.nativeBackend || 'windows-hdr-capture')
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'START_FAILED',
+        message: error && error.message ? error.message : '啟動 HDR 原生擷取失敗。'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:read-frame', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    const timeoutMs = Math.max(1, Math.min(2000, Number(payload && payload.timeoutMs ? payload.timeoutMs : 40)));
+    const session = hdrCaptureSessions.get(sessionId);
+    if (!session) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 擷取工作階段。' };
+    }
+
+    if (!session.bridge || typeof session.bridge.readFrame !== 'function') {
+      session.readFailures += 1;
+      return { ok: false, reason: 'NATIVE_UNAVAILABLE', message: 'HDR 原生模組無法讀取畫面。' };
+    }
+
+    try {
+      const frameResult = await Promise.resolve(session.bridge.readFrame({
+        nativeSessionId: session.nativeSessionId,
+        timeoutMs
+      }));
+
+      if (!frameResult || !frameResult.ok) {
+        session.readFailures += 1;
+        const reason = String((frameResult && frameResult.reason) || 'READ_FAILED');
+        const hardFallback = reason === 'FRAME_TOO_LARGE' || reason === 'INVALID_SESSION' || reason === 'NATIVE_UNAVAILABLE';
+        return {
+          ok: false,
+          reason,
+          message: String((frameResult && frameResult.message) || '讀取 HDR frame 失敗。'),
+          readFailures: session.readFailures,
+          fallbackRecommended: hardFallback || session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES
+        };
+      }
+
+      session.readFailures = 0;
+      const frameBytes = frameResult.bytes || null;
+      let safeBytes = null;
+      if (Buffer.isBuffer(frameBytes)) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof Uint8Array) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof ArrayBuffer) {
+        safeBytes = Buffer.from(frameBytes);
+      }
+      const frameByteLength = safeBytes ? Number(safeBytes.length) : 0;
+      if (frameByteLength <= 0 || frameByteLength > HDR_RUNTIME_MAX_FRAME_BYTES) {
+        session.readFailures += 1;
+        return {
+          ok: false,
+          reason: 'FRAME_TOO_LARGE',
+          message: 'HDR frame exceeds IPC safety limit.',
+          readFailures: session.readFailures,
+          fallbackRecommended: true
+        };
+      }
+      return {
+        ok: true,
+        width: Number(frameResult.width || 0),
+        height: Number(frameResult.height || 0),
+        stride: Number(frameResult.stride || 0),
+        timestampMs: Number(frameResult.timestampMs || Date.now()),
+        pixelFormat: String(frameResult.pixelFormat || 'RGBA8'),
+        bytes: safeBytes
+          ? safeBytes.buffer.slice(safeBytes.byteOffset, safeBytes.byteOffset + safeBytes.byteLength)
+          : null
+      };
+    } catch (error) {
+      session.readFailures += 1;
+      return {
+        ok: false,
+        reason: 'READ_FAILED',
+        message: error && error.message ? error.message : '讀取 HDR frame 失敗。',
+        readFailures: session.readFailures,
+        fallbackRecommended: session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:stop', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      return { ok: false, reason: 'INVALID_SESSION', message: 'HDR 擷取工作階段識別碼無效。' };
+    }
+    return stopHdrCaptureSession(sessionId);
+  });
+
   ipcMain.handle('video:export-task-open', async () => {
     const taskId = exportTaskSeq++;
     exportTasks.set(taskId, {
@@ -1032,7 +2356,17 @@ app.whenReady().then(() => {
     let filePath = '';
     let tempDir = '';
 
-    if (mode === 'save') {
+    if (mode === 'path') {
+      const selectedPath = String(payload && payload.filePath ? payload.filePath : '');
+      if (!selectedPath) {
+        return { ok: false, reason: 'INVALID_PATH', message: '缺少輸出路徑。' };
+      }
+      filePath = selectedPath;
+      event.sender.send('video:export-phase', {
+        phase: 'processing-start',
+        route
+      });
+    } else if (mode === 'save') {
       const title = String(payload && payload.title ? payload.title : '儲存影片');
       const { canceled, filePath: selectedPath } = await dialog.showSaveDialog({
         title,

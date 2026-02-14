@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin" />
+    <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp" />
     <title>CursorCine</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -64,6 +66,22 @@
                 <option value="high">高畫質輸出（最慢）</option>
               </select>
             </label>
+
+            <label>
+              HDR Mapping（Windows）
+              <select id="hdrMappingModeSelect">
+                <option value="auto" selected>Auto（可用則 Native，否則回退）</option>
+                <option value="off">Off（只用既有錄影）</option>
+                <option value="force-native">Force Native（不可用則阻止開始）</option>
+              </select>
+            </label>
+            <p class="hdr-mapping-meta">
+              <span id="hdrMappingRuntime">目前路徑: Fallback（待命）</span>
+              <span id="hdrMappingProbe">Probe: 尚未探測</span>
+              <span id="hdrMappingDiag">Diag: 尚未開始</span>
+              <button id="copyHdrDiagBtn" type="button">複製 HDR 診斷 JSON</button>
+              <button id="runHdrSmokeBtn" type="button">執行 Native Smoke</button>
+            </p>
 
             <label>
               <span>聲音設定</span>
