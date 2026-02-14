@@ -1724,6 +1724,9 @@ async function maybeProbeHdrForUi() {
     setHdrProbeStatus('Probe: Native 停用（' + reason + stage + '）');
     return;
   }
+  if (!isRecording) {
+    setHdrRuntimeRoute('fallback', '目前路徑: 待命（實驗 Native 可用，尚未啟動擷取）');
+  }
   await probeHdrNativeSupport(sourceId, selectedSource.display_id);
 }
 
