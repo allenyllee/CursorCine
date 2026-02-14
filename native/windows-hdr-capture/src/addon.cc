@@ -21,7 +21,7 @@ namespace {
 constexpr const char* kBackendName = "windows-gdi-capture";
 constexpr int64_t kMaxCapturePixels = 3840LL * 2160LL;
 constexpr size_t kMaxFrameBytes = static_cast<size_t>(kMaxCapturePixels * 4LL);
-constexpr int64_t kMaxIpcOutputPixels = 640LL * 360LL;
+constexpr int64_t kDefaultMaxOutputPixels = 640LL * 360LL;
 
 napi_value MakeObject(napi_env env) {
   napi_value out;
@@ -135,7 +135,7 @@ struct CaptureRect {
 };
 
 struct ToneMapConfig {
-  float rolloff = 0.70f;
+  float rolloff = 0.0f;
   float saturation = 1.00f;
 };
 
@@ -204,10 +204,25 @@ CaptureRect ResolveCaptureRect(napi_env env, napi_value payload) {
     return rect;
   }
 
-  const int32_t x = GetNamedInt32(env, bounds, "x", rect.x);
-  const int32_t y = GetNamedInt32(env, bounds, "y", rect.y);
-  const int32_t width = GetNamedInt32(env, bounds, "width", rect.width);
-  const int32_t height = GetNamedInt32(env, bounds, "height", rect.height);
+  int32_t x = GetNamedInt32(env, bounds, "x", rect.x);
+  int32_t y = GetNamedInt32(env, bounds, "y", rect.y);
+  int32_t width = GetNamedInt32(env, bounds, "width", rect.width);
+  int32_t height = GetNamedInt32(env, bounds, "height", rect.height);
+
+  const double scaleFactor = GetNamedNumber(env, displayHint, "scaleFactor", 1.0);
+  if (scaleFactor > 1.01 && width > 0 && height > 0) {
+    const int32_t sx = static_cast<int32_t>(std::llround(static_cast<double>(x) * scaleFactor));
+    const int32_t sy = static_cast<int32_t>(std::llround(static_cast<double>(y) * scaleFactor));
+    const int32_t sw = static_cast<int32_t>(std::llround(static_cast<double>(width) * scaleFactor));
+    const int32_t sh = static_cast<int32_t>(std::llround(static_cast<double>(height) * scaleFactor));
+    const CaptureRect vr = GetDefaultVirtualScreenRect();
+    if (sw > 0 && sh > 0 && sw <= (vr.width + 8) && sh <= (vr.height + 8)) {
+      x = sx;
+      y = sy;
+      width = sw;
+      height = sh;
+    }
+  }
   if (width > 0 && height > 0) {
     rect.x = x;
     rect.y = y;
@@ -240,20 +255,29 @@ ToneMapConfig ResolveToneMap(napi_env env, napi_value payload) {
   return cfg;
 }
 
-void ComputeOutputSize(int32_t srcW, int32_t srcH, int32_t* outW, int32_t* outH) {
+int64_t ResolveMaxOutputPixels(napi_env env, napi_value payload) {
+  const double requested = GetNamedNumber(env, payload, "maxOutputPixels", static_cast<double>(kDefaultMaxOutputPixels));
+  if (!std::isfinite(requested) || requested <= 0) {
+    return kDefaultMaxOutputPixels;
+  }
+  const int64_t clamped = static_cast<int64_t>(requested);
+  return std::min(kMaxCapturePixels, std::max<int64_t>(kDefaultMaxOutputPixels, clamped));
+}
+
+void ComputeOutputSize(int32_t srcW, int32_t srcH, int64_t maxOutputPixels, int32_t* outW, int32_t* outH) {
   if (srcW <= 0 || srcH <= 0) {
     *outW = 0;
     *outH = 0;
     return;
   }
   const int64_t srcPixels = static_cast<int64_t>(srcW) * static_cast<int64_t>(srcH);
-  if (srcPixels <= kMaxIpcOutputPixels) {
+  if (srcPixels <= maxOutputPixels) {
     *outW = srcW;
     *outH = srcH;
     return;
   }
 
-  const double scale = std::sqrt(static_cast<double>(kMaxIpcOutputPixels) / static_cast<double>(srcPixels));
+  const double scale = std::sqrt(static_cast<double>(maxOutputPixels) / static_cast<double>(srcPixels));
   int32_t w = static_cast<int32_t>(std::floor(srcW * scale));
   int32_t h = static_cast<int32_t>(std::floor(srcH * scale));
   *outW = std::max(1, w);
@@ -393,7 +417,8 @@ std::unique_ptr<CaptureSession> CreateSession(napi_env env, napi_value payload, 
   }
   session->hdrLikely = ResolveHdrLikely(env, payload);
   session->toneMap = ResolveToneMap(env, payload);
-  ComputeOutputSize(session->rect.width, session->rect.height, &session->outputWidth, &session->outputHeight);
+  const int64_t maxOutputPixels = ResolveMaxOutputPixels(env, payload);
+  ComputeOutputSize(session->rect.width, session->rect.height, maxOutputPixels, &session->outputWidth, &session->outputHeight);
   session->outputStride = session->outputWidth * 4;
 
   session->desktopDc = GetDC(nullptr);

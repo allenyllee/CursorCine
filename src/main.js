@@ -472,11 +472,14 @@ async function runHdrNativeRouteSmoke(payload = {}) {
   let nativeSessionId = 0;
   try {
     const displayHint = getDisplayHdrHint(displayId);
+    const physicalW = Math.max(1, Math.round(Number(displayHint.bounds.width || 1) * Number(displayHint.scaleFactor || 1)));
+    const physicalH = Math.max(1, Math.round(Number(displayHint.bounds.height || 1) * Number(displayHint.scaleFactor || 1)));
     const start = await Promise.resolve(bridge.startCapture({
       sourceId,
       displayId: displayHint.displayId,
       maxFps: 30,
-      toneMap: { profile: 'rec709-rolloff-v1' },
+      maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
+      toneMap: { profile: 'rec709-rolloff-v1', rolloff: 0.0, saturation: 1.0 },
       displayHint
     }));
     if (!start || !start.ok) {
@@ -1706,10 +1709,13 @@ app.whenReady().then(() => {
 
     try {
       const displayHint = getDisplayHdrHint(displayId);
+      const physicalW = Math.max(1, Math.round(Number(displayHint.bounds.width || 1) * Number(displayHint.scaleFactor || 1)));
+      const physicalH = Math.max(1, Math.round(Number(displayHint.bounds.height || 1) * Number(displayHint.scaleFactor || 1)));
       const startResult = await Promise.resolve(bridge.startCapture({
         sourceId,
         displayId: displayHint.displayId,
         maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+        maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
         toneMap: payload && payload.toneMap ? payload.toneMap : {},
         displayHint
       }));

@@ -1519,16 +1519,18 @@ function blitNativeFrameToCanvas(frame) {
   }
 
   const dst = nativeHdrState.frameImageData.data;
-  if (stride === width * 4 && srcBytes.length >= expectedBytes) {
-    dst.set(srcBytes.subarray(0, expectedBytes));
-  } else {
-    for (let row = 0; row < height; row += 1) {
-      const srcOffset = row * stride;
-      const dstOffset = row * width * 4;
-      const end = Math.min(srcOffset + width * 4, srcBytes.length);
-      if (end > srcOffset) {
-        dst.set(srcBytes.subarray(srcOffset, end), dstOffset);
-      }
+  for (let row = 0; row < height; row += 1) {
+    const srcOffset = row * stride;
+    const dstOffset = row * width * 4;
+    const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
+    for (let i = 0; i + 3 < rowBytes; i += 4) {
+      const s = srcOffset + i;
+      const d = dstOffset + i;
+      // Native addon returns BGRA8; canvas ImageData expects RGBA.
+      dst[d] = srcBytes[s + 2];
+      dst[d + 1] = srcBytes[s + 1];
+      dst[d + 2] = srcBytes[s];
+      dst[d + 3] = srcBytes[s + 3];
     }
   }
 
@@ -1762,7 +1764,9 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
       displayId,
       maxFps: 60,
       toneMap: {
-        profile: 'rec709-rolloff-v1'
+        profile: 'rec709-rolloff-v1',
+        rolloff: 0.0,
+        saturation: 1.0
       }
     });
   } catch (error) {
