@@ -73,5 +73,5 @@ Shared/live route IPC wrappers:
 
 - This is an MVP path for stability and integration testing.
 - A future phase can replace GDI with WGC/D3D11 for lower latency and truer HDR source handling.
-- Renderer converts `BGRA8` to `RGBA` before canvas draw to avoid channel-swapped colors.
+- Native frame output is `RGBA8` to avoid per-frame channel conversion overhead in renderer.
 - On non-Windows platforms, native route is not used and app falls back automatically.

@@ -31,7 +31,7 @@ const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NAT
 const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '1') !== '0';
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
 const HDR_TRACE_LIMIT = 120;
-const HDR_SHARED_POLL_INTERVAL_MS = 33;
+const HDR_SHARED_POLL_INTERVAL_MS = 16;
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
   FRAME_SEQ: 1,
@@ -161,7 +161,7 @@ function ensureHdrFrameServer() {
         res.setHeader('X-Hdr-Width', String(Number(session.latestWidth || session.width || 0)));
         res.setHeader('X-Hdr-Height', String(Number(session.latestHeight || session.height || 0)));
         res.setHeader('X-Hdr-Stride', String(Number(session.latestStride || session.stride || 0)));
-        res.setHeader('X-Hdr-Pixel-Format', String(session.latestPixelFormat || 'BGRA8'));
+        res.setHeader('X-Hdr-Pixel-Format', String(session.latestPixelFormat || 'RGBA8'));
         res.setHeader('X-Hdr-Timestamp-Ms', String(Number(session.latestTimestampMs || 0)));
         res.end(frame);
       } catch (_error) {
@@ -500,7 +500,7 @@ async function runHdrNativeRouteSmoke(payload = {}) {
     result.width = Number(start.width || 0);
     result.height = Number(start.height || 0);
     result.stride = Number(start.stride || 0);
-    result.pixelFormat = String(start.pixelFormat || 'BGRA8');
+    result.pixelFormat = String(start.pixelFormat || 'RGBA8');
 
     try {
       const frame = await Promise.resolve(bridge.readFrame({
@@ -514,7 +514,7 @@ async function runHdrNativeRouteSmoke(payload = {}) {
         result.width = Number(frame.width || result.width || 0);
         result.height = Number(frame.height || result.height || 0);
         result.stride = Number(frame.stride || result.stride || 0);
-        result.pixelFormat = String(frame.pixelFormat || result.pixelFormat || 'BGRA8');
+        result.pixelFormat = String(frame.pixelFormat || result.pixelFormat || 'RGBA8');
       } else {
         result.readOk = false;
         result.readReason = String((frame && frame.reason) || 'READ_FAILED');
@@ -1324,7 +1324,7 @@ function pumpHdrSharedSession(sessionId) {
       session.latestWidth = width;
       session.latestHeight = height;
       session.latestStride = stride;
-      session.latestPixelFormat = String(frameResult.pixelFormat || 'BGRA8');
+      session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
       session.latestFrameBytes = Buffer.from(src);
 
       if (session.frameView && session.controlView) {
@@ -1605,7 +1605,7 @@ app.whenReady().then(() => {
         width: Number(result.width || 0),
         height: Number(result.height || 0),
         stride: Number(result.stride || 0),
-        pixelFormat: String(result.pixelFormat || 'BGRA8'),
+        pixelFormat: String(result.pixelFormat || 'RGBA8'),
         sharedFrameBuffer: result.sharedFrameBuffer || null,
         sharedControlBuffer: result.sharedControlBuffer || null
       };
@@ -1670,7 +1670,7 @@ app.whenReady().then(() => {
         width: Number(result.width || 0),
         height: Number(result.height || 0),
         stride: Number(result.stride || 0),
-        pixelFormat: String(result.pixelFormat || 'BGRA8'),
+        pixelFormat: String(result.pixelFormat || 'RGBA8'),
         bytes: safeBytes
           ? safeBytes.buffer.slice(safeBytes.byteOffset, safeBytes.byteOffset + safeBytes.byteLength)
           : null
@@ -1767,7 +1767,7 @@ app.whenReady().then(() => {
         latestWidth: width,
         latestHeight: height,
         latestStride: stride,
-        latestPixelFormat: String(startResult.pixelFormat || 'BGRA8'),
+        latestPixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         latestFrameBytes: null,
         pumpTimer: 0
       });
@@ -1790,7 +1790,7 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
-        pixelFormat: String(startResult.pixelFormat || 'BGRA8'),
+        pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         frameEndpoint,
         frameToken
       };
@@ -2078,7 +2078,7 @@ app.whenReady().then(() => {
         sessionId,
         width: Number(startResult.width || 0),
         height: Number(startResult.height || 0),
-        pixelFormat: String(startResult.pixelFormat || 'BGRA8'),
+        pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         colorSpace: String(startResult.colorSpace || 'Rec.709'),
         toneMap: startResult.toneMap || {},
         hdrActive: Boolean(startResult.hdrActive),
@@ -2152,7 +2152,7 @@ app.whenReady().then(() => {
         height: Number(frameResult.height || 0),
         stride: Number(frameResult.stride || 0),
         timestampMs: Number(frameResult.timestampMs || Date.now()),
-        pixelFormat: String(frameResult.pixelFormat || 'BGRA8'),
+        pixelFormat: String(frameResult.pixelFormat || 'RGBA8'),
         bytes: safeBytes
           ? safeBytes.buffer.slice(safeBytes.byteOffset, safeBytes.byteOffset + safeBytes.byteLength)
           : null

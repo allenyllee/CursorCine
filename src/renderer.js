@@ -115,7 +115,7 @@ const BUILTIN_OUTPUT_AUDIO_BITRATE_MAX = 512000;
 const HDR_NATIVE_READ_TIMEOUT_MS = 80;
 const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
-const HDR_NATIVE_POLL_INTERVAL_MS = 66;
+const HDR_NATIVE_POLL_INTERVAL_MS = 16;
 const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
 
 let sources = [];
@@ -126,6 +126,8 @@ let mediaRecorder;
 let drawTimer = 0;
 const DRAW_INTERVAL_MS = 16;
 let cursorTimer = 0;
+let cursorUpdateInFlight = false;
+let lastDrawNow = 0;
 let selectedSource;
 let recordingQualityPreset = QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
 let recordingStartedAtMs = 0;
@@ -957,12 +959,14 @@ async function loadSources() {
   setStatus(`已載入 ${sources.length} 個螢幕來源`);
 }
 
-function updateCursorFromMain() {
-  if (!selectedSource) {
+async function updateCursorFromMain() {
+  if (!selectedSource || cursorUpdateInFlight) {
     return;
   }
+  cursorUpdateInFlight = true;
 
-  electronAPI.getCursorPoint(selectedSource.display_id).then((p) => {
+  try {
+    const p = await electronAPI.getCursorPoint(selectedSource.display_id);
     if (!p.inside) {
       cameraState.targetZoom = 1;
       return;
@@ -984,54 +988,68 @@ function updateCursorFromMain() {
       cameraState.targetY = cursorPoint.y;
     }
 
-    electronAPI.getLatestClick(selectedSource.display_id, clickState.lastClickTimestamp).then((clickInfo) => {
-      if (!clickState.checkedCapability) {
-        clickState.checkedCapability = true;
-        clickState.enabled = Boolean(clickInfo && clickInfo.enabled);
-      }
-      if (clickInfo && clickInfo.hasNew && clickInfo.inside) {
-        clickState.lastClickTimestamp = clickInfo.timestamp;
-        const clickPoint = mapPointToVideo(clickInfo);
-        const clickTs = Number(clickInfo.timestamp || Date.now());
-        const isDoubleClick = clickState.lastZoomTriggerTs > 0 && (clickTs - clickState.lastZoomTriggerTs) <= DOUBLE_CLICK_MAX_WINDOW_MS;
-        const lockDistance = Math.hypot(clickPoint.x - clickState.lockedX, clickPoint.y - clickState.lockedY);
-        const clickedOtherPosition = lockDistance >= DOUBLE_CLICK_UNLOCK_DISTANCE_PX;
+    const clickInfo = await electronAPI.getLatestClick(selectedSource.display_id, clickState.lastClickTimestamp);
+    if (!clickState.checkedCapability) {
+      clickState.checkedCapability = true;
+      clickState.enabled = Boolean(clickInfo && clickInfo.enabled);
+    }
+    if (clickInfo && clickInfo.hasNew && clickInfo.inside) {
+      clickState.lastClickTimestamp = clickInfo.timestamp;
+      const clickPoint = mapPointToVideo(clickInfo);
+      const clickTs = Number(clickInfo.timestamp || Date.now());
+      const isDoubleClick = clickState.lastZoomTriggerTs > 0 && (clickTs - clickState.lastZoomTriggerTs) <= DOUBLE_CLICK_MAX_WINDOW_MS;
+      const lockDistance = Math.hypot(clickPoint.x - clickState.lockedX, clickPoint.y - clickState.lockedY);
+      const clickedOtherPosition = lockDistance >= DOUBLE_CLICK_UNLOCK_DISTANCE_PX;
 
-        clickState.lastZoomTriggerTs = clickTs;
-        clickState.holdDelayUntil = performance.now() + PEN_HOLD_DELAY_MS;
-        clickState.forceMaxUntil = isDoubleClick ? performance.now() + DOUBLE_CLICK_ZOOM_HOLD_MS : 0;
+      clickState.lastZoomTriggerTs = clickTs;
+      clickState.holdDelayUntil = performance.now() + PEN_HOLD_DELAY_MS;
+      clickState.forceMaxUntil = isDoubleClick ? performance.now() + DOUBLE_CLICK_ZOOM_HOLD_MS : 0;
 
-        if (isDoubleClick) {
-          clickState.doubleClickLocked = true;
-          clickState.lockedX = clickPoint.x;
-          clickState.lockedY = clickPoint.y;
-          triggerTemporaryZoom(clickPoint.x, clickPoint.y, cameraState.maxZoom, DOUBLE_CLICK_ZOOM_HOLD_MS);
-        } else {
-          if (clickState.doubleClickLocked && clickedOtherPosition) {
-            clickState.doubleClickLocked = false;
-            cameraState.zoomHoldUntil = 0;
-            cameraState.targetZoom = 1;
-          }
-          if (!clickState.doubleClickLocked) {
-            triggerTemporaryZoom(clickPoint.x, clickPoint.y, getPenHoldZoom(), CLICK_ZOOM_HOLD_MS);
-          }
+      if (isDoubleClick) {
+        clickState.doubleClickLocked = true;
+        clickState.lockedX = clickPoint.x;
+        clickState.lockedY = clickPoint.y;
+        triggerTemporaryZoom(clickPoint.x, clickPoint.y, cameraState.maxZoom, DOUBLE_CLICK_ZOOM_HOLD_MS);
+      } else {
+        if (clickState.doubleClickLocked && clickedOtherPosition) {
+          clickState.doubleClickLocked = false;
+          cameraState.zoomHoldUntil = 0;
+          cameraState.targetZoom = 1;
         }
-        if (isDoubleClick) {
-          electronAPI.overlayDoubleClickMarker({ x: clickInfo.x, y: clickInfo.y }).catch(() => {
-            triggerDoubleClickMarker(clickPoint.x, clickPoint.y);
-          });
+        if (!clickState.doubleClickLocked) {
+          triggerTemporaryZoom(clickPoint.x, clickPoint.y, getPenHoldZoom(), CLICK_ZOOM_HOLD_MS);
         }
       }
-
-      if (clickInfo && !clickState.doubleClickLocked && clickInfo.mouseDown && performance.now() >= clickState.holdDelayUntil && performance.now() >= clickState.forceMaxUntil) {
-        cameraState.targetZoom = getPenHoldZoom();
-        cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
-      } else if (clickInfo && !clickInfo.mouseDown) {
-        clickState.holdDelayUntil = 0;
-        clickState.forceMaxUntil = 0;
+      if (isDoubleClick) {
+        electronAPI.overlayDoubleClickMarker({ x: clickInfo.x, y: clickInfo.y }).catch(() => {
+          triggerDoubleClickMarker(clickPoint.x, clickPoint.y);
+        });
       }
-    });
-  });
+    }
+
+    if (clickInfo && !clickState.doubleClickLocked && clickInfo.mouseDown && performance.now() >= clickState.holdDelayUntil && performance.now() >= clickState.forceMaxUntil) {
+      cameraState.targetZoom = getPenHoldZoom();
+      cameraState.zoomHoldUntil = performance.now() + CLICK_ZOOM_HOLD_MS;
+    } else if (clickInfo && !clickInfo.mouseDown) {
+      clickState.holdDelayUntil = 0;
+      clickState.forceMaxUntil = 0;
+    }
+  } catch (_error) {
+  } finally {
+    cursorUpdateInFlight = false;
+  }
+}
+
+function smoothingByDelta(base, deltaMs) {
+  const k = clamp(Number(base) || 0, 0, 1);
+  if (k <= 0) {
+    return 0;
+  }
+  if (k >= 1) {
+    return 1;
+  }
+  const frameScale = clamp((Number(deltaMs) || DRAW_INTERVAL_MS) / DRAW_INTERVAL_MS, 0.25, 4);
+  return 1 - Math.pow(1 - k, frameScale);
 }
 
 function drawCursorGlow(cursorX, cursorY) {
@@ -1096,24 +1114,29 @@ function drawLoop() {
   resizeCanvasToSource();
 
   const now = performance.now();
+  const deltaMs = lastDrawNow > 0 ? Math.max(1, now - lastDrawNow) : DRAW_INTERVAL_MS;
+  lastDrawNow = now;
   if (!clickState.doubleClickLocked && now > cameraState.zoomHoldUntil) {
     cameraState.targetZoom = 1;
   }
 
-  const smooth = cameraState.smoothing;
-  const followSmooth = annotationState.enabled
+  const smooth = clamp(cameraState.smoothing, 0.01, 1);
+  const followSmoothBase = annotationState.enabled
     ? smooth * PEN_DRAW_FOLLOW_SLOWDOWN
     : smooth;
-  const zoomSmooth = cameraState.targetZoom > cameraState.zoom
+  const zoomSmoothBase = cameraState.targetZoom > cameraState.zoom
     ? smooth * CLICK_ZOOM_IN_SLOWDOWN
     : smooth;
+  const followSmooth = smoothingByDelta(followSmoothBase, deltaMs);
+  const zoomSmooth = smoothingByDelta(zoomSmoothBase, deltaMs);
+  const glowSmooth = smoothingByDelta(glowState.lag, deltaMs);
 
   cameraState.zoom += (cameraState.targetZoom - cameraState.zoom) * zoomSmooth;
   cameraState.viewportX += (cameraState.targetX - cameraState.viewportX) * followSmooth;
   cameraState.viewportY += (cameraState.targetY - cameraState.viewportY) * followSmooth;
 
-  glowState.x += (cameraState.cursorX - glowState.x) * glowState.lag;
-  glowState.y += (cameraState.cursorY - glowState.y) * glowState.lag;
+  glowState.x += (cameraState.cursorX - glowState.x) * glowSmooth;
+  glowState.y += (cameraState.cursorY - glowState.y) * glowSmooth;
 
   const dims = getCaptureVideoDimensions();
   const sw = dims.width;
@@ -1511,6 +1534,7 @@ function blitNativeFrameToCanvas(frame) {
   }
 
   const srcBytes = new Uint8ClampedArray(rawBytes);
+  const pixelFormat = String(frame && frame.pixelFormat ? frame.pixelFormat : 'RGBA8').toUpperCase();
   ensureNativeHdrCanvas(width, height);
 
   const expectedBytes = width * height * 4;
@@ -1519,18 +1543,33 @@ function blitNativeFrameToCanvas(frame) {
   }
 
   const dst = nativeHdrState.frameImageData.data;
-  for (let row = 0; row < height; row += 1) {
-    const srcOffset = row * stride;
-    const dstOffset = row * width * 4;
-    const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
-    for (let i = 0; i + 3 < rowBytes; i += 4) {
-      const s = srcOffset + i;
-      const d = dstOffset + i;
-      // Native addon returns BGRA8; canvas ImageData expects RGBA.
-      dst[d] = srcBytes[s + 2];
-      dst[d + 1] = srcBytes[s + 1];
-      dst[d + 2] = srcBytes[s];
-      dst[d + 3] = srcBytes[s + 3];
+  if (pixelFormat === 'RGBA8') {
+    if (stride === width * 4 && srcBytes.length >= expectedBytes) {
+      dst.set(srcBytes.subarray(0, expectedBytes));
+    } else {
+      for (let row = 0; row < height; row += 1) {
+        const srcOffset = row * stride;
+        const dstOffset = row * width * 4;
+        const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
+        if (rowBytes > 0) {
+          dst.set(srcBytes.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+        }
+      }
+    }
+  } else {
+    for (let row = 0; row < height; row += 1) {
+      const srcOffset = row * stride;
+      const dstOffset = row * width * 4;
+      const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
+      for (let i = 0; i + 3 < rowBytes; i += 4) {
+        const s = srcOffset + i;
+        const d = dstOffset + i;
+        // Backward-compatible conversion for legacy BGRA payloads.
+        dst[d] = srcBytes[s + 2];
+        dst[d + 1] = srcBytes[s + 1];
+        dst[d + 2] = srcBytes[s];
+        dst[d + 3] = srcBytes[s + 3];
+      }
     }
   }
 
@@ -1571,6 +1610,7 @@ function tryReadNativeFrameFromSharedBuffer() {
     width,
     height,
     stride,
+    pixelFormat: 'RGBA8',
     bytes: frameView.slice(0, byteLength)
   };
 }
@@ -1610,6 +1650,7 @@ async function tryReadNativeFrameFromHttpEndpoint() {
   const width = Math.max(1, Number(response.headers.get('x-hdr-width') || nativeHdrState.width || 1));
   const height = Math.max(1, Number(response.headers.get('x-hdr-height') || nativeHdrState.height || 1));
   const stride = Math.max(width * 4, Number(response.headers.get('x-hdr-stride') || nativeHdrState.stride || width * 4));
+  const pixelFormat = String(response.headers.get('x-hdr-pixel-format') || 'RGBA8');
   const bytes = await response.arrayBuffer();
   nativeHdrState.lastHttpFrameSeq = frameSeq;
   return {
@@ -1617,6 +1658,7 @@ async function tryReadNativeFrameFromHttpEndpoint() {
     width,
     height,
     stride,
+    pixelFormat,
     bytes
   };
 }
@@ -3244,10 +3286,12 @@ async function startRecording() {
   await electronAPI.overlaySetEnabled(annotationState.enabled);
 
   clearInterval(cursorTimer);
+  cursorUpdateInFlight = false;
   cursorTimer = setInterval(updateCursorFromMain, 16);
 
   clearTimeout(drawTimer);
   drawTimer = 0;
+  lastDrawNow = 0;
   drawLoop();
 
   const minimizeDecision = await electronAPI.shouldAutoMinimizeMainWindow(selectedSource.display_id).catch(() => ({ ok: false, shouldMinimize: true }));
@@ -3320,6 +3364,8 @@ function stopRecording() {
   clearTimeout(drawTimer);
   cursorTimer = 0;
   drawTimer = 0;
+  cursorUpdateInFlight = false;
+  lastDrawNow = 0;
   electronAPI.overlayDestroy().catch(() => {});
 
   recordBtn.disabled = false;

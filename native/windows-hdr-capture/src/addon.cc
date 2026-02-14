@@ -317,9 +317,10 @@ void ApplyToneMap(std::vector<uint8_t>* frameBytes, bool hdrLikely, const ToneMa
       b = luma + (b - luma) * sat;
     }
 
-    pixels[i] = ToByte(b);
+    // Convert in-place from BGRA source bytes to RGBA output bytes.
+    pixels[i] = ToByte(r);
     pixels[i + 1] = ToByte(g);
-    pixels[i + 2] = ToByte(r);
+    pixels[i + 2] = ToByte(b);
     pixels[i + 3] = 255;
   }
 }
@@ -537,7 +538,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
   SetNamed(env, result, "width", MakeInt32(env, started->outputWidth));
   SetNamed(env, result, "height", MakeInt32(env, started->outputHeight));
   SetNamed(env, result, "stride", MakeInt32(env, started->outputStride));
-  SetNamed(env, result, "pixelFormat", MakeString(env, "BGRA8"));
+  SetNamed(env, result, "pixelFormat", MakeString(env, "RGBA8"));
   SetNamed(env, result, "colorSpace", MakeString(env, "Rec.709"));
   SetNamed(env, result, "hdrActive", MakeBool(env, started->hdrLikely));
   SetNamed(env, result, "nativeBackend", MakeString(env, kBackendName));
@@ -601,7 +602,7 @@ napi_value ReadFrame(napi_env env, napi_callback_info info) {
   SetNamed(env, result, "width", MakeInt32(env, session->outputWidth));
   SetNamed(env, result, "height", MakeInt32(env, session->outputHeight));
   SetNamed(env, result, "stride", MakeInt32(env, session->outputStride));
-  SetNamed(env, result, "pixelFormat", MakeString(env, "BGRA8"));
+  SetNamed(env, result, "pixelFormat", MakeString(env, "RGBA8"));
   SetNamed(env, result, "timestampMs", MakeDouble(env, static_cast<double>(now)));
   SetNamed(env, result, "bytes", bytes);
 #else
