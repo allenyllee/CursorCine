@@ -175,6 +175,11 @@ GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈�
 - `src/renderer.js`: 錄影主流程、自動縮放、音訊混音、剪輯時間軸與輸出策略
 - `src/overlay.js` / `src/overlay.html`: 畫筆與指示器的全螢幕 overlay
 - `src/index.html` / `src/styles.css`: 控制介面與預覽畫面
+- `scripts/start-electron.js`: 開發啟動入口（預設注入 HDR native route 旗標）
+- `scripts/check-dist-win-env.js`: Windows 打包前置檢查（非 Windows 時檢查 `wine`）
+- `native/windows-hdr-capture/`: Windows 原生 HDR 擷取 Node-API 模組
+- `native/windows-hdr-capture/src/addon.cc`: 原生擷取與 tone mapping MVP 實作
+- `.github/workflows/build.yml`: CI 供應鏈檢查與 Windows/Linux 打包發佈流程
 
 ## 注意事項
 

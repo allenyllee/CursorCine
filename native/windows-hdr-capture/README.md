@@ -27,14 +27,23 @@ If PowerShell blocks `npm`, use `npm.cmd`.
 
 ## Build (Windows)
 
+From repository root:
+
 ```bash
 npm run build:native-hdr-win
 ```
 
-PowerShell variant:
+From `native/windows-hdr-capture` directory:
+
+```bash
+npm run build
+```
+
+PowerShell variants:
 
 ```powershell
 npm.cmd run build:native-hdr-win
+npm.cmd run build
 ```
 
 If build fails with `MSB8020` and `PlatformToolset='ClangCL'`, install the Clang toolset in Visual Studio Installer (`C++ Clang tools for Windows`) and rebuild.
