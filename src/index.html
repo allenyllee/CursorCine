@@ -66,6 +66,19 @@
             </label>
 
             <label>
+              HDR Mapping（Windows）
+              <select id="hdrMappingModeSelect">
+                <option value="auto" selected>Auto（可用則 Native，否則回退）</option>
+                <option value="off">Off（只用既有錄影）</option>
+                <option value="force-native">Force Native（不可用則阻止開始）</option>
+              </select>
+            </label>
+            <p class="hdr-mapping-meta">
+              <span id="hdrMappingRuntime">目前路徑: Fallback（待命）</span>
+              <span id="hdrMappingProbe">Probe: 尚未探測</span>
+            </p>
+
+            <label>
               <span>聲音設定</span>
               <span>
                 <input id="micInput" type="checkbox" />

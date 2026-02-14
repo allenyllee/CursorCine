@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlayUndo: () => ipcRenderer.invoke('overlay:undo'),
   overlayClear: () => ipcRenderer.invoke('overlay:clear'),
   overlayDoubleClickMarker: (payload) => ipcRenderer.invoke('overlay:double-click-marker', payload),
+  hdrProbeWindows: (payload) => ipcRenderer.invoke('hdr:probe', payload),
+  hdrCaptureStart: (payload) => ipcRenderer.invoke('hdr:start', payload),
+  hdrCaptureReadFrame: (payload) => ipcRenderer.invoke('hdr:read-frame', payload),
+  hdrCaptureStop: (payload) => ipcRenderer.invoke('hdr:stop', payload),
   shouldAutoMinimizeMainWindow: (displayId) => ipcRenderer.invoke('window:should-auto-minimize', displayId),
   minimizeMainWindow: () => ipcRenderer.invoke('window:minimize-main'),
   onExportPhase: (listener) => {

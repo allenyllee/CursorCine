@@ -33,6 +33,9 @@ const formatSelect = document.getElementById('formatSelect');
 const exportEngineSelect = document.getElementById('exportEngineSelect');
 const qualitySelect = document.getElementById('qualitySelect');
 const outputQualitySelect = document.getElementById('outputQualitySelect');
+const hdrMappingModeSelect = document.getElementById('hdrMappingModeSelect');
+const hdrMappingRuntimeEl = document.getElementById('hdrMappingRuntime');
+const hdrMappingProbeEl = document.getElementById('hdrMappingProbe');
 const hdrCompEnable = document.getElementById('hdrCompEnable');
 const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
 const hdrCompStrengthLabel = document.getElementById('hdrCompStrengthLabel');
@@ -102,6 +105,9 @@ const BUILTIN_OUTPUT_VIDEO_BITRATE_MULTIPLIERS = {
 };
 const BUILTIN_OUTPUT_VIDEO_BITRATE_MAX = 120000000;
 const BUILTIN_OUTPUT_AUDIO_BITRATE_MAX = 512000;
+const HDR_NATIVE_READ_TIMEOUT_MS = 50;
+const HDR_NATIVE_MAX_READ_FAILURES = 8;
+const HDR_NATIVE_MAX_IDLE_MS = 2000;
 
 let sources = [];
 let sourceStream;
@@ -122,11 +128,17 @@ let recordingStopRequestedAtMs = 0;
 let recordingUploadSession = null;
 let recordingUploadQueue = Promise.resolve();
 let recordingUploadFailure = null;
+let hdrRuntimeStatusMessage = '尚未探測';
+let hdrProbeStatusMessage = '尚未探測';
 let exportStartedAtMs = 0;
 let exportTimer = 0;
 let builtinAudioCompatibility = 'unknown';
 let exportCancelRequested = false;
 let activeExportTaskId = 0;
+let nativeHdrFramePumpTimer = 0;
+let nativeHdrFramePumpRunning = false;
+let nativeHdrFallbackAttempted = false;
+const extraCaptureStreams = [];
 
 let recordingMeta = {
   outputExt: 'webm',
@@ -176,6 +188,31 @@ const hdrCompState = {
   sharpness: Number(hdrCompSharpnessInput?.value || DEFAULT_HDR_COMP_SHARPNESS)
 };
 
+const hdrMappingState = {
+  mode: (hdrMappingModeSelect && hdrMappingModeSelect.value) || 'auto',
+  runtimeRoute: 'fallback',
+  probeSupported: false,
+  probeHdrActive: false,
+  probeReason: 'NOT_PROBED'
+};
+
+const nativeHdrState = {
+  active: false,
+  sessionId: 0,
+  width: 0,
+  height: 0,
+  stride: 0,
+  sourceId: '',
+  displayId: '',
+  readFailures: 0,
+  droppedFrames: 0,
+  lastFrameAtMs: 0,
+  frameCount: 0,
+  canvas: null,
+  ctx: null,
+  frameImageData: null
+};
+
 const viewState = {
   sx: 0,
   sy: 0,
@@ -222,6 +259,30 @@ const cameraState = {
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function normalizeHdrMappingMode(value) {
+  return value === 'off' || value === 'force-native' ? value : 'auto';
+}
+
+function updateHdrMappingStatusUi() {
+  if (hdrMappingRuntimeEl) {
+    hdrMappingRuntimeEl.textContent = hdrRuntimeStatusMessage;
+  }
+  if (hdrMappingProbeEl) {
+    hdrMappingProbeEl.textContent = hdrProbeStatusMessage;
+  }
+}
+
+function setHdrRuntimeRoute(route, message) {
+  hdrMappingState.runtimeRoute = route === 'native' ? 'native' : 'fallback';
+  hdrRuntimeStatusMessage = message || (hdrMappingState.runtimeRoute === 'native' ? '目前路徑: Native HDR' : '目前路徑: Fallback');
+  updateHdrMappingStatusUi();
+}
+
+function setHdrProbeStatus(message) {
+  hdrProbeStatusMessage = message || '尚未探測';
+  updateHdrMappingStatusUi();
 }
 
 function updateRecordingTimeLabel(seconds = 0) {
@@ -546,8 +607,9 @@ function drawDoubleClickMarker(now) {
 }
 
 function resizeCanvasToSource() {
-  const w = rawVideo.videoWidth;
-  const h = rawVideo.videoHeight;
+  const dims = getCaptureVideoDimensions();
+  const w = dims.width;
+  const h = dims.height;
   if (!w || !h) {
     return;
   }
@@ -559,6 +621,7 @@ function resizeCanvasToSource() {
 }
 
 async function loadSources() {
+  const previousValue = sourceSelect.value;
   sources = await electronAPI.getDesktopSources();
   sourceSelect.innerHTML = '';
 
@@ -573,6 +636,14 @@ async function loadSources() {
     option.textContent = source.name;
     sourceSelect.appendChild(option);
   }
+
+  if (sourceSelect.options.length > 0) {
+    const restoredIndex = sources.findIndex((s) => s.id === previousValue);
+    sourceSelect.selectedIndex = restoredIndex >= 0 ? restoredIndex : 0;
+    selectedSource = sources.find((s) => s.id === sourceSelect.value);
+  }
+
+  await maybeProbeHdrForUi().catch(() => {});
 
   setStatus(`已載入 ${sources.length} 個螢幕來源`);
 }
@@ -709,7 +780,7 @@ function getPenFollowTarget(cursorX, cursorY) {
 }
 
 function drawLoop() {
-  if (!sourceStream) {
+  if (!sourceStream && !nativeHdrState.active) {
     return;
   }
 
@@ -735,9 +806,16 @@ function drawLoop() {
   glowState.x += (cameraState.cursorX - glowState.x) * glowState.lag;
   glowState.y += (cameraState.cursorY - glowState.y) * glowState.lag;
 
-  const sw = rawVideo.videoWidth;
-  const sh = rawVideo.videoHeight;
+  const dims = getCaptureVideoDimensions();
+  const sw = dims.width;
+  const sh = dims.height;
   if (!sw || !sh) {
+    drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
+    return;
+  }
+
+  const captureSource = getCaptureVideoSource();
+  if (!captureSource) {
     drawTimer = setTimeout(drawLoop, DRAW_INTERVAL_MS);
     return;
   }
@@ -758,7 +836,7 @@ function drawLoop() {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.filter = buildHdrCompensationFilter();
-  ctx.drawImage(rawVideo, sx, sy, cropW, cropH, 0, 0, sw, sh);
+  ctx.drawImage(captureSource, sx, sy, cropW, cropH, 0, 0, sw, sh);
   ctx.filter = 'none';
 
   if (hdrCompState.enabled) {
@@ -767,7 +845,7 @@ function drawLoop() {
       ctx.globalAlpha = sharpness * 0.12;
       ctx.globalCompositeOperation = 'overlay';
       ctx.filter = 'contrast(' + (1 + sharpness * 0.45).toFixed(3) + ')';
-      ctx.drawImage(rawVideo, sx, sy, cropW, cropH, 0, 0, sw, sh);
+      ctx.drawImage(captureSource, sx, sy, cropW, cropH, 0, 0, sw, sh);
       ctx.filter = 'none';
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
@@ -989,17 +1067,353 @@ async function getDesktopStream(sourceId) {
       }
     });
   } catch (_error) {
-    return navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
+    return getDesktopVideoStream(sourceId);
+  }
+}
+
+async function getDesktopVideoStream(sourceId) {
+  return navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      mandatory: {
+        chromeMediaSource: 'desktop',
+        chromeMediaSourceId: sourceId,
+        maxFrameRate: 60
+      }
+    }
+  });
+}
+
+async function getDesktopAudioStream(sourceId) {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
         mandatory: {
           chromeMediaSource: 'desktop',
-          chromeMediaSourceId: sourceId,
-          maxFrameRate: 60
+          chromeMediaSourceId: sourceId
         }
-      }
+      },
+      video: false
     });
+  } catch (_error) {
+    return undefined;
   }
+}
+
+function ensureNativeHdrCanvas(width, height) {
+  const safeW = Math.max(1, Math.floor(Number(width) || 1));
+  const safeH = Math.max(1, Math.floor(Number(height) || 1));
+
+  if (!nativeHdrState.canvas) {
+    nativeHdrState.canvas = document.createElement('canvas');
+    nativeHdrState.ctx = nativeHdrState.canvas.getContext('2d', { alpha: false });
+  }
+
+  if (!nativeHdrState.canvas || !nativeHdrState.ctx) {
+    throw new Error('無法建立 Native HDR 畫面緩衝。');
+  }
+
+  if (nativeHdrState.canvas.width !== safeW || nativeHdrState.canvas.height !== safeH) {
+    nativeHdrState.canvas.width = safeW;
+    nativeHdrState.canvas.height = safeH;
+    nativeHdrState.frameImageData = null;
+  }
+}
+
+function getCaptureVideoSource() {
+  if (nativeHdrState.active && nativeHdrState.canvas) {
+    return nativeHdrState.canvas;
+  }
+  return rawVideo;
+}
+
+function getCaptureVideoDimensions() {
+  if (nativeHdrState.active && nativeHdrState.canvas) {
+    return {
+      width: nativeHdrState.canvas.width,
+      height: nativeHdrState.canvas.height
+    };
+  }
+  return {
+    width: Number(rawVideo.videoWidth || 0),
+    height: Number(rawVideo.videoHeight || 0)
+  };
+}
+
+function stopNativeHdrFramePump() {
+  clearTimeout(nativeHdrFramePumpTimer);
+  nativeHdrFramePumpTimer = 0;
+  nativeHdrFramePumpRunning = false;
+}
+
+async function stopNativeHdrCapture() {
+  stopNativeHdrFramePump();
+
+  if (nativeHdrState.sessionId > 0) {
+    await electronAPI.hdrCaptureStop({
+      sessionId: nativeHdrState.sessionId
+    }).catch(() => {});
+  }
+
+  nativeHdrState.active = false;
+  nativeHdrState.sessionId = 0;
+  nativeHdrState.width = 0;
+  nativeHdrState.height = 0;
+  nativeHdrState.stride = 0;
+  nativeHdrState.sourceId = '';
+  nativeHdrState.displayId = '';
+  nativeHdrState.readFailures = 0;
+  nativeHdrState.droppedFrames = 0;
+  nativeHdrState.lastFrameAtMs = 0;
+  nativeHdrState.frameCount = 0;
+  nativeHdrState.frameImageData = null;
+}
+
+function blitNativeFrameToCanvas(frame) {
+  if (!nativeHdrState.ctx || !nativeHdrState.canvas) {
+    return;
+  }
+
+  const width = Math.max(1, Number(frame && frame.width ? frame.width : nativeHdrState.width || 1));
+  const height = Math.max(1, Number(frame && frame.height ? frame.height : nativeHdrState.height || 1));
+  const stride = Math.max(width * 4, Number(frame && frame.stride ? frame.stride : width * 4));
+  const rawBytes = frame && frame.bytes ? frame.bytes : null;
+  if (!rawBytes) {
+    nativeHdrState.droppedFrames += 1;
+    return;
+  }
+
+  const srcBytes = new Uint8ClampedArray(rawBytes);
+  ensureNativeHdrCanvas(width, height);
+
+  const expectedBytes = width * height * 4;
+  if (!nativeHdrState.frameImageData || nativeHdrState.frameImageData.width !== width || nativeHdrState.frameImageData.height !== height) {
+    nativeHdrState.frameImageData = nativeHdrState.ctx.createImageData(width, height);
+  }
+
+  const dst = nativeHdrState.frameImageData.data;
+  if (stride === width * 4 && srcBytes.length >= expectedBytes) {
+    dst.set(srcBytes.subarray(0, expectedBytes));
+  } else {
+    for (let row = 0; row < height; row += 1) {
+      const srcOffset = row * stride;
+      const dstOffset = row * width * 4;
+      const end = Math.min(srcOffset + width * 4, srcBytes.length);
+      if (end > srcOffset) {
+        dst.set(srcBytes.subarray(srcOffset, end), dstOffset);
+      }
+    }
+  }
+
+  nativeHdrState.ctx.putImageData(nativeHdrState.frameImageData, 0, 0);
+  nativeHdrState.lastFrameAtMs = performance.now();
+  nativeHdrState.frameCount += 1;
+}
+
+async function fallbackNativeToDesktopVideo(reason) {
+  if (nativeHdrFallbackAttempted) {
+    return;
+  }
+  nativeHdrFallbackAttempted = true;
+
+  const oldSourceStream = sourceStream;
+
+  try {
+    const fallbackStream = await getDesktopStream(nativeHdrState.sourceId || sourceSelect.value);
+    sourceStream = fallbackStream;
+    applyQualityHints(sourceStream);
+    rawVideo.srcObject = fallbackStream;
+    await rawVideo.play();
+    setHdrRuntimeRoute('fallback', '目前路徑: Fallback（Native 執行中回退）');
+
+    if (oldSourceStream && oldSourceStream !== fallbackStream) {
+      extraCaptureStreams.push(oldSourceStream);
+    }
+
+    setStatus('偵測到 Native HDR 擷取中斷，已自動回退既有錄影管線。' + (reason ? ' 原因: ' + reason : ''));
+  } catch (error) {
+    setStatus('Native HDR 擷取中斷且回退失敗: ' + (error && error.message ? error.message : String(error)));
+  } finally {
+    await stopNativeHdrCapture();
+  }
+}
+
+async function pollNativeHdrFrame() {
+  if (!nativeHdrState.active || nativeHdrState.sessionId <= 0 || nativeHdrFramePumpRunning) {
+    return;
+  }
+
+  nativeHdrFramePumpRunning = true;
+  try {
+    const result = await electronAPI.hdrCaptureReadFrame({
+      sessionId: nativeHdrState.sessionId,
+      timeoutMs: HDR_NATIVE_READ_TIMEOUT_MS
+    });
+
+    if (result && result.ok) {
+      nativeHdrState.readFailures = 0;
+      blitNativeFrameToCanvas(result);
+      return;
+    }
+
+    nativeHdrState.readFailures += 1;
+    const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (performance.now() - nativeHdrState.lastFrameAtMs) : 0;
+    if (
+      (result && result.fallbackRecommended) ||
+      nativeHdrState.readFailures >= HDR_NATIVE_MAX_READ_FAILURES ||
+      idleForMs >= HDR_NATIVE_MAX_IDLE_MS
+    ) {
+      await fallbackNativeToDesktopVideo((result && result.reason) || 'READ_FAILED');
+    }
+  } catch (error) {
+    nativeHdrState.readFailures += 1;
+    if (nativeHdrState.readFailures >= HDR_NATIVE_MAX_READ_FAILURES) {
+      await fallbackNativeToDesktopVideo(error && error.message ? error.message : 'READ_EXCEPTION');
+    }
+  } finally {
+    nativeHdrFramePumpRunning = false;
+    if (nativeHdrState.active && nativeHdrState.sessionId > 0) {
+      nativeHdrFramePumpTimer = setTimeout(() => {
+        pollNativeHdrFrame().catch(() => {});
+      }, 1);
+    }
+  }
+}
+
+async function probeHdrNativeSupport(sourceId, displayId) {
+  const probe = await electronAPI.hdrProbeWindows({
+    sourceId,
+    displayId
+  }).catch(() => ({ ok: false, supported: false, reason: 'PROBE_EXCEPTION' }));
+
+  hdrMappingState.probeSupported = Boolean(probe && probe.supported);
+  hdrMappingState.probeHdrActive = Boolean(probe && probe.hdrActive);
+  hdrMappingState.probeReason = String((probe && probe.reason) || (probe && probe.supported ? 'OK' : 'UNKNOWN'));
+
+  if (probe && probe.supported) {
+    setHdrProbeStatus('Probe: Native 可用（' + (probe.hdrActive ? 'HDR 螢幕' : 'SDR/未知') + '）');
+  } else {
+    setHdrProbeStatus('Probe: Native 不可用（' + hdrMappingState.probeReason + '）');
+  }
+
+  return probe || { ok: false, supported: false, reason: 'UNKNOWN' };
+}
+
+async function tryStartNativeHdrCapture(sourceId, displayId) {
+  const start = await electronAPI.hdrCaptureStart({
+    sourceId,
+    displayId,
+    maxFps: 60,
+    toneMap: {
+      profile: 'rec709-rolloff-v1'
+    }
+  });
+
+  if (!start || !start.ok) {
+    return {
+      ok: false,
+      reason: (start && start.reason) || 'START_FAILED',
+      message: (start && start.message) || '無法啟動 Native HDR 擷取。'
+    };
+  }
+
+  nativeHdrState.active = true;
+  nativeHdrState.sessionId = Number(start.sessionId || 0);
+  nativeHdrState.width = Math.max(1, Number(start.width || 1));
+  nativeHdrState.height = Math.max(1, Number(start.height || 1));
+  nativeHdrState.stride = Math.max(nativeHdrState.width * 4, Number(start.stride || nativeHdrState.width * 4));
+  nativeHdrState.sourceId = sourceId;
+  nativeHdrState.displayId = String(displayId || '');
+  nativeHdrState.readFailures = 0;
+  nativeHdrState.droppedFrames = 0;
+  nativeHdrState.lastFrameAtMs = 0;
+  nativeHdrState.frameCount = 0;
+  nativeHdrFallbackAttempted = false;
+
+  ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
+  setHdrRuntimeRoute('native', '目前路徑: Native HDR (Rec.709 Mapping)');
+
+  await pollNativeHdrFrame();
+  return { ok: true, start };
+}
+
+async function resolveCaptureRoute(sourceId, selectedDisplayId) {
+  const mode = normalizeHdrMappingMode(hdrMappingState.mode);
+  if (mode === 'off') {
+    setHdrProbeStatus('Probe: 模式關閉');
+    return { route: 'fallback', reason: 'MODE_OFF' };
+  }
+
+  const probe = await probeHdrNativeSupport(sourceId, selectedDisplayId);
+  if (!probe.supported) {
+    if (mode === 'force-native') {
+      return {
+        route: 'blocked',
+        reason: probe.reason || 'NATIVE_UNAVAILABLE',
+        message: probe.message || 'Force Native 但 native backend 不可用。'
+      };
+    }
+    return { route: 'fallback', reason: probe.reason || 'NATIVE_UNAVAILABLE' };
+  }
+
+  if (mode === 'auto' && !probe.hdrActive) {
+    return { route: 'fallback', reason: probe.reason || 'HDR_INACTIVE' };
+  }
+
+  const nativeStart = await tryStartNativeHdrCapture(sourceId, selectedDisplayId);
+  if (nativeStart.ok) {
+    return { route: 'native', reason: 'NATIVE_OK' };
+  }
+
+  if (mode === 'force-native') {
+    return {
+      route: 'blocked',
+      reason: nativeStart.reason || 'START_FAILED',
+      message: nativeStart.message || 'Force Native 啟動失敗。'
+    };
+  }
+
+  return { route: 'fallback', reason: nativeStart.reason || 'START_FAILED' };
+}
+
+async function buildCaptureStreams(sourceId, selectedDisplayId) {
+  const decision = await resolveCaptureRoute(sourceId, selectedDisplayId);
+
+  if (decision.route === 'blocked') {
+    throw new Error(decision.message || 'Native HDR 路徑不可用。');
+  }
+
+  if (decision.route === 'native') {
+    sourceStream = await getDesktopAudioStream(sourceId);
+    if (!sourceStream) {
+      sourceStream = new MediaStream();
+    }
+    micStream = await getMicStreamIfEnabled();
+    rawVideo.srcObject = null;
+    rawVideo.load();
+    return { route: 'native' };
+  }
+
+  await stopNativeHdrCapture();
+  sourceStream = await getDesktopStream(sourceId);
+  applyQualityHints(sourceStream);
+  micStream = await getMicStreamIfEnabled();
+  rawVideo.srcObject = sourceStream;
+  await rawVideo.play();
+  setHdrRuntimeRoute('fallback', '目前路徑: Fallback（既有錄影）');
+  return { route: 'fallback' };
+}
+
+async function maybeProbeHdrForUi() {
+  const sourceId = String(sourceSelect && sourceSelect.value ? sourceSelect.value : '');
+  if (!sourceId || !selectedSource) {
+    return;
+  }
+  if (normalizeHdrMappingMode(hdrMappingState.mode) === 'off') {
+    setHdrProbeStatus('Probe: 模式關閉');
+    return;
+  }
+  await probeHdrNativeSupport(sourceId, selectedSource.display_id);
 }
 
 async function getMicStreamIfEnabled() {
@@ -2038,20 +2452,23 @@ async function startRecording() {
   };
 
   doubleClickMarkerState.activeUntil = 0;
+  for (const stream of extraCaptureStreams.splice(0)) {
+    stopMediaTracks(stream);
+  }
 
-  sourceStream = await getDesktopStream(sourceId);
-  applyQualityHints(sourceStream);
-  micStream = await getMicStreamIfEnabled();
+  const captureRoute = await buildCaptureStreams(sourceId, selectedSource.display_id);
 
   // Prevent local monitor playback from feeding back into system-audio capture.
   rawVideo.muted = true;
   rawVideo.volume = 0;
   rawVideo.controls = false;
-  rawVideo.srcObject = sourceStream;
-  await rawVideo.play();
 
-  cameraState.cursorX = rawVideo.videoWidth / 2;
-  cameraState.cursorY = rawVideo.videoHeight / 2;
+  const dims = getCaptureVideoDimensions();
+  const sourceWidth = Math.max(1, Number(dims.width || 1));
+  const sourceHeight = Math.max(1, Number(dims.height || 1));
+
+  cameraState.cursorX = sourceWidth / 2;
+  cameraState.cursorY = sourceHeight / 2;
   glowState.x = cameraState.cursorX;
   glowState.y = cameraState.cursorY;
   cameraState.targetX = cameraState.cursorX;
@@ -2183,6 +2600,9 @@ async function startRecording() {
   formatSelect.disabled = true;
   exportEngineSelect.disabled = true;
   qualitySelect.disabled = true;
+  if (hdrMappingModeSelect) {
+    hdrMappingModeSelect.disabled = true;
+  }
 
   const hasSystemAudio = sourceStream.getAudioTracks().length > 0;
   const hasMicAudio = Boolean(micStream && micStream.getAudioTracks().length > 0);
@@ -2190,7 +2610,8 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' (' + audioMode + ')');
+  const routeLabel = captureRoute && captureRoute.route === 'native' ? 'Native HDR->SDR' : 'Fallback';
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
 function stopRecording() {
@@ -2212,7 +2633,11 @@ function stopRecording() {
   stopMediaTracks(sourceStream);
   stopMediaTracks(micStream);
   stopMediaTracks(outputStream);
+  for (const stream of extraCaptureStreams.splice(0)) {
+    stopMediaTracks(stream);
+  }
   resetAudioMixer();
+  stopNativeHdrCapture().catch(() => {});
 
   sourceStream = undefined;
   micStream = undefined;
@@ -2241,6 +2666,9 @@ function stopRecording() {
   formatSelect.disabled = false;
   exportEngineSelect.disabled = false;
   qualitySelect.disabled = false;
+  if (hdrMappingModeSelect) {
+    hdrMappingModeSelect.disabled = false;
+  }
 }
 
 async function setPenMode(enabled) {
@@ -2362,6 +2790,23 @@ exportEngineSelect.addEventListener('change', () => {
   setExportDebug('待命', 'MODE_' + mode.toUpperCase(), '目前模式: ' + label);
 });
 
+if (hdrMappingModeSelect) {
+  hdrMappingModeSelect.addEventListener('change', () => {
+    hdrMappingState.mode = normalizeHdrMappingMode(hdrMappingModeSelect.value);
+    if (hdrMappingState.mode === 'off') {
+      setHdrProbeStatus('Probe: 模式關閉');
+      setHdrRuntimeRoute('fallback', '目前路徑: Fallback（HDR Mapping 關閉）');
+      return;
+    }
+    maybeProbeHdrForUi().catch(() => {});
+  });
+}
+
+sourceSelect.addEventListener('change', () => {
+  selectedSource = sources.find((s) => s.id === sourceSelect.value);
+  maybeProbeHdrForUi().catch(() => {});
+});
+
 zoomInput.addEventListener('input', () => {
   cameraState.maxZoom = Number(zoomInput.value);
   zoomLabel.textContent = `${cameraState.maxZoom.toFixed(1)}x`;
@@ -2451,6 +2896,7 @@ setExportDebug('待命', 'MODE_AUTO', '目前模式: 自動（ffmpeg 優先）')
 setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
+hdrMappingState.mode = normalizeHdrMappingMode((hdrMappingModeSelect && hdrMappingModeSelect.value) || hdrMappingState.mode);
 hdrCompState.enabled = Boolean(hdrCompEnable.checked);
 hdrCompState.strength = clamp(Number(hdrCompStrengthInput.value || DEFAULT_HDR_COMP_STRENGTH), -1, 1);
 hdrCompState.hue = clamp(Number(hdrCompHueInput.value || DEFAULT_HDR_COMP_HUE), -30, 30);
@@ -2465,6 +2911,8 @@ glowOpacityLabel.textContent = glowState.opacity.toFixed(2);
 hdrCompStrengthLabel.textContent = hdrCompState.strength.toFixed(2);
 penSizeLabel.textContent = String(annotationState.size);
 updateHdrCompUi();
+setHdrRuntimeRoute('fallback', '目前路徑: Fallback（待命）');
+setHdrProbeStatus('Probe: 尚未探測');
 
 loadSources().catch((error) => {
   console.error(error);

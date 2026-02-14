@@ -23,6 +23,7 @@ const EXPORT_QUALITY_PRESETS = {
   }
 };
 const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
+const HDR_RUNTIME_MAX_READ_FAILURES = 8;
 
 let clickHookEnabled = false;
 let clickHookError = '';
@@ -47,7 +48,74 @@ const trackedUploadTempDirs = new Set();
 let exportTaskSeq = 1;
 const exportTasks = new Map();
 let quitCleanupStarted = false;
+let windowsHdrNativeBridge = null;
+let windowsHdrNativeLoadError = '';
+let hdrCaptureSessionSeq = 1;
+const hdrCaptureSessions = new Map();
 const OVERLAY_WHEEL_PAUSE_MS = 450;
+
+function loadWindowsHdrNativeBridge() {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  if (windowsHdrNativeBridge) {
+    return windowsHdrNativeBridge;
+  }
+  if (windowsHdrNativeLoadError) {
+    return null;
+  }
+
+  try {
+    const mod = require(path.join(__dirname, '..', 'native', 'windows-hdr-capture'));
+    windowsHdrNativeBridge = mod;
+    return windowsHdrNativeBridge;
+  } catch (error) {
+    windowsHdrNativeLoadError = error && error.message ? error.message : 'load failed';
+    return null;
+  }
+}
+
+function getDisplayHdrHint(displayId) {
+  const display = getTargetDisplay(displayId);
+  const colorDepth = Number(display && display.colorDepth ? display.colorDepth : 0);
+  const colorSpace = String(display && display.colorSpace ? display.colorSpace : '');
+  const hdrByDepth = colorDepth >= 30;
+  const hdrByColorSpace = /hdr|pq|hlg|2020|scRGB/i.test(colorSpace);
+
+  return {
+    displayId: String(display && display.id ? display.id : ''),
+    scaleFactor: Number(display && display.scaleFactor ? display.scaleFactor : 1),
+    colorDepth,
+    colorSpace,
+    isHdrLikely: hdrByDepth || hdrByColorSpace
+  };
+}
+
+async function stopHdrCaptureSession(sessionId) {
+  const session = hdrCaptureSessions.get(sessionId);
+  if (!session) {
+    return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 擷取工作階段。' };
+  }
+
+  hdrCaptureSessions.delete(sessionId);
+
+  if (!session.bridge || typeof session.bridge.stopCapture !== 'function') {
+    return { ok: true, stopped: true };
+  }
+
+  try {
+    await Promise.resolve(session.bridge.stopCapture({
+      nativeSessionId: session.nativeSessionId
+    }));
+    return { ok: true, stopped: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'STOP_FAILED',
+      message: error && error.message ? error.message : '停止 HDR 擷取失敗。'
+    };
+  }
+}
 function isOverlayToggleKey(event) {
   const code = Number(event && event.keycode);
   return code === 29 || code === 3613;
@@ -572,6 +640,9 @@ async function cleanupUploadTempDirsByScan() {
 }
 
 async function runQuitCleanup() {
+  for (const sessionId of Array.from(hdrCaptureSessions.keys())) {
+    await stopHdrCaptureSession(sessionId).catch(() => {});
+  }
   for (const [sessionId, session] of blobUploadSessions) {
     blobUploadSessions.delete(sessionId);
     await cleanupBlobUploadSession(session, true).catch(() => {});
@@ -647,6 +718,7 @@ function cleanupUploadTempDirsByScanSync() {
 }
 
 function runQuitCleanupSync() {
+  hdrCaptureSessions.clear();
   for (const [sessionId, session] of blobUploadSessions) {
     blobUploadSessions.delete(sessionId);
     cleanupBlobUploadSessionSync(session, true);
@@ -851,6 +923,190 @@ app.whenReady().then(() => {
       thumbnailSize: { width: 0, height: 0 },
       fetchWindowIcons: false
     });
+  });
+
+  ipcMain.handle('hdr:probe', async (_event, payload) => {
+    const displayId = payload && payload.displayId ? payload.displayId : undefined;
+    const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const displayHint = getDisplayHdrHint(displayId);
+
+    if (process.platform !== 'win32') {
+      return {
+        ok: true,
+        supported: false,
+        reason: 'NOT_WINDOWS',
+        sourceId,
+        display: displayHint
+      };
+    }
+
+    const bridge = loadWindowsHdrNativeBridge();
+    if (!bridge || typeof bridge.probe !== 'function') {
+      return {
+        ok: true,
+        supported: false,
+        reason: 'NATIVE_UNAVAILABLE',
+        sourceId,
+        display: displayHint,
+        nativeLoadError: windowsHdrNativeLoadError || ''
+      };
+    }
+
+    try {
+      const result = await Promise.resolve(bridge.probe({
+        sourceId,
+        displayId: displayHint.displayId,
+        displayHint
+      }));
+      const supported = Boolean(result && result.supported);
+      return {
+        ok: true,
+        supported,
+        sourceId,
+        display: displayHint,
+        hdrActive: Boolean(result && result.hdrActive),
+        nativeBackend: String((result && result.nativeBackend) || 'windows-hdr-capture'),
+        reason: supported ? '' : String((result && result.reason) || 'NATIVE_UNAVAILABLE'),
+        details: result && typeof result === 'object' ? result : {}
+      };
+    } catch (error) {
+      return {
+        ok: true,
+        supported: false,
+        reason: 'PROBE_FAILED',
+        sourceId,
+        display: displayHint,
+        message: error && error.message ? error.message : 'HDR probe failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:start', async (_event, payload) => {
+    if (process.platform !== 'win32') {
+      return { ok: false, reason: 'NOT_WINDOWS', message: '僅支援 Windows 原生 HDR 擷取。' };
+    }
+
+    const sourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const displayId = payload && payload.displayId ? payload.displayId : undefined;
+    if (!sourceId) {
+      return { ok: false, reason: 'INVALID_INPUT', message: '缺少來源識別碼。' };
+    }
+
+    const bridge = loadWindowsHdrNativeBridge();
+    if (!bridge || typeof bridge.startCapture !== 'function') {
+      return {
+        ok: false,
+        reason: 'NATIVE_UNAVAILABLE',
+        message: windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。'
+      };
+    }
+
+    try {
+      const displayHint = getDisplayHdrHint(displayId);
+      const startResult = await Promise.resolve(bridge.startCapture({
+        sourceId,
+        displayId: displayHint.displayId,
+        maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+        toneMap: payload && payload.toneMap ? payload.toneMap : {},
+        displayHint
+      }));
+
+      if (!startResult || !startResult.ok) {
+        return {
+          ok: false,
+          reason: String((startResult && startResult.reason) || 'START_FAILED'),
+          message: String((startResult && startResult.message) || '啟動 HDR 原生擷取失敗。')
+        };
+      }
+
+      const sessionId = hdrCaptureSessionSeq++;
+      hdrCaptureSessions.set(sessionId, {
+        bridge,
+        sourceId,
+        displayId: displayHint.displayId,
+        nativeSessionId: startResult.nativeSessionId,
+        readFailures: 0,
+        startedAt: Date.now()
+      });
+
+      return {
+        ok: true,
+        sessionId,
+        width: Number(startResult.width || 0),
+        height: Number(startResult.height || 0),
+        pixelFormat: String(startResult.pixelFormat || 'BGRA8'),
+        colorSpace: String(startResult.colorSpace || 'Rec.709'),
+        toneMap: startResult.toneMap || {},
+        hdrActive: Boolean(startResult.hdrActive),
+        nativeBackend: String(startResult.nativeBackend || 'windows-hdr-capture')
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'START_FAILED',
+        message: error && error.message ? error.message : '啟動 HDR 原生擷取失敗。'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:read-frame', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    const timeoutMs = Math.max(1, Math.min(2000, Number(payload && payload.timeoutMs ? payload.timeoutMs : 40)));
+    const session = hdrCaptureSessions.get(sessionId);
+    if (!session) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 擷取工作階段。' };
+    }
+
+    if (!session.bridge || typeof session.bridge.readFrame !== 'function') {
+      session.readFailures += 1;
+      return { ok: false, reason: 'NATIVE_UNAVAILABLE', message: 'HDR 原生模組無法讀取畫面。' };
+    }
+
+    try {
+      const frameResult = await Promise.resolve(session.bridge.readFrame({
+        nativeSessionId: session.nativeSessionId,
+        timeoutMs
+      }));
+
+      if (!frameResult || !frameResult.ok) {
+        session.readFailures += 1;
+        return {
+          ok: false,
+          reason: String((frameResult && frameResult.reason) || 'READ_FAILED'),
+          message: String((frameResult && frameResult.message) || '讀取 HDR frame 失敗。'),
+          readFailures: session.readFailures,
+          fallbackRecommended: session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES
+        };
+      }
+
+      session.readFailures = 0;
+      return {
+        ok: true,
+        width: Number(frameResult.width || 0),
+        height: Number(frameResult.height || 0),
+        stride: Number(frameResult.stride || 0),
+        timestampMs: Number(frameResult.timestampMs || Date.now()),
+        pixelFormat: String(frameResult.pixelFormat || 'BGRA8'),
+        bytes: frameResult.bytes || null
+      };
+    } catch (error) {
+      session.readFailures += 1;
+      return {
+        ok: false,
+        reason: 'READ_FAILED',
+        message: error && error.message ? error.message : '讀取 HDR frame 失敗。',
+        readFailures: session.readFailures,
+        fallbackRecommended: session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:stop', async (_event, payload) => {
+    const sessionId = Number(payload && payload.sessionId);
+    if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      return { ok: false, reason: 'INVALID_SESSION', message: 'HDR 擷取工作階段識別碼無效。' };
+    }
+    return stopHdrCaptureSession(sessionId);
   });
 
   ipcMain.handle('video:export-task-open', async () => {

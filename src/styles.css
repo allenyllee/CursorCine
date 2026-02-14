@@ -204,6 +204,18 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.hdr-mapping-meta {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed #3b4f79;
+  border-radius: 10px;
+  background: #101c31;
+  color: #bcd0f8;
+  display: grid;
+  gap: 4px;
+  font-size: 0.82rem;
+}
+
 .preview {
   position: relative;
   display: grid;
