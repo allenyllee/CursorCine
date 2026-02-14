@@ -212,7 +212,9 @@ const hdrMappingState = {
   mainTopFrameSeq: 0,
   mainTopReadFailures: 0,
   mainTopLastReason: '',
-  mainTopLastError: ''
+  mainTopLastError: '',
+  recordingAttemptSeq: 0,
+  recordingAttemptStartedAt: 0
 };
 
 const nativeHdrState = {
@@ -337,8 +339,12 @@ function updateHdrDiagStatus(message) {
   const fallbackTime = hdrMappingState.lastFallbackAt > 0
     ? new Date(hdrMappingState.lastFallbackAt).toLocaleTimeString()
     : '-';
+  const attemptLabel = hdrMappingState.recordingAttemptSeq > 0
+    ? String(hdrMappingState.recordingAttemptSeq)
+    : '-';
   hdrDiagStatusMessage =
-    'Diag: fallback=' + String(hdrMappingState.fallbackCount) +
+    'Diag: attempt=' + attemptLabel +
+    ', fallback=' + String(hdrMappingState.fallbackCount) +
     ', nativeStart=' + String(hdrMappingState.nativeStartAttempts) +
     ', nativeFail=' + String(hdrMappingState.nativeStartFailures) +
     ', readFail=' + String(nativeHdrState.readFailures) +
@@ -351,11 +357,44 @@ function updateHdrDiagStatus(message) {
   updateHdrMappingStatusUi();
 }
 
+function resetHdrDiagForRecordingAttempt() {
+  hdrMappingState.recordingAttemptSeq += 1;
+  hdrMappingState.recordingAttemptStartedAt = Date.now();
+  hdrMappingState.fallbackCount = 0;
+  hdrMappingState.nativeStartAttempts = 0;
+  hdrMappingState.nativeStartFailures = 0;
+  hdrMappingState.lastFallbackReason = '';
+  hdrMappingState.lastFallbackAt = 0;
+  nativeHdrState.readFailures = 0;
+  updateHdrDiagStatus();
+}
+
 function noteHdrFallback(reason) {
   hdrMappingState.fallbackCount += 1;
   hdrMappingState.lastFallbackReason = String(reason || 'UNKNOWN');
   hdrMappingState.lastFallbackAt = Date.now();
   updateHdrDiagStatus();
+}
+
+function updateHdrModeAvailabilityUi() {
+  if (!hdrMappingModeSelect) {
+    return;
+  }
+  const forceOption = Array.from(hdrMappingModeSelect.options || []).find((opt) => opt.value === 'force-native');
+  if (!forceOption) {
+    return;
+  }
+
+  const disabled = !hdrMappingState.nativeRouteEnabled;
+  forceOption.disabled = disabled;
+  forceOption.textContent = disabled
+    ? 'Force Native（暫停：IPC guard）'
+    : 'Force Native（不可用則阻止開始）';
+
+  if (disabled && normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native') {
+    hdrMappingState.mode = 'auto';
+    hdrMappingModeSelect.value = 'auto';
+  }
 }
 
 function updateRecordingTimeLabel(seconds = 0) {
@@ -1647,6 +1686,7 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopReadFailures = 0;
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
+    updateHdrModeAvailabilityUi();
     updateHdrDiagStatus();
     return;
   }
@@ -1667,6 +1707,7 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
+  updateHdrModeAvailabilityUi();
   updateHdrDiagStatus();
 }
 
@@ -2689,6 +2730,7 @@ function syncPenStyleToOverlay() {
 
 async function startRecording() {
   setStatus('正在啟動錄影...');
+  resetHdrDiagForRecordingAttempt();
   if (editorState.active) {
     clearEditorState();
   }
