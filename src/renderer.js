@@ -37,6 +37,7 @@ const outputQualitySelect = document.getElementById('outputQualitySelect');
 const hdrMappingModeSelect = document.getElementById('hdrMappingModeSelect');
 const hdrMappingRuntimeEl = document.getElementById('hdrMappingRuntime');
 const hdrMappingProbeEl = document.getElementById('hdrMappingProbe');
+const hdrMappingDiagEl = document.getElementById('hdrMappingDiag');
 const hdrCompEnable = document.getElementById('hdrCompEnable');
 const hdrCompStrengthInput = document.getElementById('hdrCompStrength');
 const hdrCompStrengthLabel = document.getElementById('hdrCompStrengthLabel');
@@ -132,6 +133,7 @@ let recordingUploadQueue = Promise.resolve();
 let recordingUploadFailure = null;
 let hdrRuntimeStatusMessage = '尚未探測';
 let hdrProbeStatusMessage = '尚未探測';
+let hdrDiagStatusMessage = '尚未開始';
 let exportStartedAtMs = 0;
 let exportTimer = 0;
 let builtinAudioCompatibility = 'unknown';
@@ -199,7 +201,12 @@ const hdrMappingState = {
   probeReason: 'NOT_PROBED',
   nativeRouteEnabled: false,
   nativeRouteReason: 'UNINITIALIZED',
-  nativeRouteStage: ''
+  nativeRouteStage: '',
+  fallbackCount: 0,
+  nativeStartAttempts: 0,
+  nativeStartFailures: 0,
+  lastFallbackReason: '',
+  lastFallbackAt: 0
 };
 
 const nativeHdrState = {
@@ -298,6 +305,9 @@ function updateHdrMappingStatusUi() {
   if (hdrMappingProbeEl) {
     hdrMappingProbeEl.textContent = hdrProbeStatusMessage;
   }
+  if (hdrMappingDiagEl) {
+    hdrMappingDiagEl.textContent = hdrDiagStatusMessage;
+  }
 }
 
 function setHdrRuntimeRoute(route, message) {
@@ -309,6 +319,32 @@ function setHdrRuntimeRoute(route, message) {
 function setHdrProbeStatus(message) {
   hdrProbeStatusMessage = message || '尚未探測';
   updateHdrMappingStatusUi();
+}
+
+function updateHdrDiagStatus(message) {
+  if (message) {
+    hdrDiagStatusMessage = message;
+    updateHdrMappingStatusUi();
+    return;
+  }
+  const fallbackReason = hdrMappingState.lastFallbackReason || '-';
+  const fallbackTime = hdrMappingState.lastFallbackAt > 0
+    ? new Date(hdrMappingState.lastFallbackAt).toLocaleTimeString()
+    : '-';
+  hdrDiagStatusMessage =
+    'Diag: fallback=' + String(hdrMappingState.fallbackCount) +
+    ', nativeStart=' + String(hdrMappingState.nativeStartAttempts) +
+    ', nativeFail=' + String(hdrMappingState.nativeStartFailures) +
+    ', readFail=' + String(nativeHdrState.readFailures) +
+    ', lastFallback=' + fallbackReason + '@' + fallbackTime;
+  updateHdrMappingStatusUi();
+}
+
+function noteHdrFallback(reason) {
+  hdrMappingState.fallbackCount += 1;
+  hdrMappingState.lastFallbackReason = String(reason || 'UNKNOWN');
+  hdrMappingState.lastFallbackAt = Date.now();
+  updateHdrDiagStatus();
 }
 
 function updateRecordingTimeLabel(seconds = 0) {
@@ -1303,6 +1339,7 @@ async function fallbackNativeToDesktopVideo(reason) {
   const oldSourceStream = sourceStream;
 
   try {
+    noteHdrFallback(reason || 'NATIVE_RUNTIME_FALLBACK');
     const fallbackStream = await getDesktopStream(nativeHdrState.sourceId || sourceSelect.value);
     sourceStream = fallbackStream;
     applyQualityHints(sourceStream);
@@ -1405,6 +1442,9 @@ async function probeHdrNativeSupport(sourceId, displayId) {
 }
 
 async function tryStartNativeHdrCapture(sourceId, displayId) {
+  hdrMappingState.nativeStartAttempts += 1;
+  updateHdrDiagStatus();
+
   let start = null;
   try {
     start = await electronAPI.hdrSharedStart({
@@ -1424,6 +1464,8 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   }
 
   if (!start || !start.ok) {
+    hdrMappingState.nativeStartFailures += 1;
+    updateHdrDiagStatus();
     return {
       ok: false,
       reason: (start && start.reason) || 'START_FAILED',
@@ -1477,6 +1519,7 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
         message: 'Force Native 暫時停用：' + (hdrMappingState.nativeRouteReason || 'NATIVE_ROUTE_DISABLED')
       };
     }
+    noteHdrFallback('NATIVE_ROUTE_DISABLED');
     return { route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' };
   }
 
@@ -1489,10 +1532,12 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
         message: probe.message || 'Force Native 但 native backend 不可用。'
       };
     }
+    noteHdrFallback(probe.reason || 'NATIVE_UNAVAILABLE');
     return { route: 'fallback', reason: probe.reason || 'NATIVE_UNAVAILABLE' };
   }
 
   if (mode === 'auto' && !probe.hdrActive) {
+    noteHdrFallback(probe.reason || 'HDR_INACTIVE');
     return { route: 'fallback', reason: probe.reason || 'HDR_INACTIVE' };
   }
 
@@ -1507,6 +1552,7 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     /could not be cloned/i.test(String(nativeStart.message || ''));
   if (nonBlockingNativeFailure) {
     setHdrProbeStatus('Probe: Native 暫停（共享記憶體 IPC 尚未完成）');
+    noteHdrFallback(nativeStart.reason || 'START_FAILED');
     return { route: 'fallback', reason: nativeStart.reason || 'START_FAILED' };
   }
 
@@ -1518,6 +1564,7 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     };
   }
 
+  noteHdrFallback(nativeStart.reason || 'START_FAILED');
   return { route: 'fallback', reason: nativeStart.reason || 'START_FAILED' };
 }
 
@@ -1534,6 +1581,7 @@ async function buildCaptureStreams(sourceId, selectedDisplayId) {
     await rawVideo.play();
     setHdrRuntimeRoute('fallback', '目前路徑: Fallback（Native 不可用，自動回退）');
     setStatus('Native HDR 不可用，已自動回退既有錄影管線。原因: ' + reason);
+    noteHdrFallback('BLOCKED_FALLBACK');
     return { route: 'fallback', reason: 'BLOCKED_FALLBACK' };
   }
 
@@ -1555,6 +1603,7 @@ async function buildCaptureStreams(sourceId, selectedDisplayId) {
   rawVideo.srcObject = sourceStream;
   await rawVideo.play();
   setHdrRuntimeRoute('fallback', '目前路徑: Fallback（既有錄影）');
+  updateHdrDiagStatus();
   return { route: 'fallback' };
 }
 
@@ -3092,6 +3141,7 @@ penSizeLabel.textContent = String(annotationState.size);
 updateHdrCompUi();
 setHdrRuntimeRoute('fallback', '目前路徑: Fallback（待命）');
 setHdrProbeStatus('Probe: 尚未探測');
+updateHdrDiagStatus('Diag: 初始化中');
 
 Promise.resolve()
   .then(() => loadHdrExperimentalState())
