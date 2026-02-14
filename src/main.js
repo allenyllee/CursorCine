@@ -26,6 +26,7 @@ const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
 const HDR_RUNTIME_MAX_READ_FAILURES = 8;
 const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
 const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '') === '1';
+const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '') === '1';
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-ipc-push' : 'control-plane-only';
 const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 33;
@@ -1755,13 +1756,17 @@ app.whenReady().then(() => {
     }
     return {
       ok: true,
-      nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED && hdrNativeSmokeState.ok,
+      nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED && HDR_NATIVE_LIVE_ROUTE_ENABLED && hdrNativeSmokeState.ok,
       stage: HDR_NATIVE_PIPELINE_STAGE,
       reason: !HDR_NATIVE_PUSH_IPC_ENABLED
         ? 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
-        : (!hdrNativeSmokeState.ok ? (hdrNativeSmokeState.ran ? 'NATIVE_SMOKE_FAILED' : 'NATIVE_SMOKE_REQUIRED') : ''),
+        : (!HDR_NATIVE_LIVE_ROUTE_ENABLED
+          ? 'NATIVE_LIVE_ROUTE_DISABLED'
+          : (!hdrNativeSmokeState.ok ? (hdrNativeSmokeState.ran ? 'NATIVE_SMOKE_FAILED' : 'NATIVE_SMOKE_REQUIRED') : '')),
       envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
       envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+      liveEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_LIVE',
+      liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
       smoke: { ...hdrNativeSmokeState },
       diagnostics: {
         sharedSessionCount: sessions.length,

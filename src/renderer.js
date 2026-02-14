@@ -224,6 +224,8 @@ const hdrMappingState = {
   mainTopLastError: '',
   nativeEnvFlag: '',
   nativeEnvFlagEnabled: false,
+  nativeLiveEnvFlag: '',
+  nativeLiveEnvFlagEnabled: false,
   nativeSmokeRan: false,
   nativeSmokeOk: false,
   nativeSmokeReason: '',
@@ -372,6 +374,7 @@ function updateHdrDiagStatus(message) {
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
+    ', live=' + (hdrMappingState.nativeLiveEnvFlag || '-') + ':' + (hdrMappingState.nativeLiveEnvFlagEnabled ? '1' : '0') +
     ', smoke=' + (hdrMappingState.nativeSmokeRan ? (hdrMappingState.nativeSmokeOk ? 'ok' : 'fail') : 'required') +
     ', lastFallback=' + fallbackReason + '@' + fallbackTime;
   updateHdrMappingStatusUi();
@@ -530,6 +533,34 @@ async function runHdrNativeSmokeFromUi() {
     readReason: String((result && result.readReason) || '')
   });
   return result;
+}
+
+async function ensureNativeSmokeReadyForAttempt(sourceId, displayId) {
+  if (!hdrMappingState.nativeEnvFlagEnabled || hdrMappingState.nativeSmokeOk) {
+    return;
+  }
+  pushHdrDecisionTrace('native-smoke-auto-begin', {
+    sourceId,
+    displayId: String(displayId || '')
+  });
+  const smokeResult = await electronAPI.hdrNativeRouteSmoke({
+    sourceId,
+    displayId: String(displayId || '')
+  }).catch((error) => ({
+    ok: false,
+    startOk: false,
+    readOk: false,
+    stopOk: false,
+    readReason: error && error.message ? error.message : 'SMOKE_EXCEPTION'
+  }));
+  pushHdrDecisionTrace('native-smoke-auto-finish', {
+    ok: Boolean(smokeResult && smokeResult.ok),
+    startOk: Boolean(smokeResult && smokeResult.startOk),
+    readOk: Boolean(smokeResult && smokeResult.readOk),
+    stopOk: Boolean(smokeResult && smokeResult.stopOk),
+    readReason: String((smokeResult && smokeResult.readReason) || '')
+  });
+  await loadHdrExperimentalState().catch(() => {});
 }
 
 function updateRecordingTimeLabel(seconds = 0) {
@@ -1720,6 +1751,10 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     return { route: 'fallback', reason: 'MODE_OFF' };
   }
 
+  if (hdrMappingState.nativeEnvFlagEnabled && !hdrMappingState.nativeSmokeOk) {
+    await ensureNativeSmokeReadyForAttempt(sourceId, selectedDisplayId);
+  }
+
   if (!hdrMappingState.nativeRouteEnabled) {
     if (mode === 'force-native') {
       pushHdrDecisionTrace('resolve-route', { mode, route: 'blocked', reason: 'NATIVE_ROUTE_DISABLED' });
@@ -1859,6 +1894,8 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopLastError = '';
     hdrMappingState.nativeEnvFlag = '';
     hdrMappingState.nativeEnvFlagEnabled = false;
+    hdrMappingState.nativeLiveEnvFlag = '';
+    hdrMappingState.nativeLiveEnvFlagEnabled = false;
     hdrMappingState.nativeSmokeRan = false;
     hdrMappingState.nativeSmokeOk = false;
     hdrMappingState.nativeSmokeReason = '';
@@ -1886,6 +1923,8 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
   hdrMappingState.nativeEnvFlag = String(result.envFlag || '');
   hdrMappingState.nativeEnvFlagEnabled = Boolean(result.envFlagEnabled);
+  hdrMappingState.nativeLiveEnvFlag = String(result.liveEnvFlag || '');
+  hdrMappingState.nativeLiveEnvFlagEnabled = Boolean(result.liveEnvFlagEnabled);
   hdrMappingState.nativeSmokeRan = Boolean(result.smoke && result.smoke.ran);
   hdrMappingState.nativeSmokeOk = Boolean(result.smoke && result.smoke.ok);
   hdrMappingState.nativeSmokeReason = String((result.smoke && (result.smoke.readReason || result.smoke.startReason || result.smoke.stopReason)) || '');
@@ -2935,12 +2974,22 @@ async function startRecording() {
     clearEditorState();
   }
 
-  const sourceId = sourceSelect.value;
+  let sourceId = String(sourceSelect && sourceSelect.value ? sourceSelect.value : '');
   selectedSource = sources.find((s) => s.id === sourceId);
+  if (!sourceId || !selectedSource) {
+    await loadSources().catch(() => {});
+    sourceId = String(sourceSelect && sourceSelect.value ? sourceSelect.value : '');
+    selectedSource = sources.find((s) => s.id === sourceId) || selectedSource;
+  }
 
   if (!selectedSource) {
     setStatus('請先選擇錄製來源');
     return;
+  }
+
+  await loadHdrExperimentalState().catch(() => {});
+  if (hdrMappingState.nativeEnvFlagEnabled && !hdrMappingState.nativeSmokeOk) {
+    await ensureNativeSmokeReadyForAttempt(sourceId, selectedSource.display_id).catch(() => {});
   }
 
   clickState = {
