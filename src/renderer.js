@@ -143,6 +143,7 @@ let nativeHdrFramePumpTimer = 0;
 let nativeHdrFramePumpRunning = false;
 let nativeHdrFallbackAttempted = false;
 let unsubscribeHdrNativeFrame = null;
+let hdrExperimentalPollTimer = 0;
 const extraCaptureStreams = [];
 
 let recordingMeta = {
@@ -206,7 +207,12 @@ const hdrMappingState = {
   nativeStartAttempts: 0,
   nativeStartFailures: 0,
   lastFallbackReason: '',
-  lastFallbackAt: 0
+  lastFallbackAt: 0,
+  mainSharedSessionCount: 0,
+  mainTopFrameSeq: 0,
+  mainTopReadFailures: 0,
+  mainTopLastReason: '',
+  mainTopLastError: ''
 };
 
 const nativeHdrState = {
@@ -336,6 +342,11 @@ function updateHdrDiagStatus(message) {
     ', nativeStart=' + String(hdrMappingState.nativeStartAttempts) +
     ', nativeFail=' + String(hdrMappingState.nativeStartFailures) +
     ', readFail=' + String(nativeHdrState.readFailures) +
+    ', mainSess=' + String(hdrMappingState.mainSharedSessionCount) +
+    ', mainFrame=' + String(hdrMappingState.mainTopFrameSeq) +
+    ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
+    ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
+    ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', lastFallback=' + fallbackReason + '@' + fallbackTime;
   updateHdrMappingStatusUi();
 }
@@ -1631,11 +1642,39 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeRouteEnabled = false;
     hdrMappingState.nativeRouteReason = 'HDR_EXPERIMENTAL_STATE_UNAVAILABLE';
     hdrMappingState.nativeRouteStage = '';
+    hdrMappingState.mainSharedSessionCount = 0;
+    hdrMappingState.mainTopFrameSeq = 0;
+    hdrMappingState.mainTopReadFailures = 0;
+    hdrMappingState.mainTopLastReason = '';
+    hdrMappingState.mainTopLastError = '';
+    updateHdrDiagStatus();
     return;
   }
   hdrMappingState.nativeRouteEnabled = Boolean(result.nativeRouteEnabled);
   hdrMappingState.nativeRouteReason = String(result.reason || (result.nativeRouteEnabled ? 'OK' : 'NATIVE_ROUTE_DISABLED'));
   hdrMappingState.nativeRouteStage = String(result.stage || '');
+  const diagnostics = result.diagnostics || {};
+  const sessions = Array.isArray(diagnostics.sharedSessions) ? diagnostics.sharedSessions : [];
+  const top = sessions.length > 0
+    ? sessions.reduce((best, item) => {
+      const bestSeq = Number(best && best.frameSeq ? best.frameSeq : 0);
+      const itemSeq = Number(item && item.frameSeq ? item.frameSeq : 0);
+      return itemSeq >= bestSeq ? item : best;
+    }, sessions[0])
+    : null;
+  hdrMappingState.mainSharedSessionCount = Number(diagnostics.sharedSessionCount || sessions.length || 0);
+  hdrMappingState.mainTopFrameSeq = Number(top && top.frameSeq ? top.frameSeq : 0);
+  hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
+  hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
+  hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
+  updateHdrDiagStatus();
+}
+
+function startHdrExperimentalStatePoll() {
+  clearInterval(hdrExperimentalPollTimer);
+  hdrExperimentalPollTimer = setInterval(() => {
+    loadHdrExperimentalState().catch(() => {});
+  }, 2000);
 }
 
 async function getMicStreamIfEnabled() {
@@ -3166,6 +3205,7 @@ electronAPI.onExportPhase((payload) => {
 });
 
 updateExportTimeLabel(0);
+startHdrExperimentalStatePoll();
 
 if (typeof electronAPI.onHdrNativeFrame === 'function') {
   unsubscribeHdrNativeFrame = electronAPI.onHdrNativeFrame((payload) => {

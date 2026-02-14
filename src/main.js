@@ -998,8 +998,23 @@ function stopHdrSharedSession(sessionId) {
     session.bridge.stopCapture({
       nativeSessionId: session.nativeSessionId
     });
-    return { ok: true, stopped: true };
+    return {
+      ok: true,
+      stopped: true,
+      diagnostics: {
+        sessionId,
+        frameSeq: Number(session.frameSeq || 0),
+        totalReadFailures: Number(session.totalReadFailures || 0),
+        readFailures: Number(session.readFailures || 0),
+        lastError: String(session.lastError || ''),
+        lastReason: String(session.lastReason || ''),
+        startedAt: Number(session.startedAt || 0),
+        lastFrameAt: Number(session.lastFrameAt || 0),
+        bytesPumped: Number(session.bytesPumped || 0)
+      }
+    };
   } catch (error) {
+    session.lastError = error && error.message ? error.message : 'STOP_FAILED';
     return {
       ok: false,
       reason: 'STOP_FAILED',
@@ -1023,6 +1038,7 @@ function pumpHdrSharedSession(sessionId) {
       const bytes = frameResult.bytes;
       const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
       session.frameSeq += 1;
+      session.lastFrameAt = Date.now();
       const ts = Number(frameResult.timestampMs || Date.now());
       const tsLow = ts >>> 0;
       const tsHigh = Math.floor(ts / 4294967296) >>> 0;
@@ -1033,6 +1049,7 @@ function pumpHdrSharedSession(sessionId) {
       if (session.frameView && session.controlView) {
         const len = Math.min(src.length, session.frameView.length);
         session.frameView.set(src.subarray(0, len), 0);
+        session.bytesPumped += len;
 
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.WIDTH, width);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.HEIGHT, height);
@@ -1063,14 +1080,21 @@ function pumpHdrSharedSession(sessionId) {
       }
 
       session.readFailures = 0;
+      session.lastReason = 'FRAME_OK';
+      session.lastError = '';
     } else {
       session.readFailures += 1;
+      session.totalReadFailures += 1;
+      session.lastReason = 'NO_FRAME';
       if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
       }
     }
-  } catch (_error) {
+  } catch (error) {
     session.readFailures += 1;
+    session.totalReadFailures += 1;
+    session.lastReason = 'READ_EXCEPTION';
+    session.lastError = error && error.message ? error.message : 'READ_EXCEPTION';
     if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
       Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
     }
@@ -1446,6 +1470,12 @@ app.whenReady().then(() => {
         controlView: null,
         frameSeq: 0,
         readFailures: 0,
+        totalReadFailures: 0,
+        bytesPumped: 0,
+        startedAt: Date.now(),
+        lastFrameAt: 0,
+        lastError: '',
+        lastReason: 'STARTED',
         pumpTimer: 0
       });
       return {
@@ -1506,11 +1536,30 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('hdr:experimental-state', async () => {
+    const sessions = [];
+    for (const [sessionId, session] of hdrSharedSessions) {
+      sessions.push({
+        sessionId,
+        frameSeq: Number(session.frameSeq || 0),
+        readFailures: Number(session.readFailures || 0),
+        totalReadFailures: Number(session.totalReadFailures || 0),
+        bytesPumped: Number(session.bytesPumped || 0),
+        lastReason: String(session.lastReason || ''),
+        lastError: String(session.lastError || ''),
+        startedAt: Number(session.startedAt || 0),
+        lastFrameAt: Number(session.lastFrameAt || 0),
+        nativeSessionId: Number(session.nativeSessionId || 0)
+      });
+    }
     return {
       ok: true,
       nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       stage: HDR_NATIVE_PIPELINE_STAGE,
-      reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
+      reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
+      diagnostics: {
+        sharedSessionCount: sessions.length,
+        sharedSessions: sessions
+      }
     };
   });
 
