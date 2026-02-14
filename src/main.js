@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog, utilityProcess } = require('electron');
 const path = require('path');
 const fsNative = require('fs');
 const fs = require('fs/promises');
@@ -53,7 +53,208 @@ let windowsHdrNativeBridge = null;
 let windowsHdrNativeLoadError = '';
 let hdrCaptureSessionSeq = 1;
 const hdrCaptureSessions = new Map();
+let hdrWorkerProcess = null;
+let hdrWorkerState = 'stopped';
+let hdrWorkerLastError = '';
+let hdrWorkerLastExitCode = null;
+let hdrWorkerLastExitSignal = '';
+let hdrWorkerLastMessage = '';
+let hdrWorkerRequestSeq = 1;
+const hdrWorkerPendingRequests = new Map();
 const OVERLAY_WHEEL_PAUSE_MS = 450;
+
+function getHdrWorkerStatus() {
+  return {
+    ok: true,
+    state: hdrWorkerState,
+    hasProcess: Boolean(hdrWorkerProcess),
+    lastError: hdrWorkerLastError || '',
+    lastExitCode: hdrWorkerLastExitCode,
+    lastExitSignal: hdrWorkerLastExitSignal || '',
+    lastMessage: hdrWorkerLastMessage || ''
+  };
+}
+
+function wireHdrWorkerProcess(proc) {
+  proc.on('message', (message) => {
+    if (!message || typeof message !== 'object') {
+      return;
+    }
+    const type = String(message.type || '');
+    if (type === 'ready') {
+      hdrWorkerState = 'running';
+      hdrWorkerLastError = '';
+      hdrWorkerLastMessage = 'ready';
+      return;
+    }
+    if (type === 'error') {
+      hdrWorkerState = 'error';
+      hdrWorkerLastError = String(message.error || 'worker error');
+      hdrWorkerLastMessage = hdrWorkerLastError;
+      return;
+    }
+    if (type === 'log') {
+      hdrWorkerLastMessage = String(message.message || '');
+      return;
+    }
+    if (type === 'response') {
+      const requestId = Number(message.requestId || 0);
+      const pending = hdrWorkerPendingRequests.get(requestId);
+      if (!pending) {
+        return;
+      }
+      hdrWorkerPendingRequests.delete(requestId);
+      clearTimeout(pending.timer);
+      if (message.ok) {
+        pending.resolve(message);
+      } else {
+        pending.reject(new Error(String(message.message || message.reason || 'Worker request failed')));
+      }
+    }
+  });
+
+  proc.on('exit', (code, signal) => {
+    hdrWorkerLastExitCode = Number.isFinite(code) ? code : null;
+    hdrWorkerLastExitSignal = signal ? String(signal) : '';
+    if (hdrWorkerState !== 'stopped') {
+      hdrWorkerState = code === 0 ? 'stopped' : 'error';
+    }
+    if (code !== 0) {
+      hdrWorkerLastError = 'HDR worker exited unexpectedly (' + String(code) + ')';
+    }
+    for (const [requestId, pending] of hdrWorkerPendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('HDR worker exited before response'));
+      hdrWorkerPendingRequests.delete(requestId);
+    }
+    hdrWorkerProcess = null;
+  });
+}
+
+async function hdrWorkerRequest(command, payload = {}, timeoutMs = 5000) {
+  if (!hdrWorkerProcess) {
+    const start = await startHdrWorker();
+    if (!start || !start.hasProcess) {
+      throw new Error((start && start.lastError) || 'HDR worker unavailable');
+    }
+  }
+
+  const proc = hdrWorkerProcess;
+  if (!proc || typeof proc.postMessage !== 'function') {
+    throw new Error('HDR worker process unavailable');
+  }
+
+  const requestId = hdrWorkerRequestSeq++;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      hdrWorkerPendingRequests.delete(requestId);
+      reject(new Error('HDR worker request timeout: ' + command));
+    }, Math.max(100, Number(timeoutMs || 5000)));
+
+    hdrWorkerPendingRequests.set(requestId, {
+      resolve,
+      reject,
+      timer
+    });
+
+    proc.postMessage({
+      type: 'request',
+      requestId,
+      command,
+      payload
+    });
+  });
+}
+
+async function startHdrWorker(payload = {}) {
+  if (hdrWorkerProcess) {
+    return {
+      ...getHdrWorkerStatus(),
+      started: false,
+      reason: 'ALREADY_RUNNING'
+    };
+  }
+
+  if (!utilityProcess || typeof utilityProcess.fork !== 'function') {
+    hdrWorkerState = 'error';
+    hdrWorkerLastError = 'utilityProcess API unavailable';
+    return {
+      ...getHdrWorkerStatus(),
+      started: false,
+      reason: 'UNAVAILABLE'
+    };
+  }
+
+  try {
+    const workerPath = path.join(__dirname, 'hdr-worker.js');
+    const proc = utilityProcess.fork(workerPath, {
+      serviceName: 'cursorcine-hdr-worker'
+    });
+
+    hdrWorkerProcess = proc;
+    hdrWorkerState = 'starting';
+    hdrWorkerLastError = '';
+    hdrWorkerLastExitCode = null;
+    hdrWorkerLastExitSignal = '';
+    hdrWorkerLastMessage = 'spawned';
+    wireHdrWorkerProcess(proc);
+
+    if (typeof proc.postMessage === 'function') {
+      proc.postMessage({
+        type: 'init',
+        payload
+      });
+    }
+
+    return {
+      ...getHdrWorkerStatus(),
+      started: true
+    };
+  } catch (error) {
+    hdrWorkerState = 'error';
+    hdrWorkerLastError = error && error.message ? error.message : 'Failed to start HDR worker';
+    hdrWorkerProcess = null;
+    return {
+      ...getHdrWorkerStatus(),
+      started: false,
+      reason: 'START_FAILED'
+    };
+  }
+}
+
+async function stopHdrWorker() {
+  if (!hdrWorkerProcess) {
+    hdrWorkerState = 'stopped';
+    return {
+      ...getHdrWorkerStatus(),
+      stopped: true,
+      reason: 'NO_PROCESS'
+    };
+  }
+
+  const proc = hdrWorkerProcess;
+  hdrWorkerState = 'stopping';
+  try {
+    for (const [requestId, pending] of hdrWorkerPendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('HDR worker stopping'));
+      hdrWorkerPendingRequests.delete(requestId);
+    }
+    if (typeof proc.postMessage === 'function') {
+      proc.postMessage({ type: 'stop' });
+    }
+    proc.kill();
+  } catch (_error) {
+  } finally {
+    hdrWorkerProcess = null;
+    hdrWorkerState = 'stopped';
+  }
+
+  return {
+    ...getHdrWorkerStatus(),
+    stopped: true
+  };
+}
 
 function loadWindowsHdrNativeBridge() {
   if (process.platform !== 'win32') {
@@ -648,6 +849,7 @@ async function cleanupUploadTempDirsByScan() {
 }
 
 async function runQuitCleanup() {
+  await stopHdrWorker().catch(() => {});
   for (const sessionId of Array.from(hdrCaptureSessions.keys())) {
     await stopHdrCaptureSession(sessionId).catch(() => {});
   }
@@ -726,6 +928,14 @@ function cleanupUploadTempDirsByScanSync() {
 }
 
 function runQuitCleanupSync() {
+  if (hdrWorkerProcess) {
+    try {
+      hdrWorkerProcess.kill();
+    } catch (_error) {
+    }
+    hdrWorkerProcess = null;
+  }
+  hdrWorkerState = 'stopped';
   hdrCaptureSessions.clear();
   for (const [sessionId, session] of blobUploadSessions) {
     blobUploadSessions.delete(sessionId);
@@ -931,6 +1141,110 @@ app.whenReady().then(() => {
       thumbnailSize: { width: 0, height: 0 },
       fetchWindowIcons: false
     });
+  });
+
+  ipcMain.handle('hdr:worker-status', async () => {
+    return getHdrWorkerStatus();
+  });
+
+  ipcMain.handle('hdr:worker-start', async (_event, payload) => {
+    return startHdrWorker(payload || {});
+  });
+
+  ipcMain.handle('hdr:worker-stop', async () => {
+    return stopHdrWorker();
+  });
+
+  ipcMain.handle('hdr:worker-capture-start', async (_event, payload) => {
+    try {
+      const displayId = payload && payload.displayId ? payload.displayId : undefined;
+      const displayHint = getDisplayHdrHint(displayId);
+      const workerPayload = {
+        ...(payload || {}),
+        displayId: displayHint.displayId,
+        displayHint
+      };
+      const result = await hdrWorkerRequest('capture-start', workerPayload, 8000);
+      return {
+        ok: true,
+        width: Number(result.width || 0),
+        height: Number(result.height || 0),
+        stride: Number(result.stride || 0),
+        pixelFormat: String(result.pixelFormat || 'BGRA8')
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_CAPTURE_START_FAILED',
+        message: error && error.message ? error.message : 'Worker capture start failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:worker-capture-stop', async () => {
+    try {
+      await hdrWorkerRequest('capture-stop', {}, 4000);
+      return { ok: true, stopped: true };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_CAPTURE_STOP_FAILED',
+        message: error && error.message ? error.message : 'Worker capture stop failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:worker-frame-meta', async () => {
+    try {
+      const result = await hdrWorkerRequest('frame-meta', {}, 2000);
+      return {
+        ok: true,
+        frameSeq: Number(result.frameSeq || 0),
+        lastFrameAt: Number(result.lastFrameAt || 0),
+        hasFrame: Boolean(result.hasFrame),
+        meta: result.meta || {}
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_FRAME_META_FAILED',
+        message: error && error.message ? error.message : 'Worker frame meta failed'
+      };
+    }
+  });
+
+  ipcMain.handle('hdr:worker-frame-read', async () => {
+    try {
+      const result = await hdrWorkerRequest('frame-read', {}, 3000);
+      const frameBytes = result.bytes || null;
+      let safeBytes = null;
+      if (Buffer.isBuffer(frameBytes)) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof Uint8Array) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof ArrayBuffer) {
+        safeBytes = Buffer.from(frameBytes);
+      }
+      return {
+        ok: true,
+        hasFrame: Boolean(result.hasFrame),
+        frameSeq: Number(result.frameSeq || 0),
+        lastFrameAt: Number(result.lastFrameAt || 0),
+        width: Number(result.width || 0),
+        height: Number(result.height || 0),
+        stride: Number(result.stride || 0),
+        pixelFormat: String(result.pixelFormat || 'BGRA8'),
+        bytes: safeBytes
+          ? safeBytes.buffer.slice(safeBytes.byteOffset, safeBytes.byteOffset + safeBytes.byteLength)
+          : null
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'WORKER_FRAME_READ_FAILED',
+        message: error && error.message ? error.message : 'Worker frame read failed'
+      };
+    }
   });
 
   ipcMain.handle('hdr:probe', async (_event, payload) => {

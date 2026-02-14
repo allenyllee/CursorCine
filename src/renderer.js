@@ -1174,11 +1174,8 @@ function stopNativeHdrFramePump() {
 async function stopNativeHdrCapture() {
   stopNativeHdrFramePump();
 
-  if (nativeHdrState.sessionId > 0) {
-    await electronAPI.hdrCaptureStop({
-      sessionId: nativeHdrState.sessionId
-    }).catch(() => {});
-  }
+  await electronAPI.hdrWorkerCaptureStop().catch(() => {});
+  await electronAPI.hdrWorkerStop().catch(() => {});
 
   nativeHdrState.active = false;
   nativeHdrState.sessionId = 0;
@@ -1270,14 +1267,14 @@ async function pollNativeHdrFrame() {
 
   nativeHdrFramePumpRunning = true;
   try {
-    const result = await electronAPI.hdrCaptureReadFrame({
-      sessionId: nativeHdrState.sessionId,
-      timeoutMs: HDR_NATIVE_READ_TIMEOUT_MS
-    });
+    const result = await electronAPI.hdrWorkerFrameRead();
 
-    if (result && result.ok) {
+    if (result && result.ok && result.hasFrame !== false) {
       nativeHdrState.readFailures = 0;
       blitNativeFrameToCanvas(result);
+      return;
+    }
+    if (result && result.ok && result.hasFrame === false) {
       return;
     }
 
@@ -1287,7 +1284,8 @@ async function pollNativeHdrFrame() {
       result &&
       (result.reason === 'FRAME_TOO_LARGE' ||
         result.reason === 'INVALID_SESSION' ||
-        result.reason === 'NATIVE_UNAVAILABLE');
+        result.reason === 'NATIVE_UNAVAILABLE' ||
+        result.reason === 'WORKER_FRAME_READ_FAILED');
     if (
       hardFallback ||
       (result && result.fallbackRecommended) ||
@@ -1333,7 +1331,11 @@ async function probeHdrNativeSupport(sourceId, displayId) {
 }
 
 async function tryStartNativeHdrCapture(sourceId, displayId) {
-  const start = await electronAPI.hdrCaptureStart({
+  await electronAPI.hdrWorkerStart({
+    mode: 'capture'
+  }).catch(() => {});
+
+  const start = await electronAPI.hdrWorkerCaptureStart({
     sourceId,
     displayId,
     maxFps: 60,
@@ -1351,7 +1353,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   }
 
   nativeHdrState.active = true;
-  nativeHdrState.sessionId = Number(start.sessionId || 0);
+  nativeHdrState.sessionId = 1;
   nativeHdrState.width = Math.max(1, Number(start.width || 1));
   nativeHdrState.height = Math.max(1, Number(start.height || 1));
   nativeHdrState.stride = Math.max(nativeHdrState.width * 4, Number(start.stride || nativeHdrState.width * 4));
