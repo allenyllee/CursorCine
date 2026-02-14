@@ -152,6 +152,7 @@ let unsubscribeHdrNativeFrame = null;
 let hdrExperimentalPollTimer = 0;
 let hdrSmokeAutoRunning = false;
 let hdrSmokeManualRunning = false;
+let hdrSmokeAutoSuspendUntilMs = 0;
 const extraCaptureStreams = [];
 const hdrDecisionTrace = [];
 const HDR_DECISION_TRACE_LIMIT = 120;
@@ -229,6 +230,7 @@ const hdrMappingState = {
   nativeLiveEnvFlagEnabled: false,
   nativeSmokeRan: false,
   nativeSmokeOk: false,
+  nativeSmokeForSource: false,
   nativeSmokeReason: '',
   nativeSmokeAt: 0,
   recordingAttemptSeq: 0,
@@ -376,7 +378,13 @@ function updateHdrDiagStatus(message) {
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
     ', live=' + (hdrMappingState.nativeLiveEnvFlag || '-') + ':' + (hdrMappingState.nativeLiveEnvFlagEnabled ? '1' : '0') +
-    ', smoke=' + (hdrMappingState.nativeSmokeRan ? (hdrMappingState.nativeSmokeOk ? 'ok' : 'fail') : 'required') +
+    ', smoke=' + (
+      !hdrMappingState.nativeSmokeRan
+        ? 'required'
+        : (hdrMappingState.nativeSmokeOk
+          ? (hdrMappingState.nativeSmokeForSource ? 'ok' : 'stale')
+          : 'fail')
+    ) +
     ', lastFallback=' + fallbackReason + '@' + fallbackTime;
   updateHdrMappingStatusUi();
 }
@@ -414,6 +422,19 @@ function noteHdrFallback(reason) {
   pushHdrDecisionTrace('fallback', {
     reason: hdrMappingState.lastFallbackReason,
     attempt: hdrMappingState.recordingAttemptSeq
+  });
+  updateHdrDiagStatus();
+}
+
+function markSmokeStaleForSourceChange() {
+  if (!hdrMappingState.nativeSmokeRan) {
+    return;
+  }
+  hdrMappingState.nativeSmokeForSource = false;
+  hdrSmokeAutoSuspendUntilMs = Date.now() + 3000;
+  pushHdrDecisionTrace('smoke-mark-stale', {
+    sourceId: String(sourceSelect && sourceSelect.value ? sourceSelect.value : ''),
+    until: hdrSmokeAutoSuspendUntilMs
   });
   updateHdrDiagStatus();
 }
@@ -474,6 +495,7 @@ async function copyHdrDiagnosticsSnapshot() {
       nativeRouteStage: hdrMappingState.nativeRouteStage,
       nativeSmokeRan: hdrMappingState.nativeSmokeRan,
       nativeSmokeOk: hdrMappingState.nativeSmokeOk,
+      nativeSmokeForSource: hdrMappingState.nativeSmokeForSource,
       nativeSmokeReason: hdrMappingState.nativeSmokeReason,
       nativeSmokeAt: hdrMappingState.nativeSmokeAt,
       fallbackCount: hdrMappingState.fallbackCount,
@@ -1757,7 +1779,7 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
     return { route: 'fallback', reason: 'MODE_OFF' };
   }
 
-  if (hdrMappingState.nativeEnvFlagEnabled && !hdrMappingState.nativeSmokeOk) {
+  if (hdrMappingState.nativeEnvFlagEnabled && (!hdrMappingState.nativeSmokeOk || !hdrMappingState.nativeSmokeForSource)) {
     await ensureNativeSmokeReadyForAttempt(sourceId, selectedDisplayId);
   }
 
@@ -1889,7 +1911,13 @@ async function maybeProbeHdrForUi() {
 }
 
 async function loadHdrExperimentalState() {
-  const result = await electronAPI.hdrExperimentalState().catch(() => null);
+  const currentSource = getCurrentSelectedSource();
+  const sourceId = String(currentSource && currentSource.id ? currentSource.id : '');
+  const displayId = String(currentSource && currentSource.display_id ? currentSource.display_id : '');
+  const result = await electronAPI.hdrExperimentalState({
+    sourceId,
+    displayId
+  }).catch(() => null);
   if (!result || !result.ok) {
     hdrMappingState.nativeRouteEnabled = false;
     hdrMappingState.nativeRouteReason = 'HDR_EXPERIMENTAL_STATE_UNAVAILABLE';
@@ -1905,6 +1933,7 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeLiveEnvFlagEnabled = false;
     hdrMappingState.nativeSmokeRan = false;
     hdrMappingState.nativeSmokeOk = false;
+    hdrMappingState.nativeSmokeForSource = false;
     hdrMappingState.nativeSmokeReason = '';
     hdrMappingState.nativeSmokeAt = 0;
     updateHdrModeAvailabilityUi();
@@ -1934,6 +1963,7 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeLiveEnvFlagEnabled = Boolean(result.liveEnvFlagEnabled);
   hdrMappingState.nativeSmokeRan = Boolean(result.smoke && result.smoke.ran);
   hdrMappingState.nativeSmokeOk = Boolean(result.smoke && result.smoke.ok);
+  hdrMappingState.nativeSmokeForSource = Boolean(result.smokeMatchesRequestedSource);
   hdrMappingState.nativeSmokeReason = String((result.smoke && (result.smoke.readReason || result.smoke.startReason || result.smoke.stopReason)) || '');
   hdrMappingState.nativeSmokeAt = Number(result.smoke && result.smoke.timestamp ? result.smoke.timestamp : 0);
   updateHdrModeAvailabilityUi();
@@ -1941,8 +1971,9 @@ async function loadHdrExperimentalState() {
 
   const shouldAutoSmoke =
     hdrMappingState.nativeEnvFlagEnabled &&
-    !hdrMappingState.nativeSmokeRan &&
+    (!hdrMappingState.nativeSmokeRan || !hdrMappingState.nativeSmokeForSource) &&
     !(mediaRecorder && mediaRecorder.state === 'recording') &&
+    Date.now() >= hdrSmokeAutoSuspendUntilMs &&
     !hdrSmokeAutoRunning &&
     getCurrentSelectedSource() &&
     String(getCurrentSelectedSource().id || '') !== '';
@@ -3408,6 +3439,7 @@ if (runHdrSmokeBtn) {
 
 sourceSelect.addEventListener('change', () => {
   selectedSource = sources.find((s) => s.id === sourceSelect.value);
+  markSmokeStaleForSourceChange();
   maybeProbeHdrForUi().catch(() => {});
 });
 

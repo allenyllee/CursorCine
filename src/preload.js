@@ -36,7 +36,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hdrSharedStart: (payload) => ipcRenderer.invoke('hdr:shared-start', payload),
   hdrSharedBind: (payload) => ipcRenderer.invoke('hdr:shared-bind', payload),
   hdrSharedStop: (payload) => ipcRenderer.invoke('hdr:shared-stop', payload),
-  hdrExperimentalState: () => ipcRenderer.invoke('hdr:experimental-state'),
+  hdrExperimentalState: (payload) => ipcRenderer.invoke('hdr:experimental-state', payload),
   hdrDiagnosticsSnapshot: () => ipcRenderer.invoke('hdr:diagnostics-snapshot'),
   hdrNativeRouteSmoke: (payload) => ipcRenderer.invoke('hdr:native-route-smoke', payload),
   hdrProbeWindows: (payload) => ipcRenderer.invoke('hdr:probe', payload),

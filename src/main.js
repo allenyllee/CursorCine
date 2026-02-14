@@ -1738,7 +1738,31 @@ app.whenReady().then(() => {
     return stopHdrSharedSession(sessionId);
   });
 
-  ipcMain.handle('hdr:experimental-state', async () => {
+  ipcMain.handle('hdr:experimental-state', async (_event, payload) => {
+    const requestedSourceId = String(payload && payload.sourceId ? payload.sourceId : '');
+    const requestedDisplayId = String(payload && payload.displayId ? payload.displayId : '');
+    const smokeSourceId = String(hdrNativeSmokeState.sourceId || '');
+    const smokeDisplayId = String(hdrNativeSmokeState.displayId || '');
+    const smokeMatchesRequestedSource = requestedSourceId
+      ? (
+        smokeSourceId === requestedSourceId &&
+        (!requestedDisplayId || !smokeDisplayId || smokeDisplayId === requestedDisplayId)
+      )
+      : Boolean(hdrNativeSmokeState.ok);
+    const nativeRouteEnabled = HDR_NATIVE_PUSH_IPC_ENABLED &&
+      HDR_NATIVE_LIVE_ROUTE_ENABLED &&
+      hdrNativeSmokeState.ok &&
+      smokeMatchesRequestedSource;
+    const reason = !HDR_NATIVE_PUSH_IPC_ENABLED
+      ? 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
+      : (!HDR_NATIVE_LIVE_ROUTE_ENABLED
+        ? 'NATIVE_LIVE_ROUTE_DISABLED'
+        : (!hdrNativeSmokeState.ran
+          ? 'NATIVE_SMOKE_REQUIRED'
+          : (!hdrNativeSmokeState.ok
+            ? 'NATIVE_SMOKE_FAILED'
+            : (!smokeMatchesRequestedSource ? 'NATIVE_SMOKE_STALE' : ''))));
+
     const sessions = [];
     for (const [sessionId, session] of hdrSharedSessions) {
       sessions.push({
@@ -1756,17 +1780,16 @@ app.whenReady().then(() => {
     }
     return {
       ok: true,
-      nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED && HDR_NATIVE_LIVE_ROUTE_ENABLED && hdrNativeSmokeState.ok,
+      nativeRouteEnabled,
       stage: HDR_NATIVE_PIPELINE_STAGE,
-      reason: !HDR_NATIVE_PUSH_IPC_ENABLED
-        ? 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
-        : (!HDR_NATIVE_LIVE_ROUTE_ENABLED
-          ? 'NATIVE_LIVE_ROUTE_DISABLED'
-          : (!hdrNativeSmokeState.ok ? (hdrNativeSmokeState.ran ? 'NATIVE_SMOKE_FAILED' : 'NATIVE_SMOKE_REQUIRED') : '')),
+      reason,
       envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
       envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       liveEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_LIVE',
       liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
+      requestedSourceId,
+      requestedDisplayId,
+      smokeMatchesRequestedSource,
       smoke: { ...hdrNativeSmokeState },
       diagnostics: {
         sharedSessionCount: sessions.length,
