@@ -24,6 +24,7 @@ const EXPORT_QUALITY_PRESETS = {
 };
 const DEFAULT_EXPORT_QUALITY_PRESET = 'balanced';
 const HDR_RUNTIME_MAX_READ_FAILURES = 8;
+const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
 
 let clickHookEnabled = false;
 let clickHookError = '';
@@ -81,10 +82,17 @@ function getDisplayHdrHint(displayId) {
   const colorSpace = String(display && display.colorSpace ? display.colorSpace : '');
   const hdrByDepth = colorDepth >= 30;
   const hdrByColorSpace = /hdr|pq|hlg|2020|scRGB/i.test(colorSpace);
+  const bounds = display && display.bounds ? display.bounds : { x: 0, y: 0, width: 0, height: 0 };
 
   return {
     displayId: String(display && display.id ? display.id : ''),
     scaleFactor: Number(display && display.scaleFactor ? display.scaleFactor : 1),
+    bounds: {
+      x: Number(bounds.x || 0),
+      y: Number(bounds.y || 0),
+      width: Number(bounds.width || 0),
+      height: Number(bounds.height || 0)
+    },
     colorDepth,
     colorSpace,
     isHdrLikely: hdrByDepth || hdrByColorSpace
@@ -1070,16 +1078,38 @@ app.whenReady().then(() => {
 
       if (!frameResult || !frameResult.ok) {
         session.readFailures += 1;
+        const reason = String((frameResult && frameResult.reason) || 'READ_FAILED');
+        const hardFallback = reason === 'FRAME_TOO_LARGE' || reason === 'INVALID_SESSION' || reason === 'NATIVE_UNAVAILABLE';
         return {
           ok: false,
-          reason: String((frameResult && frameResult.reason) || 'READ_FAILED'),
+          reason,
           message: String((frameResult && frameResult.message) || '讀取 HDR frame 失敗。'),
           readFailures: session.readFailures,
-          fallbackRecommended: session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES
+          fallbackRecommended: hardFallback || session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES
         };
       }
 
       session.readFailures = 0;
+      const frameBytes = frameResult.bytes || null;
+      let safeBytes = null;
+      if (Buffer.isBuffer(frameBytes)) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof Uint8Array) {
+        safeBytes = Buffer.from(frameBytes);
+      } else if (frameBytes instanceof ArrayBuffer) {
+        safeBytes = Buffer.from(frameBytes);
+      }
+      const frameByteLength = safeBytes ? Number(safeBytes.length) : 0;
+      if (frameByteLength <= 0 || frameByteLength > HDR_RUNTIME_MAX_FRAME_BYTES) {
+        session.readFailures += 1;
+        return {
+          ok: false,
+          reason: 'FRAME_TOO_LARGE',
+          message: 'HDR frame exceeds IPC safety limit.',
+          readFailures: session.readFailures,
+          fallbackRecommended: true
+        };
+      }
       return {
         ok: true,
         width: Number(frameResult.width || 0),
@@ -1087,7 +1117,9 @@ app.whenReady().then(() => {
         stride: Number(frameResult.stride || 0),
         timestampMs: Number(frameResult.timestampMs || Date.now()),
         pixelFormat: String(frameResult.pixelFormat || 'BGRA8'),
-        bytes: frameResult.bytes || null
+        bytes: safeBytes
+          ? safeBytes.buffer.slice(safeBytes.byteOffset, safeBytes.byteOffset + safeBytes.byteLength)
+          : null
       };
     } catch (error) {
       session.readFailures += 1;

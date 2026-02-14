@@ -1,13 +1,15 @@
-# windows-hdr-capture (scaffold)
-
-This folder contains the Windows native capture addon scaffold for HDR-to-SDR mapping.
+# windows-hdr-capture
 
 ## Current status
 
-- `index.js` exposes a stable bridge API used by Electron IPC.
-- `src/addon.cc` is a Node-API stub and does not yet contain the final WGC/D3D11 tone-mapping pipeline.
-- Runtime behavior in app:
-  - if addon is unavailable or not implemented, renderer auto-falls back to the existing desktop capture path.
+- `index.js` exposes the bridge API used by Electron IPC.
+- `src/addon.cc` now provides a Windows MVP implementation:
+  - display-region frame acquisition via Win32 GDI (`BitBlt` + `DIBSection`)
+  - deterministic Rec.709-style highlight rolloff and saturation preservation
+  - BGRA frame output buffer for renderer canvas path
+- Runtime behavior in app remains safe:
+  - if native start/read fails, renderer falls back to the existing desktop capture route.
+  - oversized capture surfaces are rejected with `FRAME_TOO_LARGE` to prevent renderer white-screen/OOM.
 
 ## Build (Windows)
 
@@ -28,3 +30,8 @@ The Electron main process wraps these methods under IPC:
 - `hdr:start`
 - `hdr:read-frame`
 - `hdr:stop`
+
+## Notes
+
+- This is an MVP path for stability and integration testing.
+- A future phase can replace GDI with WGC/D3D11 for lower latency and truer HDR source handling.

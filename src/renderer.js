@@ -1,4 +1,5 @@
 /* global electronAPI */
+const runtimeElectronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
 
 const sourceSelect = document.getElementById('sourceSelect');
 const refreshBtn = document.getElementById('refreshBtn');
@@ -105,9 +106,11 @@ const BUILTIN_OUTPUT_VIDEO_BITRATE_MULTIPLIERS = {
 };
 const BUILTIN_OUTPUT_VIDEO_BITRATE_MAX = 120000000;
 const BUILTIN_OUTPUT_AUDIO_BITRATE_MAX = 512000;
-const HDR_NATIVE_READ_TIMEOUT_MS = 50;
+const HDR_NATIVE_READ_TIMEOUT_MS = 80;
 const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
+const HDR_NATIVE_POLL_INTERVAL_MS = 66;
+const HDR_NATIVE_ROUTE_ENABLED = false;
 
 let sources = [];
 let sourceStream;
@@ -259,6 +262,20 @@ const cameraState = {
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+async function withTimeout(promise, ms, message) {
+  let timer = 0;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function normalizeHdrMappingMode(value) {
@@ -1072,29 +1089,37 @@ async function getDesktopStream(sourceId) {
 }
 
 async function getDesktopVideoStream(sourceId) {
-  return navigator.mediaDevices.getUserMedia({
-    audio: false,
-    video: {
-      mandatory: {
-        chromeMediaSource: 'desktop',
-        chromeMediaSourceId: sourceId,
-        maxFrameRate: 60
+  return withTimeout(
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId,
+          maxFrameRate: 60
+        }
       }
-    }
-  });
+    }),
+    10000,
+    '桌面視訊擷取逾時，請確認來源仍可用。'
+  );
 }
 
 async function getDesktopAudioStream(sourceId) {
   try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: {
-          chromeMediaSource: 'desktop',
-          chromeMediaSourceId: sourceId
-        }
-      },
-      video: false
-    });
+    return await withTimeout(
+      navigator.mediaDevices.getUserMedia({
+        audio: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId
+          }
+        },
+        video: false
+      }),
+      5000,
+      '桌面音訊擷取逾時。'
+    );
   } catch (_error) {
     return undefined;
   }
@@ -1258,7 +1283,13 @@ async function pollNativeHdrFrame() {
 
     nativeHdrState.readFailures += 1;
     const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (performance.now() - nativeHdrState.lastFrameAtMs) : 0;
+    const hardFallback =
+      result &&
+      (result.reason === 'FRAME_TOO_LARGE' ||
+        result.reason === 'INVALID_SESSION' ||
+        result.reason === 'NATIVE_UNAVAILABLE');
     if (
+      hardFallback ||
       (result && result.fallbackRecommended) ||
       nativeHdrState.readFailures >= HDR_NATIVE_MAX_READ_FAILURES ||
       idleForMs >= HDR_NATIVE_MAX_IDLE_MS
@@ -1275,7 +1306,7 @@ async function pollNativeHdrFrame() {
     if (nativeHdrState.active && nativeHdrState.sessionId > 0) {
       nativeHdrFramePumpTimer = setTimeout(() => {
         pollNativeHdrFrame().catch(() => {});
-      }, 1);
+      }, HDR_NATIVE_POLL_INTERVAL_MS);
     }
   }
 }
@@ -1292,6 +1323,8 @@ async function probeHdrNativeSupport(sourceId, displayId) {
 
   if (probe && probe.supported) {
     setHdrProbeStatus('Probe: Native 可用（' + (probe.hdrActive ? 'HDR 螢幕' : 'SDR/未知') + '）');
+  } else if (probe && probe.reason === 'LOCAL_BRIDGE_UNAVAILABLE') {
+    setHdrProbeStatus('Probe: Native 不可用（LOCAL_BRIDGE_UNAVAILABLE）');
   } else {
     setHdrProbeStatus('Probe: Native 不可用（' + hdrMappingState.probeReason + '）');
   }
@@ -1342,6 +1375,17 @@ async function resolveCaptureRoute(sourceId, selectedDisplayId) {
   if (mode === 'off') {
     setHdrProbeStatus('Probe: 模式關閉');
     return { route: 'fallback', reason: 'MODE_OFF' };
+  }
+
+  if (!HDR_NATIVE_ROUTE_ENABLED) {
+    if (mode === 'force-native') {
+      return {
+        route: 'blocked',
+        reason: 'NATIVE_ROUTE_DISABLED',
+        message: 'Force Native 暫時停用：目前 raw frame IPC 在此環境會觸發 renderer 終止（bad IPC message 263）。'
+      };
+    }
+    return { route: 'fallback', reason: 'NATIVE_ROUTE_DISABLED' };
   }
 
   const probe = await probeHdrNativeSupport(sourceId, selectedDisplayId);
@@ -1411,6 +1455,10 @@ async function maybeProbeHdrForUi() {
   }
   if (normalizeHdrMappingMode(hdrMappingState.mode) === 'off') {
     setHdrProbeStatus('Probe: 模式關閉');
+    return;
+  }
+  if (!HDR_NATIVE_ROUTE_ENABLED) {
+    setHdrProbeStatus('Probe: Native 停用（避免 bad IPC message 263）');
     return;
   }
   await probeHdrNativeSupport(sourceId, selectedSource.display_id);
@@ -2427,6 +2475,7 @@ function syncPenStyleToOverlay() {
 }
 
 async function startRecording() {
+  setStatus('正在啟動錄影...');
   if (editorState.active) {
     clearEditorState();
   }
@@ -2456,7 +2505,11 @@ async function startRecording() {
     stopMediaTracks(stream);
   }
 
-  const captureRoute = await buildCaptureStreams(sourceId, selectedSource.display_id);
+  const captureRoute = await withTimeout(
+    buildCaptureStreams(sourceId, selectedSource.display_id),
+    12000,
+    '擷取來源初始化逾時，請重新整理來源後再試。'
+  );
 
   // Prevent local monitor playback from feeding back into system-audio capture.
   rawVideo.muted = true;
@@ -2882,6 +2935,7 @@ penClearBtn.addEventListener('click', () => {
 
 refreshBtn.addEventListener('click', loadSources);
 recordBtn.addEventListener('click', () => {
+  setStatus('正在啟動錄影...');
   startRecording().catch((error) => {
     console.error(error);
     setStatus(`啟動錄影失敗: ${error.message}`);
@@ -2918,6 +2972,13 @@ loadSources().catch((error) => {
   console.error(error);
   setStatus(`初始化失敗: ${error.message}`);
 });
+
+if (!runtimeElectronAPI) {
+  recordBtn.disabled = true;
+  refreshBtn.disabled = true;
+  stopBtn.disabled = true;
+  setStatus('初始化失敗: preload 未載入（electronAPI 缺失）');
+}
 
 electronAPI.onExportPhase((payload) => {
   if (!payload || payload.phase !== 'processing-start') {
