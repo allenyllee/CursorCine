@@ -5,6 +5,12 @@ const electron = require("electron");
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
+if (typeof env.CURSORCINE_ENABLE_HDR_NATIVE_IPC === "undefined") {
+  env.CURSORCINE_ENABLE_HDR_NATIVE_IPC = "1";
+}
+if (typeof env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE === "undefined") {
+  env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE = "1";
+}
 
 const args = ["--no-sandbox", "--disable-setuid-sandbox", "."];
 const child = spawn(electron, args, {
