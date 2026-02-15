@@ -20,7 +20,6 @@
 - Visual Studio 2022 Build Tools with:
   - Desktop development with C++
   - MSVC v143 toolset
-  - C++ Clang tools for Windows (`ClangCL`)
   - Windows 10/11 SDK
 
 If PowerShell blocks `npm`, use `npm.cmd`.
@@ -46,7 +45,12 @@ npm.cmd run build:native-hdr-win
 npm.cmd run build
 ```
 
-If build fails with `MSB8020` and `PlatformToolset='ClangCL'`, install the Clang toolset in Visual Studio Installer (`C++ Clang tools for Windows`) and rebuild.
+`npm run build:native-hdr-win` uses `scripts/build-native-hdr-win.js` to:
+- run `node-gyp configure`
+- patch generated `windows_hdr_capture.vcxproj` to force `<PlatformToolset>v143</PlatformToolset>`
+- run `node-gyp build`
+
+If build still fails with `MSB8020` and `PlatformToolset='ClangCL'`, delete `native/windows-hdr-capture/build` and run the build command again.
 
 ## Bridge API
 

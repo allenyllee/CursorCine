@@ -85,7 +85,6 @@ UI 提供：
 3. Visual Studio 2022 Build Tools，並勾選：
    - `Desktop development with C++`
    - `MSVC v143 x64/x86 build tools`
-   - `C++ Clang tools for Windows`（提供 `ClangCL` toolset）
    - `Windows 10/11 SDK`
 4. `ffmpeg`（非編譯必要，但匯出 `ffmpeg` 路徑需要）
 
@@ -98,8 +97,8 @@ npm.cmd run build:native-hdr-win
 
 若看到 `MSB8020: 找不到 ClangCL 的建置工具 (平台工具集='ClangCL')`：
 
-- 代表 VS Build Tools 尚未安裝 ClangCL 元件
-- 回到 Visual Studio Installer，補安裝 `C++ Clang tools for Windows`
+- `build:native-hdr-win` 會在 `node-gyp configure` 後自動把產生的 vcxproj toolset 固定為 `v143`，通常不需要安裝 ClangCL。
+- 若仍出現 ClangCL 相關錯誤，先刪除 `native/windows-hdr-capture/build` 後重跑 `npm.cmd run build:native-hdr-win`。
 
 啟動：
 
@@ -165,6 +164,7 @@ GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈�
 - `pull_request` 會執行 `actions/dependency-review-action`，阻擋高風險依賴與禁止授權（AGPL/GPL）。
 - `push` / `workflow_dispatch` 會執行 `npm audit --omit=dev --audit-level=high`。
 - 只有供應鏈檢查通過後，才會繼續版本變更判斷與 build/release 流程。
+- Windows runner 會先設定 `Python 3.11` 與 `GYP_MSVS_VERSION=2022`，並使用 `scripts/build-native-hdr-win.js` 以確保 native addon 使用 `v143` toolset 編譯。
 
 這代表如果依賴存在 `high` 以上漏洞，或稽核流程失敗，CI 會直接中止，不會產生釋出產物。
 
