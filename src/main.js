@@ -35,8 +35,8 @@ const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-ht
 const HDR_WGC_PIPELINE_STAGE = HDR_WGC_ROUTE_ENABLED ? 'wgc-worker-latest-frame-v1' : 'wgc-disabled';
 const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 16;
-const HDR_FRAME_HTTP_WAIT_DEFAULT_MS = 55;
-const HDR_FRAME_HTTP_WAIT_MAX_MS = 120;
+const HDR_FRAME_HTTP_WAIT_DEFAULT_MS = 24;
+const HDR_FRAME_HTTP_WAIT_MAX_MS = 60;
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
   FRAME_SEQ: 1,
@@ -223,19 +223,17 @@ function ensureHdrFrameServer() {
           writeNoContent(res);
           return;
         }
-
-        const startedAt = Date.now();
-        const loop = () => {
-          if (tryRespond()) {
+        const waitTimer = setTimeout(() => {
+          if (closed) {
             return;
           }
-          if ((Date.now() - startedAt) >= waitMs) {
+          if (!tryRespond()) {
             writeNoContent(res);
-            return;
           }
-          setTimeout(loop, 4);
-        };
-        loop();
+        }, waitMs);
+        req.on('close', () => {
+          clearTimeout(waitTimer);
+        });
       } catch (_error) {
         res.statusCode = 500;
         res.end('server-error');
