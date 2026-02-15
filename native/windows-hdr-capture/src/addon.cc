@@ -304,10 +304,19 @@ void ApplyToneMap(std::vector<uint8_t>* frameBytes, bool hdrLikely, const ToneMa
     float r = pixels[i + 2] / 255.0f;
 
     if (hdrLikely && rolloff > 0.0f) {
-      // Deterministic shoulder compression for highlight rolloff.
-      r = r / (1.0f + rolloff * r);
-      g = g / (1.0f + rolloff * g);
-      b = b / (1.0f + rolloff * b);
+      // Highlight-only shoulder compression:
+      // keep midtones stable and only compress bright regions.
+      const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+      constexpr float kShoulderStart = 0.72f;
+      if (luma > kShoulderStart) {
+        const float normalized = (luma - kShoulderStart) / (1.0f - kShoulderStart);
+        const float curve = normalized * normalized;
+        const float compressedLuma = luma / (1.0f + (rolloff * curve * luma));
+        const float scale = compressedLuma / std::max(0.0001f, luma);
+        r *= scale;
+        g *= scale;
+        b *= scale;
+      }
     }
 
     if (std::fabs(sat - 1.0f) > 0.001f) {
