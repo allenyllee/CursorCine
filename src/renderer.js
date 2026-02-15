@@ -236,6 +236,10 @@ const hdrMappingState = {
   mainSharedSessionCount: 0,
   mainTopFrameSeq: 0,
   mainTopReadFailures: 0,
+  mainTopBindAttempts: 0,
+  mainTopBindFailures: 0,
+  mainTopLastBindReason: '',
+  mainTopLastBindError: '',
   mainTopLastReason: '',
   mainTopLastError: '',
   mainTopReadMsAvg: 0,
@@ -482,12 +486,15 @@ function updateHdrDiagStatus(message) {
     ', mainSess=' + String(hdrMappingState.mainSharedSessionCount) +
     ', mainFrame=' + String(hdrMappingState.mainTopFrameSeq) +
     ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
+    ', mainBind=' + String(hdrMappingState.mainTopBindFailures) + '/' + String(hdrMappingState.mainTopBindAttempts) +
     ', mainReadMs=' + String(Number(hdrMappingState.mainTopReadMsAvg || 0).toFixed(2)) +
     ', mainCopyMs=' + String(Number(hdrMappingState.mainTopCopyMsAvg || 0).toFixed(2)) +
     ', mainJitMs=' + String(Number(hdrMappingState.mainTopPumpJitterMsAvg || 0).toFixed(2)) +
     ', mainBpf=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerFrameAvg || 0))) +
     ', mainBps=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerSec || 0))) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
+    ', mainBindReason=' + String(hdrMappingState.mainTopLastBindReason || '-') +
+    ', mainBindErr=' + String(hdrMappingState.mainTopLastBindError || '-') +
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
@@ -622,6 +629,10 @@ async function copyHdrDiagnosticsSnapshot() {
       nativeStartAttempts: hdrMappingState.nativeStartAttempts,
       nativeStartFailures: hdrMappingState.nativeStartFailures,
       mainTopReadMsAvg: hdrMappingState.mainTopReadMsAvg,
+      mainTopBindAttempts: hdrMappingState.mainTopBindAttempts,
+      mainTopBindFailures: hdrMappingState.mainTopBindFailures,
+      mainTopLastBindReason: hdrMappingState.mainTopLastBindReason,
+      mainTopLastBindError: hdrMappingState.mainTopLastBindError,
       mainTopCopyMsAvg: hdrMappingState.mainTopCopyMsAvg,
       mainTopSabWriteMsAvg: hdrMappingState.mainTopSabWriteMsAvg,
       mainTopBytesPerFrameAvg: hdrMappingState.mainTopBytesPerFrameAvg,
@@ -2082,17 +2093,32 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       const frameBytes = Math.max(1024 * 1024, stride * height);
       sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
       sharedControlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * HDR_SHARED_CONTROL_SLOTS);
-      const bindResult = await electronAPI.hdrSharedBind({
+      let bindResult = await electronAPI.hdrSharedBind({
         sessionId: Number(start.sessionId || 0),
         sharedFrameBuffer,
         sharedControlBuffer
       });
+      if (!bindResult || !bindResult.ok) {
+        bindResult = await electronAPI.hdrSharedBindAsync({
+          sessionId: Number(start.sessionId || 0),
+          sharedFrameBuffer,
+          sharedControlBuffer
+        });
+      }
       sharedBindOk = Boolean(bindResult && bindResult.ok && bindResult.bound);
+      pushHdrDecisionTrace('shared-bind', {
+        ok: sharedBindOk,
+        reason: String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED')),
+        message: String((bindResult && bindResult.message) || '')
+      });
       if (!sharedBindOk) {
         sharedFrameBuffer = null;
         sharedControlBuffer = null;
       }
-    } catch (_bindError) {
+    } catch (bindError) {
+      pushHdrDecisionTrace('shared-bind-exception', {
+        message: bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION'
+      });
       sharedFrameBuffer = null;
       sharedControlBuffer = null;
       sharedBindOk = false;
@@ -2301,6 +2327,10 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainSharedSessionCount = 0;
     hdrMappingState.mainTopFrameSeq = 0;
     hdrMappingState.mainTopReadFailures = 0;
+    hdrMappingState.mainTopBindAttempts = 0;
+    hdrMappingState.mainTopBindFailures = 0;
+    hdrMappingState.mainTopLastBindReason = '';
+    hdrMappingState.mainTopLastBindError = '';
     hdrMappingState.mainTopReadMsAvg = 0;
     hdrMappingState.mainTopCopyMsAvg = 0;
     hdrMappingState.mainTopSabWriteMsAvg = 0;
@@ -2343,6 +2373,10 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainSharedSessionCount = Number(diagnostics.sharedSessionCount || sessions.length || 0);
   hdrMappingState.mainTopFrameSeq = Number(top && top.frameSeq ? top.frameSeq : 0);
   hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
+  hdrMappingState.mainTopBindAttempts = Number(top && top.bindAttempts ? top.bindAttempts : 0);
+  hdrMappingState.mainTopBindFailures = Number(top && top.bindFailures ? top.bindFailures : 0);
+  hdrMappingState.mainTopLastBindReason = String((top && top.lastBindReason) || '');
+  hdrMappingState.mainTopLastBindError = String((top && top.lastBindError) || '');
   hdrMappingState.mainTopReadMsAvg = Number(top && top.perf && top.perf.readMsAvg ? top.perf.readMsAvg : 0);
   hdrMappingState.mainTopCopyMsAvg = Number(top && top.perf && top.perf.copyMsAvg ? top.perf.copyMsAvg : 0);
   hdrMappingState.mainTopSabWriteMsAvg = Number(top && top.perf && top.perf.sabWriteMsAvg ? top.perf.sabWriteMsAvg : 0);

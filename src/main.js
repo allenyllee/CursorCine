@@ -2088,6 +2088,10 @@ app.whenReady().then(() => {
         controlView: null,
         frameSeq: 0,
         readFailures: 0,
+        bindAttempts: 0,
+        bindFailures: 0,
+        lastBindReason: '',
+        lastBindError: '',
         noFrameStreak: 0,
         totalReadFailures: 0,
         bytesPumped: 0,
@@ -2165,23 +2169,28 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
+  async function bindHdrSharedBuffers(payload) {
     const sessionId = Number(payload && payload.sessionId);
     if (!Number.isFinite(sessionId) || sessionId <= 0) {
       pushHdrTrace('shared-bind-invalid-session', { sessionId });
-      return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
+      return { ok: false, bound: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
     }
     const session = hdrSharedSessions.get(sessionId);
     if (!session) {
       pushHdrTrace('shared-bind-missing-session', { sessionId });
-      return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
+      return { ok: false, bound: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
     }
+    session.bindAttempts = Number(session.bindAttempts || 0) + 1;
     const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
     const sharedControlBuffer = payload && payload.sharedControlBuffer;
     if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      session.bindFailures = Number(session.bindFailures || 0) + 1;
+      session.lastBindReason = 'INVALID_SHARED_BUFFER';
+      session.lastBindError = '共享記憶體建立失敗或環境不支援。';
       pushHdrTrace('shared-bind-invalid-buffer', { sessionId });
       return {
         ok: false,
+        bound: false,
         reason: 'INVALID_SHARED_BUFFER',
         message: '共享記憶體建立失敗或環境不支援。'
       };
@@ -2201,9 +2210,13 @@ app.whenReady().then(() => {
       }, 2000).catch(() => null);
       if (!bindResult || !bindResult.ok) {
         session.workerDirectShared = false;
+        session.bindFailures = Number(session.bindFailures || 0) + 1;
+        session.lastBindReason = 'WORKER_BIND_SHARED_FAILED';
+        session.lastBindError = bindResult && bindResult.message ? bindResult.message : 'worker shared bind failed';
         pumpHdrWorkerSession(sessionId).catch(() => {});
         return {
           ok: false,
+          bound: false,
           reason: 'WORKER_BIND_SHARED_FAILED',
           message: bindResult && bindResult.message ? bindResult.message : 'worker shared bind failed'
         };
@@ -2212,6 +2225,8 @@ app.whenReady().then(() => {
     } else {
       pumpHdrSharedSession(sessionId);
     }
+    session.lastBindReason = 'OK';
+    session.lastBindError = '';
     pushHdrTrace('shared-bind-ok', {
       sessionId,
       frameBytes: Number(sharedFrameBuffer.byteLength || 0),
@@ -2219,6 +2234,21 @@ app.whenReady().then(() => {
     });
 
     return { ok: true, bound: true };
+  }
+
+  ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
+    return bindHdrSharedBuffers(payload);
+  });
+
+  ipcMain.on('hdr:shared-bind-async', async (event, payload) => {
+    const requestId = String(payload && payload.requestId ? payload.requestId : '');
+    const result = await bindHdrSharedBuffers(payload).catch((error) => ({
+      ok: false,
+      bound: false,
+      reason: 'BIND_EXCEPTION',
+      message: error && error.message ? error.message : 'bind exception'
+    }));
+    event.reply('hdr:shared-bind-async:result', { requestId, result });
   });
 
   ipcMain.handle('hdr:shared-stop', async (_event, payload) => {
@@ -2268,6 +2298,10 @@ app.whenReady().then(() => {
         nativeBackend: String(session.nativeBackend || ''),
         frameSeq: Number(session.frameSeq || 0),
         readFailures: Number(session.readFailures || 0),
+        bindAttempts: Number(session.bindAttempts || 0),
+        bindFailures: Number(session.bindFailures || 0),
+        lastBindReason: String(session.lastBindReason || ''),
+        lastBindError: String(session.lastBindError || ''),
         noFrameStreak: Number(session.noFrameStreak || 0),
         totalReadFailures: Number(session.totalReadFailures || 0),
         bytesPumped: Number(session.bytesPumped || 0),
@@ -2329,6 +2363,10 @@ app.whenReady().then(() => {
           nativeBackend: String(sessionObj.nativeBackend || ''),
           frameSeq: Number(sessionObj.frameSeq || 0),
           readFailures: Number(sessionObj.readFailures || 0),
+          bindAttempts: Number(sessionObj.bindAttempts || 0),
+          bindFailures: Number(sessionObj.bindFailures || 0),
+          lastBindReason: String(sessionObj.lastBindReason || ''),
+          lastBindError: String(sessionObj.lastBindError || ''),
           noFrameStreak: Number(sessionObj.noFrameStreak || 0),
           totalReadFailures: Number(sessionObj.totalReadFailures || 0),
           bytesPumped: Number(sessionObj.bytesPumped || 0),
