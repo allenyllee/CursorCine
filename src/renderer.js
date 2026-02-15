@@ -278,7 +278,8 @@ const nativeHdrState = {
   lastHttpFrameSeq: 0,
   captureFps: 0,
   renderFps: 0,
-  queueDepth: 0
+  queueDepth: 0,
+  runtimeLegacyRetryAttempted: false
 };
 
 const viewState = {
@@ -1582,6 +1583,7 @@ async function stopNativeHdrCapture() {
   nativeHdrState.captureFps = 0;
   nativeHdrState.renderFps = 0;
   nativeHdrState.queueDepth = 0;
+  nativeHdrState.runtimeLegacyRetryAttempted = false;
 }
 
 function blitNativeFrameToCanvas(frame) {
@@ -1756,11 +1758,28 @@ async function fallbackNativeToDesktopVideo(reason) {
     return;
   }
   nativeHdrFallbackAttempted = true;
+  let keepNativeSession = false;
+  const fallbackReason = String(reason || 'NATIVE_RUNTIME_FALLBACK');
 
   const oldSourceStream = sourceStream;
 
   try {
-    noteHdrFallback(reason || 'NATIVE_RUNTIME_FALLBACK');
+    noteHdrFallback(fallbackReason);
+    const runtimeRoute = String(hdrMappingState.runtimeRoute || '');
+    if (runtimeRoute === 'wgc-v1' && !nativeHdrState.runtimeLegacyRetryAttempted) {
+      nativeHdrState.runtimeLegacyRetryAttempted = true;
+      const retrySourceId = String(nativeHdrState.sourceId || (sourceSelect && sourceSelect.value ? sourceSelect.value : ''));
+      const retryDisplayId = String(nativeHdrState.displayId || (selectedSource && selectedSource.display_id ? selectedSource.display_id : ''));
+      await stopNativeHdrCapture();
+      const legacyRetry = await tryStartNativeHdrCapture(retrySourceId, retryDisplayId, {
+        routePreference: 'legacy'
+      });
+      if (legacyRetry && legacyRetry.ok) {
+        keepNativeSession = true;
+        setStatus('WGC 路徑中斷，已自動降級到 Legacy Native HDR。原因: ' + fallbackReason);
+        return;
+      }
+    }
     hdrMappingState.fallbackLevel = 3;
     const fallbackStream = await getDesktopStream(nativeHdrState.sourceId || sourceSelect.value);
     sourceStream = fallbackStream;
@@ -1773,11 +1792,13 @@ async function fallbackNativeToDesktopVideo(reason) {
       extraCaptureStreams.push(oldSourceStream);
     }
 
-    setStatus('偵測到 Native HDR 擷取中斷，已自動回退既有錄影管線。' + (reason ? ' 原因: ' + reason : ''));
+    setStatus('偵測到 Native HDR 擷取中斷，已自動回退既有錄影管線。' + (fallbackReason ? ' 原因: ' + fallbackReason : ''));
   } catch (error) {
     setStatus('Native HDR 擷取中斷且回退失敗: ' + (error && error.message ? error.message : String(error)));
   } finally {
-    await stopNativeHdrCapture();
+    if (!keepNativeSession) {
+      await stopNativeHdrCapture();
+    }
   }
 }
 
@@ -1884,12 +1905,14 @@ async function probeHdrNativeSupport(sourceId, displayId) {
   return probe || { ok: false, supported: false, reason: 'UNKNOWN' };
 }
 
-async function tryStartNativeHdrCapture(sourceId, displayId) {
+async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   hdrMappingState.nativeStartAttempts += 1;
   updateHdrDiagStatus();
-  const routePreference = normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native'
-    ? 'wgc'
-    : normalizeHdrRoutePreference(hdrMappingState.routePreference);
+  const routePreference = options && options.routePreference
+    ? normalizeHdrRoutePreference(options.routePreference)
+    : (normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native'
+      ? 'wgc'
+      : normalizeHdrRoutePreference(hdrMappingState.routePreference));
 
   let start = null;
   try {
@@ -1954,6 +1977,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   nativeHdrState.startupDeadlineMs = performance.now() + HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS;
   nativeHdrState.frameEndpoint = String(start.frameEndpoint || '');
   nativeHdrState.lastHttpFrameSeq = 0;
+  nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
   hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
   hdrMappingState.runtimeStage = String(start.pipelineStage || '');
   hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));
