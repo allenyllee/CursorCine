@@ -4,15 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-15
+
 ### Added
-* Added a new Windows HDR route scaffold under `native/windows-wgc-hdr-capture/` and wired it into runtime route selection (`auto|wgc|legacy`) for `hdr:shared-start`.
-* Added route diagnostics fields across shared sessions and UI snapshots: `runtimeRoute`, `pipelineStage`, `fallbackLevel`, and route preference metadata.
+* Added a dedicated `wgc-v1` Windows HDR route with route preference controls (`auto|wgc|legacy`) and environment flags (`CURSORCINE_ENABLE_HDR_WGC`, `CURSORCINE_HDR_ROUTE_PREFERENCE`).
+* Added a new native module at `native/windows-wgc-hdr-capture/` and included it in app packaging and Windows CI validation.
+* Added richer HDR runtime diagnostics fields (`runtimeRoute`, `pipelineStage`, `fallbackLevel`, route preference, worker timing metadata) across status snapshots.
 
 ### Changed
-* `scripts/build-native-hdr-win.js` now builds and patches vcxproj toolsets for both native modules (`windows-hdr-capture` and `windows-wgc-hdr-capture`).
-* Windows HDR shared start now applies explicit fallback order: `wgc-v1 -> native-legacy -> builtin-desktop`.
-* Worker capture path now supports route-aware bridge loading so hot path frame reads stay off the Electron main process.
-* `windows-wgc-hdr-capture` is now loaded as an independent native backend (no JS-layer forwarding to legacy bridge), with worker-session frames pumped into the shared HTTP endpoint path.
+* `build:native-hdr-win` now builds and patches vcxproj toolsets for both native modules (`windows-hdr-capture` and `windows-wgc-hdr-capture`).
+* HDR capture startup/runtime fallback now follows explicit order: `wgc-v1 -> native-legacy -> builtin-desktop`.
+* Worker frame pump cadence now follows requested capture FPS instead of fixed 33ms polling.
+* Recording status text now shows the actual runtime HDR route label (`wgc-v1` / `native-legacy` / `fallback`).
+* `windows-wgc-hdr-capture` is now loaded as an independent backend at the JS bridge layer (no JS forwarding to legacy bridge).
+
+### Fixed
+* Fixed native startup fallback behavior by retrying `native-legacy` when `wgc-v1` startup/read-timeout path fails.
+* Fixed IPC clone failures by removing `SharedArrayBuffer` payloads from `hdr:shared-start` and worker `capture-start` responses.
+* Fixed worker-route runtime by pumping worker-session frames into the shared HTTP endpoint path, preventing `STARTUP_NO_FRAME_TIMEOUT` from missing frame publication.
+* Local generated build artifacts for `native/windows-wgc-hdr-capture/build/` are now ignored by git.
+* Release metadata bump from `0.6.1` to `0.7.0`.
 
 ## [0.6.1] - 2026-02-15
 
