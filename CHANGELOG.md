@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-02-15
+
+### Added
+* Added Stage A HDR diagnostics for runtime timing and throughput, including worker/main read and copy timings, renderer blit timing, bytes-per-frame/second, and pump jitter counters.
+* Added `wgc-v1` shared-buffer-first transport plumbing with explicit transport metadata (`transportMode`, `supportsSharedFrameRead`) and async shared-bind fallback channel.
+* Added overlay pen interaction profiles (`穩定優先` / `流暢優先`) with runtime mode switching.
+* Added overlay runtime state bridge (`overlay:get-state`) and live renderer sync to surface automatic anti-black-screen fallback state and reason.
+
+### Changed
+* Improved WGC Stage A runtime path by reducing avoidable frame-copy overhead in worker/main loops, adding adaptive no-frame backoff, and tightening shared-frame startup handshake behavior.
+* Updated recording HUD/diagnostics route labeling to stay aligned with effective runtime transport (`shared-buffer` vs `http-fallback`).
+* Refined overlay input-capture behavior and status messaging for Ctrl toggle, wheel pause, re-entry handling, and interaction-mode dependent UX.
+* README now documents pen interaction profiles and automatic non-blocking fallback behavior during HDR multi-display risk scenarios.
+
+### Fixed
+* Fixed HDR shared-start clone/bind instability by adding async bind fallback, bind-failure telemetry, and clone-blocked guard behavior.
+* Fixed WGC startup fallback continuity by preserving fallback chain behavior while reducing startup timeout regressions.
+* Fixed overlay hotkey handling so Ctrl chords (for example `Ctrl+C`) do not accidentally toggle draw mode.
+* Fixed overlay black-screen resiliency by auto-degrading pen blocking in high-risk HDR scenarios (including first activation guard on target display), with on-screen fallback indicators.
+* Release metadata bump from `0.7.0` to `0.8.0`.
+
 ## [0.7.0] - 2026-02-15
 
 ### Added
