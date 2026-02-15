@@ -29,7 +29,10 @@ const HDR_RUNTIME_MAX_READ_FAILURES = 8;
 const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
 const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '1') !== '0';
 const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '1') !== '0';
+const HDR_WGC_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_WGC || '1') !== '0';
+const HDR_ROUTE_PREFERENCE = String(process.env.CURSORCINE_HDR_ROUTE_PREFERENCE || 'auto').trim().toLowerCase();
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
+const HDR_WGC_PIPELINE_STAGE = HDR_WGC_ROUTE_ENABLED ? 'wgc-worker-latest-frame-v1' : 'wgc-disabled';
 const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 16;
 const HDR_SHARED_CONTROL = {
@@ -68,6 +71,8 @@ const exportTasks = new Map();
 let quitCleanupStarted = false;
 let windowsHdrNativeBridge = null;
 let windowsHdrNativeLoadError = '';
+let windowsHdrWgcBridge = null;
+let windowsHdrWgcLoadError = '';
 let hdrCaptureSessionSeq = 1;
 const hdrCaptureSessions = new Map();
 let hdrSharedSessionSeq = 1;
@@ -417,6 +422,82 @@ function getDisplayHdrHint(displayId) {
     colorDepth,
     colorSpace,
     isHdrLikely: hdrByDepth || hdrByColorSpace
+  };
+}
+
+function loadWindowsHdrWgcBridge() {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  if (windowsHdrWgcBridge) {
+    return windowsHdrWgcBridge;
+  }
+  if (windowsHdrWgcLoadError) {
+    return null;
+  }
+
+  try {
+    const mod = require(path.join(__dirname, '..', 'native', 'windows-wgc-hdr-capture'));
+    windowsHdrWgcBridge = mod;
+    return windowsHdrWgcBridge;
+  } catch (error) {
+    windowsHdrWgcLoadError = error && error.message ? error.message : 'load failed';
+    return null;
+  }
+}
+
+function normalizeHdrRoutePreference(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (v === 'wgc' || v === 'legacy' || v === 'auto') {
+    return v;
+  }
+  return 'auto';
+}
+
+function selectHdrBridge(requestedRoute) {
+  const preference = normalizeHdrRoutePreference(requestedRoute || HDR_ROUTE_PREFERENCE);
+  const tries = preference === 'legacy'
+    ? ['legacy', 'wgc']
+    : (preference === 'wgc' ? ['wgc', 'legacy'] : ['wgc', 'legacy']);
+  const errors = [];
+
+  for (const candidate of tries) {
+    if (candidate === 'wgc') {
+      if (!HDR_WGC_ROUTE_ENABLED) {
+        errors.push('WGC_ROUTE_DISABLED');
+        continue;
+      }
+      const bridge = loadWindowsHdrWgcBridge();
+      if (bridge && typeof bridge.startCapture === 'function' && typeof bridge.readFrame === 'function') {
+        return {
+          route: 'wgc-v1',
+          fallbackLevel: 1,
+          bridge,
+          backendLabel: String(bridge.backendName || 'windows-wgc-hdr-capture')
+        };
+      }
+      errors.push(windowsHdrWgcLoadError || 'WGC_UNAVAILABLE');
+      continue;
+    }
+
+    const bridge = loadWindowsHdrNativeBridge();
+    if (bridge && typeof bridge.startCapture === 'function' && typeof bridge.readFrame === 'function') {
+      return {
+        route: 'native-legacy',
+        fallbackLevel: 2,
+        bridge,
+        backendLabel: String(bridge.backendName || 'windows-hdr-capture')
+      };
+    }
+    errors.push(windowsHdrNativeLoadError || 'LEGACY_UNAVAILABLE');
+  }
+
+  return {
+    route: 'builtin-desktop',
+    fallbackLevel: 3,
+    bridge: null,
+    backendLabel: '',
+    reason: errors.length > 0 ? errors.join('|') : 'NATIVE_UNAVAILABLE'
   };
 }
 
@@ -1265,6 +1346,26 @@ function stopHdrSharedSession(sessionId) {
     lastReason: String(session.lastReason || '')
   });
 
+  if (session.workerMode) {
+    hdrWorkerRequest('capture-stop', {}, 4000).catch(() => {});
+    return {
+      ok: true,
+      stopped: true,
+      diagnostics: {
+        sessionId,
+        workerMode: true,
+        frameSeq: Number(session.frameSeq || 0),
+        totalReadFailures: Number(session.totalReadFailures || 0),
+        readFailures: Number(session.readFailures || 0),
+        lastError: String(session.lastError || ''),
+        lastReason: String(session.lastReason || ''),
+        startedAt: Number(session.startedAt || 0),
+        lastFrameAt: Number(session.lastFrameAt || 0),
+        bytesPumped: Number(session.bytesPumped || 0)
+      }
+    };
+  }
+
   if (!session.bridge || typeof session.bridge.stopCapture !== 'function') {
     return { ok: true, stopped: true };
   }
@@ -1300,6 +1401,9 @@ function stopHdrSharedSession(sessionId) {
 function pumpHdrSharedSession(sessionId) {
   const session = hdrSharedSessions.get(sessionId);
   if (!session) {
+    return;
+  }
+  if (session.workerMode) {
     return;
   }
   try {
@@ -1695,15 +1799,21 @@ app.whenReady().then(() => {
       return { ok: false, reason: 'INVALID_INPUT', message: '缺少來源識別碼。' };
     }
 
-    const bridge = loadWindowsHdrNativeBridge();
+    const requestedRoute = normalizeHdrRoutePreference(payload && payload.routePreference ? payload.routePreference : '');
+    const bridgeSelection = selectHdrBridge(requestedRoute);
+    const bridge = bridgeSelection.bridge;
     if (!bridge || typeof bridge.startCapture !== 'function' || typeof bridge.readFrame !== 'function') {
       pushHdrTrace('shared-start-native-unavailable', {
-        message: windowsHdrNativeLoadError || 'NATIVE_UNAVAILABLE'
+        message: bridgeSelection.reason || 'NATIVE_UNAVAILABLE',
+        requestedRoute
       });
       return {
         ok: false,
         reason: 'NATIVE_UNAVAILABLE',
-        message: windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。'
+        message: bridgeSelection.reason || windowsHdrWgcLoadError || windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。',
+        requestedRoute,
+        runtimeRoute: bridgeSelection.route,
+        fallbackLevel: bridgeSelection.fallbackLevel
       };
     }
 
@@ -1711,14 +1821,33 @@ app.whenReady().then(() => {
       const displayHint = getDisplayHdrHint(displayId);
       const physicalW = Math.max(1, Math.round(Number(displayHint.bounds.width || 1) * Number(displayHint.scaleFactor || 1)));
       const physicalH = Math.max(1, Math.round(Number(displayHint.bounds.height || 1) * Number(displayHint.scaleFactor || 1)));
-      const startResult = await Promise.resolve(bridge.startCapture({
-        sourceId,
-        displayId: displayHint.displayId,
-        maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
-        maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
-        toneMap: payload && payload.toneMap ? payload.toneMap : {},
-        displayHint
-      }));
+      const workerMode = bridgeSelection.route === 'wgc-v1';
+      let startResult = null;
+      if (workerMode) {
+        const workerStartPayload = {
+          sourceId,
+          displayId: displayHint.displayId,
+          maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+          maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
+          toneMap: payload && payload.toneMap ? payload.toneMap : {},
+          routePreference: requestedRoute,
+          displayHint
+        };
+        startResult = await hdrWorkerRequest('capture-start', workerStartPayload, 8000);
+        if (startResult && startResult.nativeSessionId) {
+          startResult.ok = true;
+        }
+      } else {
+        startResult = await Promise.resolve(bridge.startCapture({
+          sourceId,
+          displayId: displayHint.displayId,
+          maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+          maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
+          toneMap: payload && payload.toneMap ? payload.toneMap : {},
+          routePreference: requestedRoute,
+          displayHint
+        }));
+      }
 
       if (!startResult || !startResult.ok) {
         pushHdrTrace('shared-start-failed', {
@@ -1735,6 +1864,12 @@ app.whenReady().then(() => {
       const width = Math.max(1, Number(startResult.width || 1));
       const height = Math.max(1, Number(startResult.height || 1));
       const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
+      const sharedFrameBuffer = startResult.sharedFrameBuffer instanceof SharedArrayBuffer
+        ? startResult.sharedFrameBuffer
+        : null;
+      const sharedControlBuffer = startResult.sharedControlBuffer instanceof SharedArrayBuffer
+        ? startResult.sharedControlBuffer
+        : null;
       const frameServer = await ensureHdrFrameServer();
       const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
 
@@ -1746,6 +1881,12 @@ app.whenReady().then(() => {
       hdrSharedSessions.set(sessionId, {
         bridge,
         sender: _event.sender,
+        workerMode,
+        runtimeRoute: bridgeSelection.route,
+        fallbackLevel: bridgeSelection.fallbackLevel,
+        pipelineStage: bridgeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
+        requestedRoute,
+        nativeBackend: String(startResult.nativeBackend || bridgeSelection.backendLabel || 'windows-hdr-capture'),
         nativeSessionId: Number(startResult.nativeSessionId || 0),
         width,
         height,
@@ -1774,15 +1915,17 @@ app.whenReady().then(() => {
       if (frameToken) {
         hdrFrameTokens.set(frameToken, sessionId);
       }
-      // HTTP pull mode does not require shared-buffer bind.
-      // Start pumping immediately so renderer can fetch frames right away.
-      pumpHdrSharedSession(sessionId);
+      // Worker mode already maintains a non-blocking pump and exposes SAB directly.
+      if (!workerMode) {
+        pumpHdrSharedSession(sessionId);
+      }
       pushHdrTrace('shared-start-ok', {
         sessionId,
         nativeSessionId: Number(startResult.nativeSessionId || 0),
         width,
         height,
-        stride
+        stride,
+        runtimeRoute: bridgeSelection.route
       });
       return {
         ok: true,
@@ -1791,8 +1934,15 @@ app.whenReady().then(() => {
         height,
         stride,
         pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
+        runtimeRoute: bridgeSelection.route,
+        fallbackLevel: bridgeSelection.fallbackLevel,
+        pipelineStage: bridgeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
+        requestedRoute,
+        sharedFrameBuffer,
+        sharedControlBuffer,
         frameEndpoint,
-        frameToken
+        frameToken,
+        nativeBackend: String(startResult.nativeBackend || bridgeSelection.backendLabel || 'windows-hdr-capture')
       };
     } catch (error) {
       pushHdrTrace('shared-start-exception', {
@@ -1816,6 +1966,9 @@ app.whenReady().then(() => {
     if (!session) {
       pushHdrTrace('shared-bind-missing-session', { sessionId });
       return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
+    }
+    if (session.workerMode) {
+      return { ok: true, bound: false, reason: 'WORKER_MODE_DIRECT_SAB' };
     }
 
     const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
@@ -1865,24 +2018,30 @@ app.whenReady().then(() => {
         (!requestedDisplayId || !smokeDisplayId || smokeDisplayId === requestedDisplayId)
       )
       : Boolean(hdrNativeSmokeState.ok);
-    const nativeRouteEnabled = HDR_NATIVE_PUSH_IPC_ENABLED &&
+    const legacyRouteEnabled = HDR_NATIVE_PUSH_IPC_ENABLED &&
       HDR_NATIVE_LIVE_ROUTE_ENABLED &&
       hdrNativeSmokeState.ok &&
       smokeMatchesRequestedSource;
-    const reason = !HDR_NATIVE_PUSH_IPC_ENABLED
+    const nativeRouteEnabled = HDR_WGC_ROUTE_ENABLED || legacyRouteEnabled;
+    const reason = !HDR_WGC_ROUTE_ENABLED && !HDR_NATIVE_PUSH_IPC_ENABLED
       ? 'NATIVE_IPC_GUARD_BAD_MESSAGE_263'
-      : (!HDR_NATIVE_LIVE_ROUTE_ENABLED
+      : (!HDR_WGC_ROUTE_ENABLED && !HDR_NATIVE_LIVE_ROUTE_ENABLED
         ? 'NATIVE_LIVE_ROUTE_DISABLED'
-        : (!hdrNativeSmokeState.ran
+        : (!HDR_WGC_ROUTE_ENABLED && !hdrNativeSmokeState.ran
           ? 'NATIVE_SMOKE_REQUIRED'
-          : (!hdrNativeSmokeState.ok
+          : (!HDR_WGC_ROUTE_ENABLED && !hdrNativeSmokeState.ok
             ? 'NATIVE_SMOKE_FAILED'
-            : (!smokeMatchesRequestedSource ? 'NATIVE_SMOKE_STALE' : ''))));
+            : (!HDR_WGC_ROUTE_ENABLED && !smokeMatchesRequestedSource ? 'NATIVE_SMOKE_STALE' : ''))));
 
     const sessions = [];
     for (const [sessionId, session] of hdrSharedSessions) {
       sessions.push({
         sessionId,
+        runtimeRoute: String(session.runtimeRoute || 'native-legacy'),
+        fallbackLevel: Number(session.fallbackLevel || 2),
+        pipelineStage: String(session.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
+        requestedRoute: String(session.requestedRoute || 'auto'),
+        nativeBackend: String(session.nativeBackend || ''),
         frameSeq: Number(session.frameSeq || 0),
         readFailures: Number(session.readFailures || 0),
         totalReadFailures: Number(session.totalReadFailures || 0),
@@ -1899,11 +2058,16 @@ app.whenReady().then(() => {
       ok: true,
       nativeRouteEnabled,
       stage: HDR_NATIVE_PIPELINE_STAGE,
+      wgcRouteEnabled: HDR_WGC_ROUTE_ENABLED,
+      wgcStage: HDR_WGC_PIPELINE_STAGE,
+      routePreference: normalizeHdrRoutePreference(HDR_ROUTE_PREFERENCE),
       reason,
       envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
       envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       liveEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_LIVE',
       liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
+      wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
+      wgcEnvFlagEnabled: HDR_WGC_ROUTE_ENABLED,
       requestedSourceId,
       requestedDisplayId,
       smokeMatchesRequestedSource,
@@ -1922,6 +2086,11 @@ app.whenReady().then(() => {
       for (const [sessionId, sessionObj] of hdrSharedSessions) {
         sessions.push({
           sessionId,
+          runtimeRoute: String(sessionObj.runtimeRoute || 'native-legacy'),
+          fallbackLevel: Number(sessionObj.fallbackLevel || 2),
+          pipelineStage: String(sessionObj.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
+          requestedRoute: String(sessionObj.requestedRoute || 'auto'),
+          nativeBackend: String(sessionObj.nativeBackend || ''),
           frameSeq: Number(sessionObj.frameSeq || 0),
           readFailures: Number(sessionObj.readFailures || 0),
           totalReadFailures: Number(sessionObj.totalReadFailures || 0),
@@ -1937,9 +2106,14 @@ app.whenReady().then(() => {
       return {
         nativeRouteEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
         stage: HDR_NATIVE_PIPELINE_STAGE,
+        wgcRouteEnabled: HDR_WGC_ROUTE_ENABLED,
+        wgcStage: HDR_WGC_PIPELINE_STAGE,
+        routePreference: normalizeHdrRoutePreference(HDR_ROUTE_PREFERENCE),
         reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
         envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
         envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+        wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
+        wgcEnvFlagEnabled: HDR_WGC_ROUTE_ENABLED,
         diagnostics: {
           sharedSessionCount: sessions.length,
           sharedSessions: sessions

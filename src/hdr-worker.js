@@ -19,6 +19,7 @@ const state = {
   sharedControlView: null,
   pumpTimer: 0,
   bridge: null,
+  bridgeKind: "",
   bridgeError: "",
 };
 
@@ -53,26 +54,48 @@ function response(requestId, ok, payload = {}) {
   });
 }
 
-function loadBridge() {
+function normalizeRoutePreference(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "wgc" || v === "legacy" || v === "auto") {
+    return v;
+  }
+  return "auto";
+}
+
+function loadBridge(routePreference = "auto") {
   if (process.platform !== "win32") {
     state.bridge = null;
+    state.bridgeKind = "";
     state.bridgeError = "NOT_WINDOWS";
     return null;
   }
-  if (state.bridge) {
+  const requested = normalizeRoutePreference(routePreference);
+  const candidates = requested === "legacy" ? ["legacy", "wgc"] : ["wgc", "legacy"];
+  if (state.bridge && candidates.includes(state.bridgeKind)) {
     return state.bridge;
   }
-  try {
-    // eslint-disable-next-line global-require, import/no-dynamic-require
-    const bridge = require(path.join(__dirname, "..", "native", "windows-hdr-capture"));
-    state.bridge = bridge;
-    state.bridgeError = "";
-    return bridge;
-  } catch (error) {
-    state.bridge = null;
-    state.bridgeError = error && error.message ? error.message : "load failed";
-    return null;
+  state.bridge = null;
+  state.bridgeKind = "";
+  state.bridgeError = "";
+  for (const candidate of candidates) {
+    const modulePath =
+      candidate === "wgc"
+        ? path.join(__dirname, "..", "native", "windows-wgc-hdr-capture")
+        : path.join(__dirname, "..", "native", "windows-hdr-capture");
+    try {
+      // eslint-disable-next-line global-require, import/no-dynamic-require
+      const bridge = require(modulePath);
+      state.bridge = bridge;
+      state.bridgeKind = candidate;
+      state.bridgeError = "";
+      return bridge;
+    } catch (error) {
+      state.bridge = null;
+      state.bridgeKind = "";
+      state.bridgeError = error && error.message ? error.message : "load failed";
+    }
   }
+  return null;
 }
 
 function clearPumpTimer() {
@@ -121,7 +144,7 @@ async function stopCaptureInternal() {
   if (!state.session) {
     return;
   }
-  const bridge = loadBridge();
+  const bridge = loadBridge(state.session && state.session.routePreference ? state.session.routePreference : "auto");
   const nativeSessionId = Number(state.session.nativeSessionId || 0);
   state.session = null;
   state.latestFrameBytes = null;
@@ -137,7 +160,7 @@ async function pumpFrameLoop() {
   if (!state.session) {
     return;
   }
-  const bridge = loadBridge();
+  const bridge = loadBridge(state.session && state.session.routePreference ? state.session.routePreference : "auto");
   if (!bridge || typeof bridge.readFrame !== "function") {
     emit({ type: "error", error: state.bridgeError || "NATIVE_UNAVAILABLE" });
     await stopCaptureInternal();
@@ -184,13 +207,15 @@ async function handleRequest(requestId, command, payload) {
       lastFrameAt: state.lastFrameAt,
       meta: state.lastFrameMeta,
       hasFrame: Boolean(state.latestFrameBytes && state.latestFrameBytes.length > 0),
+      bridgeKind: state.bridgeKind || "",
       bridgeError: state.bridgeError || "",
     });
     return;
   }
 
   if (command === "capture-start") {
-    const bridge = loadBridge();
+    const routePreference = normalizeRoutePreference(payload && payload.routePreference ? payload.routePreference : "auto");
+    const bridge = loadBridge(routePreference);
     if (!bridge || typeof bridge.startCapture !== "function") {
       response(requestId, false, {
         reason: "NATIVE_UNAVAILABLE",
@@ -211,6 +236,7 @@ async function handleRequest(requestId, command, payload) {
 
     state.session = {
       nativeSessionId: Number(result.nativeSessionId || 0),
+      routePreference,
     };
     state.frameSeq = 0;
     state.lastFrameAt = 0;
@@ -230,6 +256,8 @@ async function handleRequest(requestId, command, payload) {
       height: state.lastFrameMeta.height,
       stride: state.lastFrameMeta.stride,
       pixelFormat: state.lastFrameMeta.pixelFormat,
+      runtimeRoute: state.bridgeKind === "wgc" ? "wgc-v1" : "native-legacy",
+      nativeBackend: String((result && result.nativeBackend) || (state.bridgeKind === "wgc" ? "windows-wgc-hdr-capture" : "windows-hdr-capture")),
       sharedFrameBuffer: state.sharedFrameBuffer,
       sharedControlBuffer: state.sharedControlBuffer,
     });
