@@ -23,6 +23,7 @@ const state = {
   bridgeError: "",
   pumpIntervalMs: 16,
   readTimeoutMs: 40,
+  noFrameStreak: 0,
   reusableFrameBuffer: null,
   reusableFrameLength: 0,
   perf: {
@@ -192,6 +193,7 @@ async function stopCaptureInternal() {
   const nativeSessionId = Number(state.session.nativeSessionId || 0);
   state.session = null;
   state.latestFrameBytes = null;
+  state.noFrameStreak = 0;
   state.perf.lastPumpAt = 0;
   state.perf.lastFrameAt = 0;
   if (bridge && typeof bridge.stopCapture === "function" && nativeSessionId > 0) {
@@ -221,6 +223,7 @@ async function pumpFrameLoop() {
   }
   state.perf.lastPumpAt = loopStartMs;
 
+  let gotFrame = false;
   try {
     const readStartMs = Number(process.hrtime.bigint()) / 1e6;
     const result = await Promise.resolve(
@@ -234,6 +237,8 @@ async function pumpFrameLoop() {
     if (result && result.ok) {
       const bytes = result.bytes;
       if (bytes && bytes.length) {
+        gotFrame = true;
+        state.noFrameStreak = 0;
         const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
         state.latestFrameBytes = toStableBuffer(bytes);
         const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
@@ -258,13 +263,19 @@ async function pumpFrameLoop() {
         }
         state.perf.lastFrameAt = nowTs;
       }
+    } else {
+      state.noFrameStreak += 1;
     }
   } catch (_error) {
+    state.noFrameStreak += 1;
   } finally {
     if (state.session) {
+      const baseInterval = Math.max(1, Number(state.pumpIntervalMs || 16));
+      const backoffMs = gotFrame ? 0 : Math.min(48, Math.max(0, state.noFrameStreak) * 2);
+      const nextDelay = baseInterval + backoffMs;
       state.pumpTimer = setTimeout(() => {
         pumpFrameLoop().catch(() => {});
-      }, Math.max(1, Number(state.pumpIntervalMs || 16)));
+      }, nextDelay);
     }
   }
 }
@@ -324,6 +335,7 @@ async function handleRequest(requestId, command, payload) {
     state.readTimeoutMs = Math.max(1, Math.min(120, state.pumpIntervalMs + 6));
     state.frameSeq = 0;
     state.lastFrameAt = 0;
+    state.noFrameStreak = 0;
     state.latestFrameBytes = null;
     state.lastFrameMeta = {
       width: Number(result.width || 0),

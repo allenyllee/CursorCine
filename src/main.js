@@ -1491,11 +1491,13 @@ function pumpHdrSharedSession(sessionId) {
       }
 
       session.readFailures = 0;
+      session.noFrameStreak = 0;
       session.lastReason = 'FRAME_OK';
       session.lastError = '';
     } else {
       session.readFailures += 1;
       session.totalReadFailures += 1;
+      session.noFrameStreak = Number(session.noFrameStreak || 0) + 1;
       session.lastReason = 'NO_FRAME';
       if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
@@ -1515,9 +1517,12 @@ function pumpHdrSharedSession(sessionId) {
     }
   } finally {
     if (hdrSharedSessions.has(sessionId)) {
+      const backoffMs = session.lastReason === 'FRAME_OK'
+        ? 0
+        : Math.min(48, Math.max(0, Number(session.noFrameStreak || 0)) * 2);
       session.pumpTimer = setTimeout(() => {
         pumpHdrSharedSession(sessionId);
-      }, HDR_SHARED_POLL_INTERVAL_MS);
+      }, HDR_SHARED_POLL_INTERVAL_MS + backoffMs);
     }
   }
 }
@@ -1597,11 +1602,13 @@ async function pumpHdrWorkerSession(sessionId) {
         session.perf.lastFrameAt = session.lastFrameAt;
       }
       session.readFailures = 0;
+      session.noFrameStreak = 0;
       session.lastReason = 'FRAME_OK';
       session.lastError = '';
     } else {
       session.readFailures += 1;
       session.totalReadFailures += 1;
+      session.noFrameStreak = Number(session.noFrameStreak || 0) + 1;
       session.lastReason = 'NO_FRAME';
     }
   } catch (error) {
@@ -1615,9 +1622,12 @@ async function pumpHdrWorkerSession(sessionId) {
     });
   } finally {
     if (hdrSharedSessions.has(sessionId)) {
+      const backoffMs = session.lastReason === 'FRAME_OK'
+        ? 0
+        : Math.min(48, Math.max(0, Number(session.noFrameStreak || 0)) * 2);
       session.pumpTimer = setTimeout(() => {
         pumpHdrWorkerSession(sessionId).catch(() => {});
-      }, HDR_SHARED_POLL_INTERVAL_MS);
+      }, HDR_SHARED_POLL_INTERVAL_MS + backoffMs);
     }
   }
 }
@@ -2069,6 +2079,7 @@ app.whenReady().then(() => {
         controlView,
         frameSeq: 0,
         readFailures: 0,
+        noFrameStreak: 0,
         totalReadFailures: 0,
         bytesPumped: 0,
         startedAt: Date.now(),
@@ -2233,6 +2244,7 @@ app.whenReady().then(() => {
         nativeBackend: String(session.nativeBackend || ''),
         frameSeq: Number(session.frameSeq || 0),
         readFailures: Number(session.readFailures || 0),
+        noFrameStreak: Number(session.noFrameStreak || 0),
         totalReadFailures: Number(session.totalReadFailures || 0),
         bytesPumped: Number(session.bytesPumped || 0),
         frameEndpoint: String(session.frameEndpoint || ''),
@@ -2291,6 +2303,7 @@ app.whenReady().then(() => {
           nativeBackend: String(sessionObj.nativeBackend || ''),
           frameSeq: Number(sessionObj.frameSeq || 0),
           readFailures: Number(sessionObj.readFailures || 0),
+          noFrameStreak: Number(sessionObj.noFrameStreak || 0),
           totalReadFailures: Number(sessionObj.totalReadFailures || 0),
           bytesPumped: Number(sessionObj.bytesPumped || 0),
           frameEndpoint: String(sessionObj.frameEndpoint || ''),
