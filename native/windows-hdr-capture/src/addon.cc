@@ -376,6 +376,37 @@ bool CaptureFrame(CaptureSession* session) {
     return false;
   }
 
+  // Composite current system cursor so native path matches desktop capture
+  // behavior (cursor included in recorded frame).
+  CURSORINFO cursorInfo;
+  std::memset(&cursorInfo, 0, sizeof(cursorInfo));
+  cursorInfo.cbSize = sizeof(cursorInfo);
+  if (GetCursorInfo(&cursorInfo) && (cursorInfo.flags & CURSOR_SHOWING) && cursorInfo.hCursor) {
+    ICONINFO iconInfo;
+    std::memset(&iconInfo, 0, sizeof(iconInfo));
+    if (GetIconInfo(cursorInfo.hCursor, &iconInfo)) {
+      const int32_t cursorX = static_cast<int32_t>(cursorInfo.ptScreenPos.x) - session->rect.x -
+          static_cast<int32_t>(iconInfo.xHotspot);
+      const int32_t cursorY = static_cast<int32_t>(cursorInfo.ptScreenPos.y) - session->rect.y -
+          static_cast<int32_t>(iconInfo.yHotspot);
+      DrawIconEx(session->captureDc,
+                 cursorX,
+                 cursorY,
+                 cursorInfo.hCursor,
+                 0,
+                 0,
+                 0,
+                 nullptr,
+                 DI_NORMAL | DI_DEFAULTSIZE);
+      if (iconInfo.hbmMask) {
+        DeleteObject(iconInfo.hbmMask);
+      }
+      if (iconInfo.hbmColor) {
+        DeleteObject(iconInfo.hbmColor);
+      }
+    }
+  }
+
   const size_t captureBytes =
       static_cast<size_t>(session->rect.width) * static_cast<size_t>(session->rect.height) * 4;
   if (captureBytes == 0 || captureBytes > kMaxFrameBytes) {
