@@ -809,10 +809,12 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    // Keep forwarding pointer input even in draw-active mode; drawing uses global hook events.
-    // This avoids overlay input capture side effects (for example HDR video planes turning black).
-    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    // Block clicks to background content while drawing.
+    // Use a lower always-on-top level than `screen-saver` to reduce compositor side effects.
+    overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+    overlayWindow.setIgnoreMouseEvents(false);
   } else if ((drawEnabled && wheelLocked) || pausedByOutside) {
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true);
 
     if (overlayWindow.isVisible()) {
@@ -825,6 +827,7 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true, { forward: true });
 
     if (overlayWindow.isVisible()) {
