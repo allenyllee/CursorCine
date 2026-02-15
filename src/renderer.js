@@ -240,6 +240,10 @@ const hdrMappingState = {
   mainTopBindFailures: 0,
   mainTopLastBindReason: '',
   mainTopLastBindError: '',
+  uiBindAttempts: 0,
+  uiBindFailures: 0,
+  uiBindLastReason: '',
+  uiBindLastError: '',
   mainTopLastReason: '',
   mainTopLastError: '',
   mainTopReadMsAvg: 0,
@@ -487,6 +491,7 @@ function updateHdrDiagStatus(message) {
     ', mainFrame=' + String(hdrMappingState.mainTopFrameSeq) +
     ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
     ', mainBind=' + String(hdrMappingState.mainTopBindFailures) + '/' + String(hdrMappingState.mainTopBindAttempts) +
+    ', uiBind=' + String(hdrMappingState.uiBindFailures) + '/' + String(hdrMappingState.uiBindAttempts) +
     ', mainReadMs=' + String(Number(hdrMappingState.mainTopReadMsAvg || 0).toFixed(2)) +
     ', mainCopyMs=' + String(Number(hdrMappingState.mainTopCopyMsAvg || 0).toFixed(2)) +
     ', mainJitMs=' + String(Number(hdrMappingState.mainTopPumpJitterMsAvg || 0).toFixed(2)) +
@@ -495,6 +500,8 @@ function updateHdrDiagStatus(message) {
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
     ', mainBindReason=' + String(hdrMappingState.mainTopLastBindReason || '-') +
     ', mainBindErr=' + String(hdrMappingState.mainTopLastBindError || '-') +
+    ', uiBindReason=' + String(hdrMappingState.uiBindLastReason || '-') +
+    ', uiBindErr=' + String(hdrMappingState.uiBindLastError || '-') +
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
@@ -633,6 +640,10 @@ async function copyHdrDiagnosticsSnapshot() {
       mainTopBindFailures: hdrMappingState.mainTopBindFailures,
       mainTopLastBindReason: hdrMappingState.mainTopLastBindReason,
       mainTopLastBindError: hdrMappingState.mainTopLastBindError,
+      uiBindAttempts: hdrMappingState.uiBindAttempts,
+      uiBindFailures: hdrMappingState.uiBindFailures,
+      uiBindLastReason: hdrMappingState.uiBindLastReason,
+      uiBindLastError: hdrMappingState.uiBindLastError,
       mainTopCopyMsAvg: hdrMappingState.mainTopCopyMsAvg,
       mainTopSabWriteMsAvg: hdrMappingState.mainTopSabWriteMsAvg,
       mainTopBytesPerFrameAvg: hdrMappingState.mainTopBytesPerFrameAvg,
@@ -2091,6 +2102,9 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   let sharedControlBuffer = start.sharedControlBuffer;
   let sharedBindOk = false;
   if (sharedPreferred && start && Number(start.sessionId || 0) > 0) {
+    hdrMappingState.uiBindAttempts += 1;
+    hdrMappingState.uiBindLastReason = '';
+    hdrMappingState.uiBindLastError = '';
     try {
       const frameBytes = Math.max(1024 * 1024, stride * height);
       sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
@@ -2118,16 +2132,22 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
         });
       }
       sharedBindOk = Boolean(bindResult && bindResult.ok && bindResult.bound);
+      hdrMappingState.uiBindLastReason = String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED'));
+      hdrMappingState.uiBindLastError = String((bindResult && bindResult.message) || '');
       pushHdrDecisionTrace('shared-bind', {
         ok: sharedBindOk,
         reason: String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED')),
         message: String((bindResult && bindResult.message) || '')
       });
       if (!sharedBindOk) {
+        hdrMappingState.uiBindFailures += 1;
         sharedFrameBuffer = null;
         sharedControlBuffer = null;
       }
     } catch (bindError) {
+      hdrMappingState.uiBindFailures += 1;
+      hdrMappingState.uiBindLastReason = 'BIND_EXCEPTION';
+      hdrMappingState.uiBindLastError = bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION';
       pushHdrDecisionTrace('shared-bind-exception', {
         message: bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION'
       });
@@ -2343,6 +2363,10 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopBindFailures = 0;
     hdrMappingState.mainTopLastBindReason = '';
     hdrMappingState.mainTopLastBindError = '';
+    hdrMappingState.uiBindAttempts = 0;
+    hdrMappingState.uiBindFailures = 0;
+    hdrMappingState.uiBindLastReason = '';
+    hdrMappingState.uiBindLastError = '';
     hdrMappingState.mainTopReadMsAvg = 0;
     hdrMappingState.mainTopCopyMsAvg = 0;
     hdrMappingState.mainTopSabWriteMsAvg = 0;
