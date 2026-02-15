@@ -264,6 +264,7 @@ const hdrMappingState = {
   nativeSmokeForSource: false,
   nativeSmokeReason: '',
   nativeSmokeAt: 0,
+  sharedBindCloneBlocked: false,
   recordingAttemptSeq: 0,
   recordingAttemptStartedAt: 0
 };
@@ -2003,7 +2004,9 @@ async function probeHdrNativeSupport(sourceId, displayId) {
   hdrMappingState.probeHdrActive = Boolean(probe && probe.hdrActive);
   hdrMappingState.probeReason = String((probe && probe.reason) || (probe && probe.supported ? 'OK' : 'UNKNOWN'));
   const isolated = typeof window !== 'undefined' && window.crossOriginIsolated === true;
-  const isoTag = isolated ? 'SAB:OK' : 'SAB:OFF';
+  const isoTag = hdrMappingState.sharedBindCloneBlocked
+    ? 'SAB:BLOCKED'
+    : (isolated ? 'SAB:OK' : 'SAB:OFF');
 
   if (probe && probe.supported) {
     setHdrProbeStatus('Probe: Native 可用（' + (probe.hdrActive ? 'HDR 螢幕' : 'SDR/未知') + '，' + isoTag + '）');
@@ -2101,7 +2104,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   let sharedFrameBuffer = start.sharedFrameBuffer;
   let sharedControlBuffer = start.sharedControlBuffer;
   let sharedBindOk = false;
-  if (sharedPreferred && start && Number(start.sessionId || 0) > 0) {
+  if (sharedPreferred && !hdrMappingState.sharedBindCloneBlocked && start && Number(start.sessionId || 0) > 0) {
     hdrMappingState.uiBindAttempts += 1;
     hdrMappingState.uiBindLastReason = '';
     hdrMappingState.uiBindLastError = '';
@@ -2148,6 +2151,10 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       hdrMappingState.uiBindFailures += 1;
       hdrMappingState.uiBindLastReason = 'BIND_EXCEPTION';
       hdrMappingState.uiBindLastError = bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION';
+      if (/could not be cloned|clone/i.test(String(hdrMappingState.uiBindLastError))) {
+        hdrMappingState.sharedBindCloneBlocked = true;
+        hdrMappingState.uiBindLastReason = 'BIND_CLONE_BLOCKED';
+      }
       pushHdrDecisionTrace('shared-bind-exception', {
         message: bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION'
       });
