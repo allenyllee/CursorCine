@@ -258,8 +258,6 @@ async function handleRequest(requestId, command, payload) {
       pixelFormat: state.lastFrameMeta.pixelFormat,
       runtimeRoute: state.bridgeKind === "wgc" ? "wgc-v1" : "native-legacy",
       nativeBackend: String((result && result.nativeBackend) || (state.bridgeKind === "wgc" ? "windows-wgc-hdr-capture" : "windows-hdr-capture")),
-      sharedFrameBuffer: state.sharedFrameBuffer,
-      sharedControlBuffer: state.sharedControlBuffer,
     });
     return;
   }
