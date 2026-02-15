@@ -1882,7 +1882,6 @@ app.whenReady().then(() => {
     overlayReentryGraceUntil = 0;
     overlaySafeArmUntil = 0;
     overlaySafeReleaseUntil = 0;
-    overlaySafeReleaseUntil = 0;
     if (overlayReentryGraceTimer) {
       clearTimeout(overlayReentryGraceTimer);
       overlayReentryGraceTimer = null;
