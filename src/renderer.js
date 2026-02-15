@@ -1923,8 +1923,8 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       maxFps: 60,
       toneMap: {
         profile: 'rec709-rolloff-v1',
-        rolloff: 0.0,
-        saturation: 1.0
+        rolloff: 0.35,
+        saturation: 0.95
       }
     });
   } catch (error) {
