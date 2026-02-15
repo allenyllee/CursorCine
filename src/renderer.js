@@ -2095,11 +2095,21 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       const frameBytes = Math.max(1024 * 1024, stride * height);
       sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
       sharedControlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * HDR_SHARED_CONTROL_SLOTS);
-      let bindResult = await electronAPI.hdrSharedBind({
-        sessionId: Number(start.sessionId || 0),
-        sharedFrameBuffer,
-        sharedControlBuffer
-      });
+      let bindResult = null;
+      try {
+        bindResult = await electronAPI.hdrSharedBind({
+          sessionId: Number(start.sessionId || 0),
+          sharedFrameBuffer,
+          sharedControlBuffer
+        });
+      } catch (bindInvokeError) {
+        bindResult = {
+          ok: false,
+          bound: false,
+          reason: 'BIND_INVOKE_CLONE_ERROR',
+          message: bindInvokeError && bindInvokeError.message ? bindInvokeError.message : 'bind invoke clone error'
+        };
+      }
       if (!bindResult || !bindResult.ok) {
         bindResult = await electronAPI.hdrSharedBindAsync({
           sessionId: Number(start.sessionId || 0),
