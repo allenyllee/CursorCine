@@ -21,6 +21,8 @@ const state = {
   bridge: null,
   bridgeKind: "",
   bridgeError: "",
+  pumpIntervalMs: 16,
+  readTimeoutMs: 40,
 };
 
 const CONTROL_INDEX = {
@@ -171,7 +173,7 @@ async function pumpFrameLoop() {
     const result = await Promise.resolve(
       bridge.readFrame({
         nativeSessionId: Number(state.session.nativeSessionId || 0),
-        timeoutMs: 80,
+        timeoutMs: Number(state.readTimeoutMs || 40),
       })
     );
     if (result && result.ok) {
@@ -194,7 +196,7 @@ async function pumpFrameLoop() {
     if (state.session) {
       state.pumpTimer = setTimeout(() => {
         pumpFrameLoop().catch(() => {});
-      }, 33);
+      }, Math.max(1, Number(state.pumpIntervalMs || 16)));
     }
   }
 }
@@ -208,6 +210,8 @@ async function handleRequest(requestId, command, payload) {
       meta: state.lastFrameMeta,
       hasFrame: Boolean(state.latestFrameBytes && state.latestFrameBytes.length > 0),
       bridgeKind: state.bridgeKind || "",
+      pumpIntervalMs: Number(state.pumpIntervalMs || 0),
+      readTimeoutMs: Number(state.readTimeoutMs || 0),
       bridgeError: state.bridgeError || "",
     });
     return;
@@ -238,6 +242,9 @@ async function handleRequest(requestId, command, payload) {
       nativeSessionId: Number(result.nativeSessionId || 0),
       routePreference,
     };
+    const maxFps = Math.max(1, Math.min(120, Number(payload && payload.maxFps ? payload.maxFps : 60)));
+    state.pumpIntervalMs = Math.max(1, Math.floor(1000 / maxFps));
+    state.readTimeoutMs = Math.max(1, Math.min(120, state.pumpIntervalMs + 6));
     state.frameSeq = 0;
     state.lastFrameAt = 0;
     state.latestFrameBytes = null;
