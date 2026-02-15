@@ -218,6 +218,7 @@ const hdrMappingState = {
   runtimeRoute: 'fallback',
   runtimeBackend: '',
   runtimeStage: '',
+  runtimeTransportMode: '',
   routePreference: 'auto',
   fallbackLevel: 3,
   probeSupported: false,
@@ -364,6 +365,37 @@ function normalizeHdrRoutePreference(value) {
   return 'auto';
 }
 
+function normalizeHdrTransportMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'shared-buffer' || mode === 'http-fallback') {
+    return mode;
+  }
+  return '';
+}
+
+function getHdrRouteLabel(route, transportMode = '') {
+  const runtimeRoute = String(route || 'fallback');
+  if (runtimeRoute === 'fallback') {
+    return 'Fallback';
+  }
+  const mode = normalizeHdrTransportMode(transportMode);
+  return mode ? (runtimeRoute + '/' + mode) : runtimeRoute;
+}
+
+function getEffectiveHdrTransportMode() {
+  const mapped = normalizeHdrTransportMode(hdrMappingState.runtimeTransportMode);
+  if (mapped) {
+    return mapped;
+  }
+  if (nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView) {
+    return 'shared-buffer';
+  }
+  if (nativeHdrState.frameEndpoint) {
+    return 'http-fallback';
+  }
+  return '';
+}
+
 function updateHdrMappingStatusUi() {
   if (hdrMappingRuntimeEl) {
     hdrMappingRuntimeEl.textContent = hdrRuntimeStatusMessage;
@@ -376,10 +408,12 @@ function updateHdrMappingStatusUi() {
   }
 }
 
-function setHdrRuntimeRoute(route, message) {
+function setHdrRuntimeRoute(route, message, transportMode) {
   hdrMappingState.runtimeRoute = String(route || 'fallback');
-  const isNativeRoute = hdrMappingState.runtimeRoute !== 'fallback';
-  hdrRuntimeStatusMessage = message || (isNativeRoute ? ('目前路徑: ' + hdrMappingState.runtimeRoute) : '目前路徑: Fallback');
+  if (transportMode !== undefined) {
+    hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(transportMode);
+  }
+  hdrRuntimeStatusMessage = message || ('目前路徑: ' + getHdrRouteLabel(hdrMappingState.runtimeRoute, getEffectiveHdrTransportMode()));
   updateHdrMappingStatusUi();
 }
 
@@ -403,7 +437,8 @@ function updateHdrDiagStatus(message) {
     : '-';
   hdrDiagStatusMessage =
     'Diag: attempt=' + attemptLabel +
-    ', route=' + String(hdrMappingState.runtimeRoute || '-') +
+    ', route=' + String(getHdrRouteLabel(hdrMappingState.runtimeRoute || '-', getEffectiveHdrTransportMode())) +
+    ', stage=' + String(hdrMappingState.runtimeStage || '-') +
     ', pref=' + String(hdrMappingState.routePreference || 'auto') +
     ', level=' + String(hdrMappingState.fallbackLevel || 3) +
     ', fallback=' + String(hdrMappingState.fallbackCount) +
@@ -539,6 +574,7 @@ async function copyHdrDiagnosticsSnapshot() {
       hdrRuntimeRoute: hdrMappingState.runtimeRoute,
       hdrRuntimeBackend: hdrMappingState.runtimeBackend,
       hdrRuntimeStage: hdrMappingState.runtimeStage,
+      hdrRuntimeTransportMode: hdrMappingState.runtimeTransportMode,
       hdrRoutePreference: hdrMappingState.routePreference,
       hdrFallbackLevel: hdrMappingState.fallbackLevel,
       hdrRuntimeStatusMessage,
@@ -2010,13 +2046,14 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   nativeHdrState.lastHttpFrameSeq = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
   hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
+  hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(start.transportMode || '');
   hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
-    (start && start.transportMode ? ('/' + String(start.transportMode)) : '');
+    (hdrMappingState.runtimeTransportMode ? ('/' + hdrMappingState.runtimeTransportMode) : '');
   hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));
   hdrMappingState.routePreference = normalizeHdrRoutePreference(start.requestedRoute || routePreference);
 
   ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
-  setHdrRuntimeRoute(String(start.runtimeRoute || 'native-legacy'), '目前路徑: ' + String(start.runtimeRoute || 'native-legacy'));
+  setHdrRuntimeRoute(String(start.runtimeRoute || 'native-legacy'), null, hdrMappingState.runtimeTransportMode);
 
   await pollNativeHdrFrame();
   return { ok: true, start };
@@ -2179,6 +2216,7 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeRouteStage = '';
     hdrMappingState.runtimeBackend = '';
     hdrMappingState.runtimeStage = '';
+    hdrMappingState.runtimeTransportMode = '';
     hdrMappingState.routePreference = 'auto';
     hdrMappingState.fallbackLevel = 3;
     hdrMappingState.mainSharedSessionCount = 0;
@@ -2212,6 +2250,7 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeRouteReason = String(result.reason || (result.nativeRouteEnabled ? 'OK' : 'NATIVE_ROUTE_DISABLED'));
   hdrMappingState.nativeRouteStage = String(result.stage || '');
   hdrMappingState.runtimeStage = String(result.wgcStage || result.stage || '');
+  hdrMappingState.runtimeTransportMode = '';
   hdrMappingState.routePreference = normalizeHdrRoutePreference(result.routePreference || hdrMappingState.routePreference);
   const diagnostics = result.diagnostics || {};
   const sessions = Array.isArray(diagnostics.sharedSessions) ? diagnostics.sharedSessions : [];
@@ -2235,7 +2274,11 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
   if (top && top.runtimeRoute) {
-    hdrMappingState.runtimeRoute = String(top.runtimeRoute || hdrMappingState.runtimeRoute || 'fallback');
+    const topTransportMode = normalizeHdrTransportMode(top.transportMode || '') ||
+      (top.supportsSharedFrameRead ? 'shared-buffer' : '');
+    hdrMappingState.runtimeTransportMode = topTransportMode;
+    hdrMappingState.runtimeStage = String((top.pipelineStage || '') + (topTransportMode ? ('/' + topTransportMode) : '')) || hdrMappingState.runtimeStage;
+    setHdrRuntimeRoute(String(top.runtimeRoute || hdrMappingState.runtimeRoute || 'fallback'), null, topTransportMode);
   }
   hdrMappingState.runtimeBackend = String((top && top.nativeBackend) || '');
   hdrMappingState.fallbackLevel = Number((top && top.fallbackLevel) || hdrMappingState.fallbackLevel || 3);
@@ -3508,7 +3551,7 @@ async function startRecording() {
     : '音訊: 無';
 
   const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || (captureRoute && captureRoute.route) || 'fallback');
-  const routeLabel = runtimeRoute === 'fallback' ? 'Fallback' : runtimeRoute;
+  const routeLabel = getHdrRouteLabel(runtimeRoute, getEffectiveHdrTransportMode());
   setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
