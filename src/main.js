@@ -871,7 +871,30 @@ function applyOverlayMouseMode() {
     } else {
       overlayWindow.setIgnoreMouseEvents(false);
     }
-  } else if ((drawEnabled && wheelLocked) || pausedByOutside) {
+  } else if (drawEnabled && wheelLocked) {
+    // In safe mode, keep intercepting while wheel-lock is active so the
+    // first stroke right after wheel input does not click-through.
+    if (OVERLAY_SAFE_MODE && pointerInside) {
+      if (!overlayWindow.isVisible()) {
+        if (typeof overlayWindow.showInactive === "function") {
+          overlayWindow.showInactive();
+        } else {
+          overlayWindow.show();
+        }
+      }
+      overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+      overlayWindow.setIgnoreMouseEvents(false);
+    } else {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+      overlayWindow.setIgnoreMouseEvents(true);
+
+      if (overlayWindow.isVisible()) {
+        overlayWindow.hide();
+      }
+
+      overlayWindow.blur();
+    }
+  } else if (pausedByOutside) {
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true);
 
