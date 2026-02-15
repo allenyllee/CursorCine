@@ -10,7 +10,7 @@
     "predist:win": "node scripts/check-dist-win-env.js && npm run build:native-hdr-win",
     "dist:win": "electron-builder --win nsis",
     "dist:linux": "electron-builder --linux AppImage deb",
-    "build:native-hdr-win": "node-gyp rebuild --directory native/windows-hdr-capture"
+    "build:native-hdr-win": "node scripts/build-native-hdr-win.js"
   },
   "author": {
     "name": "allenyl",
