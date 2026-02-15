@@ -23,6 +23,8 @@ const state = {
   bridgeError: "",
   pumpIntervalMs: 16,
   readTimeoutMs: 40,
+  reusableFrameBuffer: null,
+  reusableFrameLength: 0,
   perf: {
     readMsAvg: 0,
     copyMsAvg: 0,
@@ -125,6 +127,23 @@ function ewma(prev, sample, alpha = 0.2) {
   return p > 0 ? (p * (1 - alpha) + s * alpha) : s;
 }
 
+function toStableBuffer(bytes) {
+  if (!bytes || !bytes.length) {
+    return null;
+  }
+  if (Buffer.isBuffer(bytes)) {
+    return bytes;
+  }
+  const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const required = Number(input.length || 0);
+  if (!state.reusableFrameBuffer || state.reusableFrameBuffer.length < required) {
+    state.reusableFrameBuffer = Buffer.allocUnsafe(required);
+  }
+  state.reusableFrameBuffer.set(input.subarray(0, required), 0);
+  state.reusableFrameLength = required;
+  return state.reusableFrameBuffer.subarray(0, state.reusableFrameLength);
+}
+
 function ensureSharedBuffers(frameByteLength) {
   const safeLength = Math.max(1024 * 1024, Number(frameByteLength || 0));
   if (!state.sharedFrameBuffer || !state.sharedFrameView || state.sharedFrameView.length < safeLength) {
@@ -216,7 +235,7 @@ async function pumpFrameLoop() {
       const bytes = result.bytes;
       if (bytes && bytes.length) {
         const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
-        state.latestFrameBytes = Buffer.from(bytes);
+        state.latestFrameBytes = toStableBuffer(bytes);
         const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
         state.perf.copyMsAvg = ewma(state.perf.copyMsAvg, copyEndMs - copyStartMs);
         state.frameSeq += 1;

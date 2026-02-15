@@ -1453,7 +1453,7 @@ function pumpHdrSharedSession(sessionId) {
       session.latestHeight = height;
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
-      session.latestFrameBytes = Buffer.from(src);
+      session.latestFrameBytes = src;
       const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
       if (session.perf) {
         session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
@@ -1561,7 +1561,7 @@ async function pumpHdrWorkerSession(sessionId) {
       session.latestHeight = height;
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
-      session.latestFrameBytes = Buffer.from(src);
+      session.latestFrameBytes = src;
       const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
       if (session.perf) {
         session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
