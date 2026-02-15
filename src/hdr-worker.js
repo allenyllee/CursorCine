@@ -48,7 +48,16 @@ const CONTROL_INDEX = {
   BYTE_LENGTH: 5,
   TS_LOW: 6,
   TS_HIGH: 7,
+  PIXEL_FORMAT: 8,
 };
+
+function encodePixelFormat(value) {
+  const fmt = String(value || "").trim().toUpperCase();
+  if (fmt === "BGRA8") {
+    return 2;
+  }
+  return 1; // RGBA8 default
+}
 
 function emit(message) {
   const payload = message || {};
@@ -178,6 +187,11 @@ function writeFrameToSharedBuffer(result, bytes) {
   Atomics.store(state.sharedControlView, CONTROL_INDEX.BYTE_LENGTH, len);
   Atomics.store(state.sharedControlView, CONTROL_INDEX.TS_LOW, tsLow);
   Atomics.store(state.sharedControlView, CONTROL_INDEX.TS_HIGH, tsHigh);
+  Atomics.store(
+    state.sharedControlView,
+    CONTROL_INDEX.PIXEL_FORMAT,
+    encodePixelFormat(result && result.pixelFormat ? result.pixelFormat : state.lastFrameMeta.pixelFormat)
+  );
   Atomics.store(state.sharedControlView, CONTROL_INDEX.FRAME_SEQ, seq);
   Atomics.store(state.sharedControlView, CONTROL_INDEX.STATUS, 1);
   const t1 = Number(process.hrtime.bigint()) / 1e6;

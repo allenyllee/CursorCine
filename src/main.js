@@ -43,8 +43,17 @@ const HDR_SHARED_CONTROL = {
   STRIDE: 4,
   BYTE_LENGTH: 5,
   TS_LOW: 6,
-  TS_HIGH: 7
+  TS_HIGH: 7,
+  PIXEL_FORMAT: 8
 };
+
+function encodeHdrPixelFormat(value) {
+  const fmt = String(value || '').trim().toUpperCase();
+  if (fmt === 'BGRA8') {
+    return 2;
+  }
+  return 1; // RGBA8 default
+}
 
 let clickHookEnabled = false;
 let clickHookError = '';
@@ -1471,6 +1480,7 @@ function pumpHdrSharedSession(sessionId) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.BYTE_LENGTH, len);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_LOW, tsLow);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.PIXEL_FORMAT, encodeHdrPixelFormat(session.latestPixelFormat));
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
         const sabEndMs = Number(process.hrtime.bigint()) / 1e6;
@@ -1584,6 +1594,7 @@ async function pumpHdrWorkerSession(sessionId) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.BYTE_LENGTH, len);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_LOW, tsLow);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.PIXEL_FORMAT, encodeHdrPixelFormat(session.latestPixelFormat));
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
         const sabEndMs = Number(process.hrtime.bigint()) / 1e6;

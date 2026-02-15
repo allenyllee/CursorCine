@@ -373,6 +373,14 @@ function normalizeHdrTransportMode(value) {
   return '';
 }
 
+function decodeSharedPixelFormat(code) {
+  const n = Number(code || 0);
+  if (n === 2) {
+    return 'BGRA8';
+  }
+  return 'RGBA8';
+}
+
 function getHdrRouteLabel(route, transportMode = '') {
   const runtimeRoute = String(route || 'fallback');
   if (runtimeRoute === 'fallback') {
@@ -1749,6 +1757,7 @@ function tryReadNativeFrameFromSharedBuffer() {
   const height = Math.max(1, Atomics.load(control, 3));
   const stride = Math.max(width * 4, Atomics.load(control, 4));
   const byteLength = Math.max(0, Atomics.load(control, 5));
+  const pixelFormatCode = Atomics.load(control, 8);
   if (byteLength <= 0 || byteLength > frameView.length) {
     return null;
   }
@@ -1760,7 +1769,7 @@ function tryReadNativeFrameFromSharedBuffer() {
     width,
     height,
     stride,
-    pixelFormat: 'RGBA8',
+    pixelFormat: decodeSharedPixelFormat(pixelFormatCode),
     bytes: frameView.slice(0, byteLength)
   };
 }
