@@ -65,6 +65,7 @@ let mainWindow = null;
 let overlayPenEnabled = false;
 let overlayDrawToggle = false;
 let overlayAltPressed = false;
+let overlayCtrlChordActive = false;
 let overlayWheelLockUntil = 0;
 let overlayWheelResumeTimer = null;
 
@@ -847,15 +848,38 @@ function initGlobalClickHook() {
       emitOverlayPointer();
     });
     uIOhook.on('keydown', (event) => {
-      if (!isOverlayToggleKey(event)) {
+      const isCtrlKey = isOverlayToggleKey(event);
+      if (!isCtrlKey) {
+        if (overlayAltPressed) {
+          // Ctrl+<key> chord (for example Ctrl+C) should not toggle overlay draw mode.
+          overlayCtrlChordActive = true;
+        }
         return;
       }
       if (overlayAltPressed) {
         return;
       }
       overlayAltPressed = true;
+      overlayCtrlChordActive = false;
 
       if (!overlayPenEnabled) {
+        return;
+      }
+    });
+    uIOhook.on('keyup', (event) => {
+      if (!isOverlayToggleKey(event)) {
+        return;
+      }
+      if (!overlayAltPressed) {
+        return;
+      }
+      overlayAltPressed = false;
+
+      if (!overlayPenEnabled) {
+        return;
+      }
+      if (overlayCtrlChordActive) {
+        overlayCtrlChordActive = false;
         return;
       }
 
@@ -880,12 +904,7 @@ function initGlobalClickHook() {
 
       applyOverlayMouseMode();
       emitOverlayPointer();
-    });
-    uIOhook.on('keyup', (event) => {
-      if (!isOverlayToggleKey(event)) {
-        return;
-      }
-      overlayAltPressed = false;
+      overlayCtrlChordActive = false;
     });
     uIOhook.on('wheel', () => {
       pauseOverlayByWheel();
