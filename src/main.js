@@ -797,6 +797,7 @@ function applyOverlayMouseMode() {
   const capturePointer = overlayDrawActive() && pointerInside;
   const shouldKeepVisible = drawEnabled && !wheelLocked && pointerInside;
   const pausedByOutside = drawEnabled && !wheelLocked && !pointerInside;
+  const shouldBlockBackground = Boolean(shouldKeepVisible && mouseDown);
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -809,10 +810,14 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    // Block clicks to background content while drawing.
-    // Use a lower always-on-top level than `screen-saver` to reduce compositor side effects.
+    // Keep forward mode by default to avoid compositor black-screen side effects.
+    // Only block background input while the user is actively drawing (mouse down).
     overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
-    overlayWindow.setIgnoreMouseEvents(false);
+    if (shouldBlockBackground) {
+      overlayWindow.setIgnoreMouseEvents(false);
+    } else {
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    }
   } else if ((drawEnabled && wheelLocked) || pausedByOutside) {
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true);
