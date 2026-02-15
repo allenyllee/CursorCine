@@ -781,7 +781,16 @@ function emitOverlayPointer() {
   });
 
   if (overlayLastPointerInside === null || overlayLastPointerInside !== inside) {
+    const wasInside = overlayLastPointerInside;
     overlayLastPointerInside = inside;
+
+    // Re-entering target display can leave HDR video composition in a bad state on some GPUs.
+    // Perform a short overlay pause/resume cycle (same mechanism as wheel pause) automatically.
+    if (inside && wasInside === false && overlayDrawEnabled()) {
+      overlayWheelLockUntil = Date.now() + 140;
+      scheduleOverlayWheelResume();
+    }
+
     applyOverlayMouseMode();
   }
 }
