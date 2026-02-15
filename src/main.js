@@ -117,6 +117,7 @@ let hdrNativeSmokeState = {
 };
 const OVERLAY_WHEEL_PAUSE_MS = 450;
 const OVERLAY_REENTRY_GRACE_MS = 1200;
+const OVERLAY_SAFE_MODE = String(process.env.CURSORCINE_OVERLAY_SAFE_MODE || '0') === '1';
 let crossOriginIsolationHeadersInstalled = false;
 
 function pushHdrTrace(type, detail = {}) {
@@ -829,6 +830,8 @@ function applyOverlayMouseMode() {
   const shouldKeepVisible = drawEnabled && !wheelLocked && pointerInside;
   const pausedByOutside = drawEnabled && !wheelLocked && !pointerInside;
   const inReentryGrace = shouldKeepVisible && now < overlayReentryGraceUntil;
+  const shouldBlockBackground = shouldKeepVisible && !inReentryGrace &&
+    (OVERLAY_SAFE_MODE ? Boolean(mouseDown) : true);
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -841,9 +844,10 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    // In draw-active mode, block background interactions to match pen-mode expectation.
+    // In draw-active mode, default behavior blocks background interactions.
+    // Safe mode only blocks while actively drawing (mouse down).
     overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
-    if (inReentryGrace) {
+    if (!shouldBlockBackground) {
       overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     } else {
       overlayWindow.setIgnoreMouseEvents(false);
@@ -1896,6 +1900,7 @@ app.whenReady().then(() => {
       ok: true,
       toggleMode: clickHookEnabled,
       toggleKey: 'Ctrl',
+      safeMode: OVERLAY_SAFE_MODE,
       wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
     };
   });
