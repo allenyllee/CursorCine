@@ -61,6 +61,7 @@ const glowCoreLabel = document.getElementById('glowCoreLabel');
 const glowOpacityInput = document.getElementById('glowOpacityInput');
 const glowOpacityLabel = document.getElementById('glowOpacityLabel');
 const penToggleBtn = document.getElementById('penToggleBtn');
+const penInteractionModeSelect = document.getElementById('penInteractionModeSelect');
 const penColorInput = document.getElementById('penColorInput');
 const penSizeInput = document.getElementById('penSizeInput');
 const penSizeLabel = document.getElementById('penSizeLabel');
@@ -202,6 +203,7 @@ const glowState = {
 
 const annotationState = {
   enabled: true,
+  interactionMode: 'stable',
   color: penColorInput?.value || DEFAULT_PEN_COLOR,
   size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
 };
@@ -358,6 +360,10 @@ function getRecordingAudioModeLabel() {
   return `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`;
 }
 
+function getPenInteractionModeLabel(mode) {
+  return String(mode || '').trim().toLowerCase() === 'smooth' ? '流暢優先' : '穩定優先';
+}
+
 function refreshRecordingStatusLine() {
   if (!(mediaRecorder && mediaRecorder.state === 'recording')) {
     return;
@@ -366,7 +372,8 @@ function refreshRecordingStatusLine() {
   const routeLabel = getHdrRouteLabel(runtimeRoute, getEffectiveHdrTransportMode());
   const qualityLabel = String((recordingQualityPreset && recordingQualityPreset.label) || '平衡');
   const audioMode = getRecordingAudioModeLabel();
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+  const penModeLabel = getPenInteractionModeLabel(annotationState.interactionMode);
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫筆互動: ' + penModeLabel + ' | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
 async function withTimeout(promise, ms, message) {
@@ -3780,13 +3787,21 @@ async function setPenMode(enabled) {
   try {
     const mode = await electronAPI.overlaySetEnabled(enabled);
     if (enabled && mode && mode.toggleMode) {
-      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉）';
+      const interactionMode = String(mode.interactionMode || annotationState.interactionMode || 'stable');
+      annotationState.interactionMode = interactionMode === 'smooth' ? 'smooth' : 'stable';
+      if (penInteractionModeSelect) {
+        penInteractionModeSelect.value = annotationState.interactionMode;
+      }
+      const wheelPauseMs = Number(mode.wheelPauseMs || 0);
+      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉；滾輪暫停 ' + wheelPauseMs + 'ms）';
+      refreshRecordingStatusLine();
       return;
     }
   } catch (_error) {
   }
 
   penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）' : '畫筆模式: 關';
+  refreshRecordingStatusLine();
 }
 
 playheadInput.addEventListener('input', () => {
@@ -4001,6 +4016,23 @@ penToggleBtn.addEventListener('click', () => {
   setPenMode(!annotationState.enabled).catch(() => {});
 });
 
+if (penInteractionModeSelect) {
+  penInteractionModeSelect.addEventListener('change', async () => {
+    const selectedMode = String(penInteractionModeSelect.value || 'stable').toLowerCase() === 'smooth' ? 'smooth' : 'stable';
+    annotationState.interactionMode = selectedMode;
+    const result = await electronAPI.overlaySetInteractionMode(selectedMode).catch(() => null);
+    if (result && result.ok) {
+      annotationState.interactionMode = String(result.interactionMode || selectedMode) === 'smooth' ? 'smooth' : 'stable';
+      penInteractionModeSelect.value = annotationState.interactionMode;
+      if (annotationState.enabled) {
+        const wheelPauseMs = Number(result.wheelPauseMs || 0);
+        penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉；滾輪暫停 ' + wheelPauseMs + 'ms）';
+      }
+    }
+    refreshRecordingStatusLine();
+  });
+}
+
 penColorInput.addEventListener('input', () => {
   annotationState.color = penColorInput.value;
   syncPenStyleToOverlay();
@@ -4034,6 +4066,9 @@ stopBtn.addEventListener('click', stopRecording);
 setEditorVisible(false);
 updateEditorButtons();
 setExportDebug('待命', 'MODE_AUTO', '目前模式: 自動（ffmpeg 優先）');
+if (penInteractionModeSelect) {
+  penInteractionModeSelect.value = annotationState.interactionMode;
+}
 setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);

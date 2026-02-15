@@ -117,15 +117,46 @@ let hdrNativeSmokeState = {
   readReason: '',
   stopReason: ''
 };
-const OVERLAY_WHEEL_PAUSE_MS = 450;
-const OVERLAY_REENTRY_GRACE_MS = 1200;
 const OVERLAY_SAFE_MODE = String(process.env.CURSORCINE_OVERLAY_SAFE_MODE || '0') === '1';
-const OVERLAY_SAFE_ARM_MS = 320;
-const OVERLAY_SAFE_RELEASE_MS = Math.max(
+const OVERLAY_SAFE_RELEASE_MS_BASE = Math.max(
   120,
   Math.min(1200, Number(process.env.CURSORCINE_OVERLAY_SAFE_RELEASE_MS || 360) || 360)
 );
+const OVERLAY_INTERACTION_MODE_DEFAULT = String(process.env.CURSORCINE_OVERLAY_INTERACTION_MODE || 'stable').trim().toLowerCase();
+let overlayInteractionMode = OVERLAY_INTERACTION_MODE_DEFAULT === 'smooth' ? 'smooth' : 'stable';
 let crossOriginIsolationHeadersInstalled = false;
+
+function normalizeOverlayInteractionMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return mode === 'smooth' ? 'smooth' : 'stable';
+}
+
+function getOverlayInteractionProfile() {
+  if (overlayInteractionMode === 'smooth') {
+    return {
+      mode: 'smooth',
+      wheelPauseMs: 55,
+      reentryPauseMs: 30,
+      reentryGraceMs: 180,
+      reentryClickThrough: true,
+      keepWheelLockIntercept: false,
+      wheelHideOverlay: false,
+      safeArmMs: 30,
+      safeReleaseMs: 35
+    };
+  }
+  return {
+    mode: 'stable',
+    wheelPauseMs: 450,
+    reentryPauseMs: 140,
+    reentryGraceMs: 1200,
+    reentryClickThrough: false,
+    keepWheelLockIntercept: true,
+    wheelHideOverlay: true,
+    safeArmMs: 320,
+    safeReleaseMs: OVERLAY_SAFE_RELEASE_MS_BASE
+  };
+}
 
 function pushHdrTrace(type, detail = {}) {
   hdrTrace.push({
@@ -726,23 +757,38 @@ function pauseOverlayByWheel() {
   if (!overlayDrawEnabled()) {
     return;
   }
+  const profile = getOverlayInteractionProfile();
 
-  overlayWheelLockUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
+  overlayWheelLockUntil = Date.now() + profile.wheelPauseMs;
   if (OVERLAY_SAFE_MODE) {
     // After wheel-pause resumes, keep a short capture window to avoid
     // immediate click-through on the first pointer interaction.
     const resumeAt = overlayWheelLockUntil;
-    overlaySafeArmUntil = Math.max(overlaySafeArmUntil, resumeAt + OVERLAY_SAFE_ARM_MS);
-    overlaySafeReleaseUntil = Math.max(overlaySafeReleaseUntil, resumeAt + OVERLAY_SAFE_RELEASE_MS);
+    overlaySafeArmUntil = Math.max(overlaySafeArmUntil, resumeAt + profile.safeArmMs);
+    overlaySafeReleaseUntil = Math.max(overlaySafeReleaseUntil, resumeAt + profile.safeReleaseMs);
   }
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("overlay:clear");
-    overlayWindow.setIgnoreMouseEvents(true);
-    if (overlayWindow.isVisible()) {
-      overlayWindow.hide();
+    if (profile.wheelHideOverlay) {
+      overlayWindow.setIgnoreMouseEvents(true);
+      if (overlayWindow.isVisible()) {
+        overlayWindow.hide();
+      }
+      overlayWindow.blur();
+    } else {
+      // Smooth mode: keep overlay visible during wheel pause to reduce
+      // hide/show flicker and perceived wheel stutter.
+      if (!overlayWindow.isVisible()) {
+        if (typeof overlayWindow.showInactive === "function") {
+          overlayWindow.showInactive();
+        } else {
+          overlayWindow.show();
+        }
+      }
+      overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     }
-    overlayWindow.blur();
   }
 
   scheduleOverlayWheelResume();
@@ -817,14 +863,15 @@ function emitOverlayPointer() {
   if (overlayLastPointerInside === null || overlayLastPointerInside !== inside) {
     const wasInside = overlayLastPointerInside;
     overlayLastPointerInside = inside;
+    const profile = getOverlayInteractionProfile();
 
     // Re-entering target display can leave HDR video composition in a bad state on some GPUs.
     // Perform a short overlay pause/resume cycle (same mechanism as wheel pause) automatically.
     if (inside && wasInside === false && overlayDrawEnabled()) {
-      overlayWheelLockUntil = Date.now() + 140;
-      overlayReentryGraceUntil = Date.now() + OVERLAY_REENTRY_GRACE_MS;
+      overlayWheelLockUntil = Date.now() + profile.reentryPauseMs;
+      overlayReentryGraceUntil = Date.now() + profile.reentryGraceMs;
       if (OVERLAY_SAFE_MODE) {
-        overlaySafeArmUntil = overlayReentryGraceUntil + OVERLAY_SAFE_ARM_MS;
+        overlaySafeArmUntil = overlayReentryGraceUntil + profile.safeArmMs;
       }
       scheduleOverlayWheelResume();
       scheduleOverlayReentryGraceEnd();
@@ -838,6 +885,7 @@ function applyOverlayMouseMode() {
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     return;
   }
+  const profile = getOverlayInteractionProfile();
 
   const now = Date.now();
   const drawEnabled = overlayDrawEnabled();
@@ -849,8 +897,9 @@ function applyOverlayMouseMode() {
   const inReentryGrace = shouldKeepVisible && now < overlayReentryGraceUntil;
   const inSafeArm = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeArmUntil;
   const inSafeRelease = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeReleaseUntil;
-  const shouldBlockBackground = shouldKeepVisible && !inReentryGrace &&
-    (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease) : true);
+  const reentryBlock = inReentryGrace && !profile.reentryClickThrough;
+  const shouldBlockBackground = shouldKeepVisible &&
+    (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease || reentryBlock) : true);
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -874,7 +923,7 @@ function applyOverlayMouseMode() {
   } else if (drawEnabled && wheelLocked) {
     // In safe mode, keep intercepting while wheel-lock is active so the
     // first stroke right after wheel input does not click-through.
-    if (OVERLAY_SAFE_MODE && pointerInside) {
+    if (OVERLAY_SAFE_MODE && pointerInside && profile.keepWheelLockIntercept) {
       if (!overlayWindow.isVisible()) {
         if (typeof overlayWindow.showInactive === "function") {
           overlayWindow.showInactive();
@@ -949,7 +998,7 @@ function initGlobalClickHook() {
     uIOhook.on('mouseup', () => {
       mouseDown = false;
       if (OVERLAY_SAFE_MODE && overlayDrawEnabled()) {
-        overlaySafeReleaseUntil = Date.now() + OVERLAY_SAFE_RELEASE_MS;
+        overlaySafeReleaseUntil = Date.now() + getOverlayInteractionProfile().safeReleaseMs;
       }
       applyOverlayMouseMode();
       emitOverlayPointer();
@@ -999,7 +1048,7 @@ function initGlobalClickHook() {
         overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
         if (OVERLAY_SAFE_MODE) {
-          overlaySafeArmUntil = Date.now() + OVERLAY_SAFE_ARM_MS;
+          overlaySafeArmUntil = Date.now() + getOverlayInteractionProfile().safeArmMs;
           overlaySafeReleaseUntil = 0;
         }
         applyOverlayMouseMode();
@@ -1924,6 +1973,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
+    const profile = getOverlayInteractionProfile();
     overlayPenEnabled = Boolean(enabled);
     overlayLastDrawActive = false;
     overlayLastPointerInside = null;
@@ -1956,8 +2006,25 @@ app.whenReady().then(() => {
       toggleMode: clickHookEnabled,
       toggleKey: 'Ctrl',
       safeMode: OVERLAY_SAFE_MODE,
-      safeReleaseMs: OVERLAY_SAFE_RELEASE_MS,
-      wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
+      safeReleaseMs: profile.safeReleaseMs,
+      wheelPauseMs: profile.wheelPauseMs,
+      interactionMode: profile.mode
+    };
+  });
+
+  ipcMain.handle('overlay:set-interaction-mode', (_event, mode) => {
+    overlayInteractionMode = normalizeOverlayInteractionMode(mode);
+    if (overlayPenEnabled) {
+      applyOverlayMouseMode();
+      emitOverlayPointer();
+    }
+    const profile = getOverlayInteractionProfile();
+    return {
+      ok: true,
+      interactionMode: profile.mode,
+      safeMode: OVERLAY_SAFE_MODE,
+      safeReleaseMs: profile.safeReleaseMs,
+      wheelPauseMs: profile.wheelPauseMs
     };
   });
 
