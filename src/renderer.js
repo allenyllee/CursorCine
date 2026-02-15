@@ -1990,25 +1990,49 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       : normalizeHdrRoutePreference(hdrMappingState.routePreference));
 
   let start = null;
+  const sharedPreferred = typeof window !== 'undefined' && window.crossOriginIsolated === true;
+  const startPayloadBase = {
+    sourceId,
+    displayId,
+    routePreference,
+    maxFps: 60,
+    toneMap: {
+      profile: 'rec709-rolloff-v1',
+      rolloff: 0.0,
+      saturation: 1.0
+    }
+  };
   try {
     start = await electronAPI.hdrSharedStart({
-      sourceId,
-      displayId,
-      allowSharedBuffer: typeof window !== 'undefined' && window.crossOriginIsolated === true,
-      routePreference,
-      maxFps: 60,
-      toneMap: {
-        profile: 'rec709-rolloff-v1',
-        rolloff: 0.0,
-        saturation: 1.0
-      }
+      ...startPayloadBase,
+      allowSharedBuffer: sharedPreferred
     });
   } catch (error) {
-    return {
-      ok: false,
-      reason: 'SHARED_START_CLONE_ERROR',
-      message: error && error.message ? error.message : 'Shared start IPC clone error'
-    };
+    const message = error && error.message ? String(error.message) : 'Shared start IPC clone error';
+    const cloneLike = /could not be cloned|clone/i.test(message);
+    if (sharedPreferred && cloneLike) {
+      pushHdrDecisionTrace('shared-start-clone-retry-http', {
+        reason: message
+      });
+      try {
+        start = await electronAPI.hdrSharedStart({
+          ...startPayloadBase,
+          allowSharedBuffer: false
+        });
+      } catch (retryError) {
+        return {
+          ok: false,
+          reason: 'SHARED_START_CLONE_ERROR',
+          message: retryError && retryError.message ? retryError.message : message
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        reason: 'SHARED_START_CLONE_ERROR',
+        message
+      };
+    }
   }
 
   if (!start || !start.ok) {
