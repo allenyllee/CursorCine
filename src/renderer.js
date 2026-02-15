@@ -2080,7 +2080,9 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   pushHdrDecisionTrace('native-start-ok', {
     sessionId: Number(start.sessionId || 0),
     width: Math.max(1, Number(start.width || 1)),
-    height: Math.max(1, Number(start.height || 1))
+    height: Math.max(1, Number(start.height || 1)),
+    supportsSharedFrameRead: start && start.supportsSharedFrameRead !== false,
+    transportMode: String((start && start.transportMode) || '')
   });
   const width = Math.max(1, Number(start.width || 1));
   const height = Math.max(1, Number(start.height || 1));
@@ -2088,7 +2090,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   let sharedFrameBuffer = start.sharedFrameBuffer;
   let sharedControlBuffer = start.sharedControlBuffer;
   let sharedBindOk = false;
-  if (sharedPreferred && start && start.supportsSharedFrameRead !== false) {
+  if (sharedPreferred && start && Number(start.sessionId || 0) > 0) {
     try {
       const frameBytes = Math.max(1024 * 1024, stride * height);
       sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
