@@ -75,6 +75,7 @@ let overlayLastDrawActive = false;
 let overlayLastPointerInside = null;
 let overlayReentryGraceUntil = 0;
 let overlaySafeArmUntil = 0;
+let overlaySafeReleaseUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
 let blobUploadSessionSeq = 1;
@@ -120,6 +121,7 @@ const OVERLAY_WHEEL_PAUSE_MS = 450;
 const OVERLAY_REENTRY_GRACE_MS = 1200;
 const OVERLAY_SAFE_MODE = String(process.env.CURSORCINE_OVERLAY_SAFE_MODE || '0') === '1';
 const OVERLAY_SAFE_ARM_MS = 320;
+const OVERLAY_SAFE_RELEASE_MS = 220;
 let crossOriginIsolationHeadersInstalled = false;
 
 function pushHdrTrace(type, detail = {}) {
@@ -836,8 +838,9 @@ function applyOverlayMouseMode() {
   const pausedByOutside = drawEnabled && !wheelLocked && !pointerInside;
   const inReentryGrace = shouldKeepVisible && now < overlayReentryGraceUntil;
   const inSafeArm = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeArmUntil;
+  const inSafeRelease = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeReleaseUntil;
   const shouldBlockBackground = shouldKeepVisible && !inReentryGrace &&
-    (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm) : true);
+    (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease) : true);
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -912,6 +915,9 @@ function initGlobalClickHook() {
     });
     uIOhook.on('mouseup', () => {
       mouseDown = false;
+      if (OVERLAY_SAFE_MODE && overlayDrawEnabled()) {
+        overlaySafeReleaseUntil = Date.now() + OVERLAY_SAFE_RELEASE_MS;
+      }
       applyOverlayMouseMode();
       emitOverlayPointer();
     });
@@ -961,6 +967,7 @@ function initGlobalClickHook() {
         overlayCtrlToggleArmUntil = 0;
         if (OVERLAY_SAFE_MODE) {
           overlaySafeArmUntil = Date.now() + OVERLAY_SAFE_ARM_MS;
+          overlaySafeReleaseUntil = 0;
         }
         applyOverlayMouseMode();
         emitOverlayPointer();
@@ -971,6 +978,7 @@ function initGlobalClickHook() {
         overlayDrawToggle = false;
         overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
+        overlaySafeReleaseUntil = 0;
       } else {
         overlayCtrlToggleArmUntil = now + 420;
         overlayWheelLockUntil = 0;
@@ -1060,6 +1068,7 @@ function createOverlayWindow(displayId) {
   overlayLastPointerInside = null;
   overlayReentryGraceUntil = 0;
   overlaySafeArmUntil = 0;
+  overlaySafeReleaseUntil = 0;
 
   overlayBorderWindow = new BrowserWindow({
     x: b.x,
@@ -1872,6 +1881,8 @@ app.whenReady().then(() => {
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
     overlaySafeArmUntil = 0;
+    overlaySafeReleaseUntil = 0;
+    overlaySafeReleaseUntil = 0;
     if (overlayReentryGraceTimer) {
       clearTimeout(overlayReentryGraceTimer);
       overlayReentryGraceTimer = null;
