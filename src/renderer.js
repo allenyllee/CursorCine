@@ -3461,7 +3461,8 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  const routeLabel = captureRoute && captureRoute.route === 'native' ? 'Native HDR->SDR' : 'Fallback';
+  const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || (captureRoute && captureRoute.route) || 'fallback');
+  const routeLabel = runtimeRoute === 'fallback' ? 'Fallback' : runtimeRoute;
   setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
