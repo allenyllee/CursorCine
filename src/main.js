@@ -1542,6 +1542,11 @@ async function pumpHdrWorkerSession(sessionId) {
   if (!session || !session.workerMode) {
     return;
   }
+  if (session.workerDirectShared) {
+    clearTimeout(session.pumpTimer);
+    session.pumpTimer = 0;
+    return;
+  }
   const loopStartMs = Number(process.hrtime.bigint()) / 1e6;
   if (session.perf && session.perf.lastPumpAt > 0) {
     const expected = HDR_SHARED_POLL_INTERVAL_MS;
@@ -2069,6 +2074,7 @@ app.whenReady().then(() => {
         bridge,
         sender: _event.sender,
         workerMode,
+        workerDirectShared: false,
         runtimeRoute: activeSelection.route,
         fallbackLevel: activeSelection.fallbackLevel,
         pipelineStage: activeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
@@ -2189,7 +2195,20 @@ app.whenReady().then(() => {
     clearTimeout(session.pumpTimer);
     session.pumpTimer = 0;
     if (session.workerMode) {
-      pumpHdrWorkerSession(sessionId).catch(() => {});
+      const bindResult = await hdrWorkerRequest('bind-shared', {
+        sharedFrameBuffer,
+        sharedControlBuffer
+      }, 2000).catch(() => null);
+      if (!bindResult || !bindResult.ok) {
+        session.workerDirectShared = false;
+        pumpHdrWorkerSession(sessionId).catch(() => {});
+        return {
+          ok: false,
+          reason: 'WORKER_BIND_SHARED_FAILED',
+          message: bindResult && bindResult.message ? bindResult.message : 'worker shared bind failed'
+        };
+      }
+      session.workerDirectShared = true;
     } else {
       pumpHdrSharedSession(sessionId);
     }

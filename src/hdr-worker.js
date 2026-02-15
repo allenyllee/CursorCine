@@ -378,6 +378,25 @@ async function handleRequest(requestId, command, payload) {
     return;
   }
 
+  if (command === "bind-shared") {
+    const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
+    const sharedControlBuffer = payload && payload.sharedControlBuffer;
+    if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      response(requestId, false, {
+        reason: "INVALID_SHARED_BUFFER",
+        message: "shared buffers are required",
+      });
+      return;
+    }
+    state.sharedFrameBuffer = sharedFrameBuffer;
+    state.sharedControlBuffer = sharedControlBuffer;
+    state.sharedFrameView = new Uint8Array(sharedFrameBuffer);
+    state.sharedControlView = new Int32Array(sharedControlBuffer);
+    state.sharedControlView.fill(0);
+    response(requestId, true, { bound: true });
+    return;
+  }
+
   if (command === "frame-meta") {
     response(requestId, true, {
       frameSeq: state.frameSeq,
