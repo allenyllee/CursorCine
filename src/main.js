@@ -35,6 +35,8 @@ const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-ht
 const HDR_WGC_PIPELINE_STAGE = HDR_WGC_ROUTE_ENABLED ? 'wgc-worker-latest-frame-v1' : 'wgc-disabled';
 const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 16;
+const HDR_FRAME_HTTP_WAIT_DEFAULT_MS = 55;
+const HDR_FRAME_HTTP_WAIT_MAX_MS = 120;
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
   FRAME_SEQ: 1,
@@ -140,6 +142,29 @@ function ensureHdrFrameServer() {
   }
 
   return new Promise((resolve) => {
+    function writeNoContent(res) {
+      res.statusCode = 204;
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.end();
+    }
+
+    function writeFrame(res, session, frameSeq) {
+      const frame = session.latestFrameBytes;
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('X-Hdr-Frame-Seq', String(frameSeq));
+      res.setHeader('X-Hdr-Width', String(Number(session.latestWidth || session.width || 0)));
+      res.setHeader('X-Hdr-Height', String(Number(session.latestHeight || session.height || 0)));
+      res.setHeader('X-Hdr-Stride', String(Number(session.latestStride || session.stride || 0)));
+      res.setHeader('X-Hdr-Pixel-Format', String(session.latestPixelFormat || 'RGBA8'));
+      res.setHeader('X-Hdr-Timestamp-Ms', String(Number(session.latestTimestampMs || 0)));
+      res.end(frame);
+    }
+
     const server = http.createServer((req, res) => {
       try {
         const url = new URL(String(req.url || '/'), 'http://127.0.0.1');
@@ -157,36 +182,60 @@ function ensureHdrFrameServer() {
           return;
         }
         const session = hdrSharedSessions.get(sessionId);
-        if (!session || !session.latestFrameBytes || !Buffer.isBuffer(session.latestFrameBytes)) {
-          res.statusCode = 204;
-          res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          res.end();
+        const minSeq = Number(url.searchParams.get('minSeq') || 0);
+        const requestedWaitMs = Number(url.searchParams.get('waitMs'));
+        const waitMs = Math.max(
+          0,
+          Math.min(
+            HDR_FRAME_HTTP_WAIT_MAX_MS,
+            Number.isFinite(requestedWaitMs) ? requestedWaitMs : HDR_FRAME_HTTP_WAIT_DEFAULT_MS
+          )
+        );
+
+        let closed = false;
+        req.on('close', () => {
+          closed = true;
+        });
+
+        const tryRespond = () => {
+          if (closed) {
+            return true;
+          }
+          const current = hdrSharedSessions.get(sessionId);
+          if (!current) {
+            res.statusCode = 404;
+            res.end('invalid-session');
+            return true;
+          }
+          const frameSeq = Number(current.latestFrameSeq || 0);
+          const hasFrame = Boolean(current.latestFrameBytes && Buffer.isBuffer(current.latestFrameBytes));
+          if (hasFrame && (minSeq <= 0 || frameSeq > minSeq)) {
+            writeFrame(res, current, frameSeq);
+            return true;
+          }
+          return false;
+        };
+
+        if (tryRespond()) {
           return;
         }
-        const minSeq = Number(url.searchParams.get('minSeq') || 0);
-        const frameSeq = Number(session.latestFrameSeq || 0);
-        if (minSeq > 0 && frameSeq <= minSeq) {
-          res.statusCode = 204;
-          res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          res.end();
+        if (waitMs <= 0) {
+          writeNoContent(res);
           return;
         }
 
-        const frame = session.latestFrameBytes;
-        res.statusCode = 200;
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('X-Hdr-Frame-Seq', String(frameSeq));
-        res.setHeader('X-Hdr-Width', String(Number(session.latestWidth || session.width || 0)));
-        res.setHeader('X-Hdr-Height', String(Number(session.latestHeight || session.height || 0)));
-        res.setHeader('X-Hdr-Stride', String(Number(session.latestStride || session.stride || 0)));
-        res.setHeader('X-Hdr-Pixel-Format', String(session.latestPixelFormat || 'RGBA8'));
-        res.setHeader('X-Hdr-Timestamp-Ms', String(Number(session.latestTimestampMs || 0)));
-        res.end(frame);
+        const startedAt = Date.now();
+        const loop = () => {
+          if (tryRespond()) {
+            return;
+          }
+          if ((Date.now() - startedAt) >= waitMs) {
+            writeNoContent(res);
+            return;
+          }
+          setTimeout(loop, 4);
+        };
+        loop();
       } catch (_error) {
         res.statusCode = 500;
         res.end('server-error');

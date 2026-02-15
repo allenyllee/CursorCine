@@ -117,6 +117,7 @@ const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 16;
 const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
+const HDR_NATIVE_HTTP_WAIT_MS = 70;
 const HDR_SHARED_CONTROL_SLOTS = 16;
 
 let sources = [];
@@ -1810,7 +1811,9 @@ async function tryReadNativeFrameFromHttpEndpoint() {
   if (!endpoint) {
     return null;
   }
-  const url = endpoint + '?minSeq=' + String(Number(nativeHdrState.lastHttpFrameSeq || 0));
+  const url = endpoint +
+    '?minSeq=' + String(Number(nativeHdrState.lastHttpFrameSeq || 0)) +
+    '&waitMs=' + String(HDR_NATIVE_HTTP_WAIT_MS);
   const response = await fetch(url, {
     method: 'GET',
     cache: 'no-store'
@@ -1964,9 +1967,12 @@ async function pollNativeHdrFrame() {
   } finally {
     nativeHdrFramePumpRunning = false;
     if (nativeHdrState.active && nativeHdrState.sessionId > 0) {
+      const httpOnly = Boolean(nativeHdrState.frameEndpoint) &&
+        !(nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView);
+      const nextDelayMs = httpOnly ? 0 : HDR_NATIVE_POLL_INTERVAL_MS;
       nativeHdrFramePumpTimer = setTimeout(() => {
         pollNativeHdrFrame().catch(() => {});
-      }, HDR_NATIVE_POLL_INTERVAL_MS);
+      }, nextDelayMs);
     }
   }
 }
