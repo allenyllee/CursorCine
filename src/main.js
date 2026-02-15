@@ -78,6 +78,10 @@ let overlaySafeArmUntil = 0;
 let overlaySafeReleaseUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
+let overlayAutoNoBlock = false;
+let overlayAutoNoBlockReason = '';
+let overlayRiskWindowStartMs = 0;
+let overlayRiskTransitionCount = 0;
 let blobUploadSessionSeq = 1;
 const blobUploadSessions = new Map();
 const trackedUploadTempDirs = new Set();
@@ -122,6 +126,8 @@ const OVERLAY_SAFE_RELEASE_MS_BASE = Math.max(
   120,
   Math.min(1200, Number(process.env.CURSORCINE_OVERLAY_SAFE_RELEASE_MS || 360) || 360)
 );
+const OVERLAY_RISK_TRANSITION_WINDOW_MS = 2200;
+const OVERLAY_RISK_TRANSITION_THRESHOLD = 3;
 const OVERLAY_INTERACTION_MODE_DEFAULT = String(process.env.CURSORCINE_OVERLAY_INTERACTION_MODE || 'stable').trim().toLowerCase();
 let overlayInteractionMode = OVERLAY_INTERACTION_MODE_DEFAULT === 'smooth' ? 'smooth' : 'stable';
 let crossOriginIsolationHeadersInstalled = false;
@@ -827,6 +833,39 @@ function scheduleOverlayReentryGraceEnd() {
   }, waitMs + 10);
 }
 
+function resetOverlayRiskState() {
+  overlayAutoNoBlock = false;
+  overlayAutoNoBlockReason = '';
+  overlayRiskWindowStartMs = 0;
+  overlayRiskTransitionCount = 0;
+}
+
+function enableOverlayAutoNoBlock(reason) {
+  if (overlayAutoNoBlock) {
+    return;
+  }
+  overlayAutoNoBlock = true;
+  overlayAutoNoBlockReason = String(reason || 'RISK_DETECTED');
+  applyOverlayMouseMode();
+  emitOverlayPointer();
+}
+
+function noteOverlayRiskTransition() {
+  if (!overlayRecordingActive || !overlayDrawEnabled() || mouseDown || overlayAutoNoBlock) {
+    return;
+  }
+  const now = Date.now();
+  if (overlayRiskWindowStartMs <= 0 || (now - overlayRiskWindowStartMs) > OVERLAY_RISK_TRANSITION_WINDOW_MS) {
+    overlayRiskWindowStartMs = now;
+    overlayRiskTransitionCount = 1;
+    return;
+  }
+  overlayRiskTransitionCount += 1;
+  if (overlayRiskTransitionCount >= OVERLAY_RISK_TRANSITION_THRESHOLD) {
+    enableOverlayAutoNoBlock('TRANSITION_OSCILLATION');
+  }
+}
+
 function isPointerInsideOverlayBounds() {
   if (!overlayBounds) {
     return false;
@@ -863,6 +902,7 @@ function emitOverlayPointer() {
   if (overlayLastPointerInside === null || overlayLastPointerInside !== inside) {
     const wasInside = overlayLastPointerInside;
     overlayLastPointerInside = inside;
+    noteOverlayRiskTransition();
     const profile = getOverlayInteractionProfile();
 
     // Re-entering target display can leave HDR video composition in a bad state on some GPUs.
@@ -898,7 +938,7 @@ function applyOverlayMouseMode() {
   const inSafeArm = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeArmUntil;
   const inSafeRelease = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeReleaseUntil;
   const reentryBlock = inReentryGrace && !profile.reentryClickThrough;
-  const shouldBlockBackground = shouldKeepVisible &&
+  const shouldBlockBackground = !overlayAutoNoBlock && shouldKeepVisible &&
     (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease || reentryBlock) : true);
 
   if (shouldKeepVisible) {
@@ -974,7 +1014,8 @@ function applyOverlayMouseMode() {
     mouseDown,
     toggleEnabled: clickHookEnabled,
     toggled: overlayDrawToggle,
-    wheelPaused: wheelLocked
+    wheelPaused: wheelLocked,
+    autoNoBlock: overlayAutoNoBlock
   });
   emitOverlayPointer();
 }
@@ -986,6 +1027,8 @@ function initGlobalClickHook() {
     uIOhook.on('mousedown', () => {
       mouseDown = true;
       overlayWheelLockUntil = 0;
+      overlayRiskWindowStartMs = 0;
+      overlayRiskTransitionCount = 0;
       const p = screen.getCursorScreenPoint();
       lastGlobalClick = {
         x: p.x,
@@ -1044,9 +1087,15 @@ function initGlobalClickHook() {
 
       const now = Date.now();
       if (!overlayDrawToggle) {
+        const pointerInside = isPointerInsideOverlayBounds();
         overlayDrawToggle = true;
         overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
+        if (overlayRecordingActive && pointerInside && !overlayAutoNoBlock) {
+          // Guard the highest-risk path: first activation on target display
+          // during recording can black-screen on some HDR/MPO stacks.
+          enableOverlayAutoNoBlock('FIRST_ACTIVATION_GUARD');
+        }
         if (OVERLAY_SAFE_MODE) {
           overlaySafeArmUntil = Date.now() + getOverlayInteractionProfile().safeArmMs;
           overlaySafeReleaseUntil = 0;
@@ -1928,6 +1977,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:create', (_event, displayId) => {
     overlayRecordingActive = true;
+    resetOverlayRiskState();
     createOverlayWindow(displayId);
     return { ok: true };
   });
@@ -1960,6 +2010,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:destroy', () => {
     overlayRecordingActive = false;
+    resetOverlayRiskState();
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
     overlaySafeArmUntil = 0;
@@ -1975,6 +2026,7 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
     const profile = getOverlayInteractionProfile();
     overlayPenEnabled = Boolean(enabled);
+    resetOverlayRiskState();
     overlayLastDrawActive = false;
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
@@ -2008,7 +2060,9 @@ app.whenReady().then(() => {
       safeMode: OVERLAY_SAFE_MODE,
       safeReleaseMs: profile.safeReleaseMs,
       wheelPauseMs: profile.wheelPauseMs,
-      interactionMode: profile.mode
+      interactionMode: profile.mode,
+      autoNoBlock: overlayAutoNoBlock,
+      autoNoBlockReason: overlayAutoNoBlockReason
     };
   });
 
@@ -2024,6 +2078,20 @@ app.whenReady().then(() => {
       interactionMode: profile.mode,
       safeMode: OVERLAY_SAFE_MODE,
       safeReleaseMs: profile.safeReleaseMs,
+      wheelPauseMs: profile.wheelPauseMs
+    };
+  });
+
+  ipcMain.handle('overlay:get-state', () => {
+    const profile = getOverlayInteractionProfile();
+    return {
+      ok: true,
+      recordingActive: overlayRecordingActive,
+      penEnabled: overlayPenEnabled,
+      drawToggled: overlayDrawToggle,
+      autoNoBlock: overlayAutoNoBlock,
+      autoNoBlockReason: overlayAutoNoBlockReason,
+      interactionMode: profile.mode,
       wheelPauseMs: profile.wheelPauseMs
     };
   });

@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlayCreate: (displayId) => ipcRenderer.invoke('overlay:create', displayId),
   overlayDestroy: () => ipcRenderer.invoke('overlay:destroy'),
   overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),
+  overlayGetState: () => ipcRenderer.invoke('overlay:get-state'),
   overlaySetInteractionMode: (mode) => ipcRenderer.invoke('overlay:set-interaction-mode', mode),
   overlaySetPenStyle: (style) => ipcRenderer.invoke('overlay:set-pen-style', style),
   overlayUndo: () => ipcRenderer.invoke('overlay:undo'),

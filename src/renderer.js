@@ -126,6 +126,7 @@ let micStream;
 let outputStream;
 let mediaRecorder;
 let drawTimer = 0;
+let overlayStatePollTimer = 0;
 const DRAW_INTERVAL_MS = 16;
 const DRAW_EPSILON = 0.25;
 let cursorTimer = 0;
@@ -204,6 +205,9 @@ const glowState = {
 const annotationState = {
   enabled: true,
   interactionMode: 'stable',
+  autoNoBlock: false,
+  autoNoBlockReason: '',
+  wheelPauseMs: 0,
   color: penColorInput?.value || DEFAULT_PEN_COLOR,
   size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
 };
@@ -364,6 +368,48 @@ function getPenInteractionModeLabel(mode) {
   return String(mode || '').trim().toLowerCase() === 'smooth' ? '流暢優先' : '穩定優先';
 }
 
+function refreshPenToggleLabel() {
+  if (!annotationState.enabled) {
+    penToggleBtn.textContent = '畫筆模式: 關';
+    return;
+  }
+  if (annotationState.autoNoBlock) {
+    penToggleBtn.textContent = '畫筆模式: 開（防黑屏降級中：非攔截；原因 ' + (annotationState.autoNoBlockReason || 'AUTO') + '）';
+    return;
+  }
+  const wheelPauseMs = Number(annotationState.wheelPauseMs || 0);
+  if (wheelPauseMs > 0) {
+    penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉；滾輪暫停 ' + wheelPauseMs + 'ms）';
+    return;
+  }
+  penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）';
+}
+
+async function syncOverlayRuntimeState() {
+  const state = await electronAPI.overlayGetState().catch(() => null);
+  if (!state || !state.ok) {
+    return;
+  }
+  const nextAuto = Boolean(state.autoNoBlock);
+  const nextReason = String(state.autoNoBlockReason || '');
+  const nextMode = String(state.interactionMode || annotationState.interactionMode || 'stable').toLowerCase() === 'smooth' ? 'smooth' : 'stable';
+  const nextWheelPauseMs = Number(state.wheelPauseMs || annotationState.wheelPauseMs || 0);
+  const changed =
+    annotationState.autoNoBlock !== nextAuto ||
+    annotationState.autoNoBlockReason !== nextReason ||
+    annotationState.interactionMode !== nextMode ||
+    annotationState.wheelPauseMs !== nextWheelPauseMs;
+  annotationState.autoNoBlock = nextAuto;
+  annotationState.autoNoBlockReason = nextReason;
+  annotationState.interactionMode = nextMode;
+  annotationState.wheelPauseMs = nextWheelPauseMs;
+  if (!changed) {
+    return;
+  }
+  refreshPenToggleLabel();
+  refreshRecordingStatusLine();
+}
+
 function refreshRecordingStatusLine() {
   if (!(mediaRecorder && mediaRecorder.state === 'recording')) {
     return;
@@ -373,7 +419,8 @@ function refreshRecordingStatusLine() {
   const qualityLabel = String((recordingQualityPreset && recordingQualityPreset.label) || '平衡');
   const audioMode = getRecordingAudioModeLabel();
   const penModeLabel = getPenInteractionModeLabel(annotationState.interactionMode);
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫筆互動: ' + penModeLabel + ' | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+  const guardLabel = annotationState.autoNoBlock ? ' | 畫筆降級: 防黑屏（非攔截）' : '';
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫筆互動: ' + penModeLabel + guardLabel + ' | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
 async function withTimeout(promise, ms, message) {
@@ -3674,6 +3721,11 @@ async function startRecording() {
   await electronAPI.overlayCreate(selectedSource.display_id);
   await syncPenStyleToOverlay();
   await electronAPI.overlaySetEnabled(annotationState.enabled);
+  clearInterval(overlayStatePollTimer);
+  overlayStatePollTimer = setInterval(() => {
+    syncOverlayRuntimeState().catch(() => {});
+  }, 350);
+  syncOverlayRuntimeState().catch(() => {});
 
   clearInterval(cursorTimer);
   cursorUpdateInFlight = false;
@@ -3752,8 +3804,10 @@ function stopRecording() {
   }
 
   clearInterval(cursorTimer);
+  clearInterval(overlayStatePollTimer);
   cancelAnimationFrame(drawTimer);
   cursorTimer = 0;
+  overlayStatePollTimer = 0;
   drawTimer = 0;
   cursorUpdateInFlight = false;
   lastDrawNow = 0;
@@ -3787,20 +3841,25 @@ async function setPenMode(enabled) {
   try {
     const mode = await electronAPI.overlaySetEnabled(enabled);
     if (enabled && mode && mode.toggleMode) {
+      annotationState.autoNoBlock = Boolean(mode.autoNoBlock);
+      annotationState.autoNoBlockReason = String(mode.autoNoBlockReason || '');
       const interactionMode = String(mode.interactionMode || annotationState.interactionMode || 'stable');
       annotationState.interactionMode = interactionMode === 'smooth' ? 'smooth' : 'stable';
+      annotationState.wheelPauseMs = Number(mode.wheelPauseMs || 0);
       if (penInteractionModeSelect) {
         penInteractionModeSelect.value = annotationState.interactionMode;
       }
-      const wheelPauseMs = Number(mode.wheelPauseMs || 0);
-      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉；滾輪暫停 ' + wheelPauseMs + 'ms）';
+      refreshPenToggleLabel();
       refreshRecordingStatusLine();
       return;
     }
   } catch (_error) {
   }
 
-  penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）' : '畫筆模式: 關';
+  annotationState.autoNoBlock = false;
+  annotationState.autoNoBlockReason = '';
+  annotationState.wheelPauseMs = 0;
+  refreshPenToggleLabel();
   refreshRecordingStatusLine();
 }
 
