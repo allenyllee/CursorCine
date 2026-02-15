@@ -809,7 +809,9 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    overlayWindow.setIgnoreMouseEvents(false);
+    // Keep forwarding pointer input even in draw-active mode; drawing uses global hook events.
+    // This avoids overlay input capture side effects (for example HDR video planes turning black).
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   } else if ((drawEnabled && wheelLocked) || pausedByOutside) {
     overlayWindow.setIgnoreMouseEvents(true);
 
