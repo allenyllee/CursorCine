@@ -121,7 +121,10 @@ const OVERLAY_WHEEL_PAUSE_MS = 450;
 const OVERLAY_REENTRY_GRACE_MS = 1200;
 const OVERLAY_SAFE_MODE = String(process.env.CURSORCINE_OVERLAY_SAFE_MODE || '0') === '1';
 const OVERLAY_SAFE_ARM_MS = 320;
-const OVERLAY_SAFE_RELEASE_MS = 220;
+const OVERLAY_SAFE_RELEASE_MS = Math.max(
+  120,
+  Math.min(1200, Number(process.env.CURSORCINE_OVERLAY_SAFE_RELEASE_MS || 360) || 360)
+);
 let crossOriginIsolationHeadersInstalled = false;
 
 function pushHdrTrace(type, detail = {}) {
@@ -1923,6 +1926,7 @@ app.whenReady().then(() => {
       toggleMode: clickHookEnabled,
       toggleKey: 'Ctrl',
       safeMode: OVERLAY_SAFE_MODE,
+      safeReleaseMs: OVERLAY_SAFE_RELEASE_MS,
       wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
     };
   });
