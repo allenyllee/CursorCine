@@ -71,6 +71,7 @@ let overlayWheelResumeTimer = null;
 
 let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
+let overlayLastPointerInside = null;
 let overlayRecordingActive = false;
 let overlayBounds = null;
 let blobUploadSessionSeq = 1;
@@ -778,6 +779,11 @@ function emitOverlayPointer() {
     down: mouseDown,
     timestamp: Date.now()
   });
+
+  if (overlayLastPointerInside === null || overlayLastPointerInside !== inside) {
+    overlayLastPointerInside = inside;
+    applyOverlayMouseMode();
+  }
 }
 
 function applyOverlayMouseMode() {
@@ -998,6 +1004,7 @@ function createOverlayWindow(displayId) {
   const targetDisplay = getTargetDisplay(displayId);
   const b = targetDisplay.bounds;
   overlayBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+  overlayLastPointerInside = null;
 
   overlayBorderWindow = new BrowserWindow({
     x: b.x,
@@ -1807,6 +1814,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:destroy', () => {
     overlayRecordingActive = false;
+    overlayLastPointerInside = null;
     destroyOverlayWindow();
     return { ok: true };
   });
@@ -1814,6 +1822,7 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
     overlayPenEnabled = Boolean(enabled);
     overlayLastDrawActive = false;
+    overlayLastPointerInside = null;
     overlayDrawToggle = false;
     overlayAltPressed = false;
     overlayWheelLockUntil = 0;
