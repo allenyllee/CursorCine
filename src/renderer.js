@@ -61,6 +61,7 @@ const glowCoreLabel = document.getElementById('glowCoreLabel');
 const glowOpacityInput = document.getElementById('glowOpacityInput');
 const glowOpacityLabel = document.getElementById('glowOpacityLabel');
 const penToggleBtn = document.getElementById('penToggleBtn');
+const penInteractionModeSelect = document.getElementById('penInteractionModeSelect');
 const penColorInput = document.getElementById('penColorInput');
 const penSizeInput = document.getElementById('penSizeInput');
 const penSizeLabel = document.getElementById('penSizeLabel');
@@ -117,6 +118,7 @@ const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 16;
 const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
+const HDR_SHARED_CONTROL_SLOTS = 16;
 
 let sources = [];
 let sourceStream;
@@ -124,6 +126,7 @@ let micStream;
 let outputStream;
 let mediaRecorder;
 let drawTimer = 0;
+let overlayStatePollTimer = 0;
 const DRAW_INTERVAL_MS = 16;
 const DRAW_EPSILON = 0.25;
 let cursorTimer = 0;
@@ -201,6 +204,10 @@ const glowState = {
 
 const annotationState = {
   enabled: true,
+  interactionMode: 'stable',
+  autoNoBlock: false,
+  autoNoBlockReason: '',
+  wheelPauseMs: 0,
   color: penColorInput?.value || DEFAULT_PEN_COLOR,
   size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
 };
@@ -218,6 +225,7 @@ const hdrMappingState = {
   runtimeRoute: 'fallback',
   runtimeBackend: '',
   runtimeStage: '',
+  runtimeTransportMode: '',
   routePreference: 'auto',
   fallbackLevel: 3,
   probeSupported: false,
@@ -234,8 +242,23 @@ const hdrMappingState = {
   mainSharedSessionCount: 0,
   mainTopFrameSeq: 0,
   mainTopReadFailures: 0,
+  mainTopBindAttempts: 0,
+  mainTopBindFailures: 0,
+  mainTopLastBindReason: '',
+  mainTopLastBindError: '',
+  uiBindAttempts: 0,
+  uiBindFailures: 0,
+  uiBindLastReason: '',
+  uiBindLastError: '',
   mainTopLastReason: '',
   mainTopLastError: '',
+  mainTopReadMsAvg: 0,
+  mainTopCopyMsAvg: 0,
+  mainTopSabWriteMsAvg: 0,
+  mainTopBytesPerFrameAvg: 0,
+  mainTopBytesPerSec: 0,
+  mainTopPumpJitterMsAvg: 0,
+  mainTopFrameIntervalMsAvg: 0,
   nativeEnvFlag: '',
   nativeEnvFlagEnabled: false,
   nativeLiveEnvFlag: '',
@@ -247,6 +270,7 @@ const hdrMappingState = {
   nativeSmokeForSource: false,
   nativeSmokeReason: '',
   nativeSmokeAt: 0,
+  sharedBindCloneBlocked: false,
   recordingAttemptSeq: 0,
   recordingAttemptStartedAt: 0
 };
@@ -279,7 +303,8 @@ const nativeHdrState = {
   captureFps: 0,
   renderFps: 0,
   queueDepth: 0,
-  runtimeLegacyRetryAttempted: false
+  runtimeLegacyRetryAttempted: false,
+  rendererBlitMsAvg: 0
 };
 
 const viewState = {
@@ -330,6 +355,74 @@ function setStatus(message) {
   statusEl.textContent = message;
 }
 
+function getRecordingAudioModeLabel() {
+  const hasSystemAudio = Boolean(sourceStream && sourceStream.getAudioTracks().length > 0);
+  const hasMicAudio = Boolean(micStream && micStream.getAudioTracks().length > 0);
+  if (!hasSystemAudio && !hasMicAudio) {
+    return '音訊: 無';
+  }
+  return `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`;
+}
+
+function getPenInteractionModeLabel(mode) {
+  return String(mode || '').trim().toLowerCase() === 'smooth' ? '流暢優先' : '穩定優先';
+}
+
+function refreshPenToggleLabel() {
+  if (!annotationState.enabled) {
+    penToggleBtn.textContent = '畫筆模式: 關';
+    return;
+  }
+  if (annotationState.autoNoBlock) {
+    penToggleBtn.textContent = '畫筆模式: 開（防黑屏降級中：非攔截；原因 ' + (annotationState.autoNoBlockReason || 'AUTO') + '）';
+    return;
+  }
+  const wheelPauseMs = Number(annotationState.wheelPauseMs || 0);
+  if (wheelPauseMs > 0) {
+    penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉；滾輪暫停 ' + wheelPauseMs + 'ms）';
+    return;
+  }
+  penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）';
+}
+
+async function syncOverlayRuntimeState() {
+  const state = await electronAPI.overlayGetState().catch(() => null);
+  if (!state || !state.ok) {
+    return;
+  }
+  const nextAuto = Boolean(state.autoNoBlock);
+  const nextReason = String(state.autoNoBlockReason || '');
+  const nextMode = String(state.interactionMode || annotationState.interactionMode || 'stable').toLowerCase() === 'smooth' ? 'smooth' : 'stable';
+  const nextWheelPauseMs = Number(state.wheelPauseMs || annotationState.wheelPauseMs || 0);
+  const changed =
+    annotationState.autoNoBlock !== nextAuto ||
+    annotationState.autoNoBlockReason !== nextReason ||
+    annotationState.interactionMode !== nextMode ||
+    annotationState.wheelPauseMs !== nextWheelPauseMs;
+  annotationState.autoNoBlock = nextAuto;
+  annotationState.autoNoBlockReason = nextReason;
+  annotationState.interactionMode = nextMode;
+  annotationState.wheelPauseMs = nextWheelPauseMs;
+  if (!changed) {
+    return;
+  }
+  refreshPenToggleLabel();
+  refreshRecordingStatusLine();
+}
+
+function refreshRecordingStatusLine() {
+  if (!(mediaRecorder && mediaRecorder.state === 'recording')) {
+    return;
+  }
+  const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || 'fallback');
+  const routeLabel = getHdrRouteLabel(runtimeRoute, getEffectiveHdrTransportMode());
+  const qualityLabel = String((recordingQualityPreset && recordingQualityPreset.label) || '平衡');
+  const audioMode = getRecordingAudioModeLabel();
+  const penModeLabel = getPenInteractionModeLabel(annotationState.interactionMode);
+  const guardLabel = annotationState.autoNoBlock ? ' | 畫筆降級: 防黑屏（非攔截）' : '';
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫筆互動: ' + penModeLabel + guardLabel + ' | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+}
+
 async function withTimeout(promise, ms, message) {
   let timer = 0;
   try {
@@ -356,6 +449,45 @@ function normalizeHdrRoutePreference(value) {
   return 'auto';
 }
 
+function normalizeHdrTransportMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'shared-buffer' || mode === 'http-fallback') {
+    return mode;
+  }
+  return '';
+}
+
+function decodeSharedPixelFormat(code) {
+  const n = Number(code || 0);
+  if (n === 2) {
+    return 'BGRA8';
+  }
+  return 'RGBA8';
+}
+
+function getHdrRouteLabel(route, transportMode = '') {
+  const runtimeRoute = String(route || 'fallback');
+  if (runtimeRoute === 'fallback') {
+    return 'Fallback';
+  }
+  const mode = normalizeHdrTransportMode(transportMode);
+  return mode ? (runtimeRoute + '/' + mode) : runtimeRoute;
+}
+
+function getEffectiveHdrTransportMode() {
+  const mapped = normalizeHdrTransportMode(hdrMappingState.runtimeTransportMode);
+  if (mapped) {
+    return mapped;
+  }
+  if (nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView) {
+    return 'shared-buffer';
+  }
+  if (nativeHdrState.frameEndpoint) {
+    return 'http-fallback';
+  }
+  return '';
+}
+
 function updateHdrMappingStatusUi() {
   if (hdrMappingRuntimeEl) {
     hdrMappingRuntimeEl.textContent = hdrRuntimeStatusMessage;
@@ -368,11 +500,14 @@ function updateHdrMappingStatusUi() {
   }
 }
 
-function setHdrRuntimeRoute(route, message) {
+function setHdrRuntimeRoute(route, message, transportMode) {
   hdrMappingState.runtimeRoute = String(route || 'fallback');
-  const isNativeRoute = hdrMappingState.runtimeRoute !== 'fallback';
-  hdrRuntimeStatusMessage = message || (isNativeRoute ? ('目前路徑: ' + hdrMappingState.runtimeRoute) : '目前路徑: Fallback');
+  if (transportMode !== undefined) {
+    hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(transportMode);
+  }
+  hdrRuntimeStatusMessage = message || ('目前路徑: ' + getHdrRouteLabel(hdrMappingState.runtimeRoute, getEffectiveHdrTransportMode()));
   updateHdrMappingStatusUi();
+  refreshRecordingStatusLine();
 }
 
 function setHdrProbeStatus(message) {
@@ -395,7 +530,8 @@ function updateHdrDiagStatus(message) {
     : '-';
   hdrDiagStatusMessage =
     'Diag: attempt=' + attemptLabel +
-    ', route=' + String(hdrMappingState.runtimeRoute || '-') +
+    ', route=' + String(getHdrRouteLabel(hdrMappingState.runtimeRoute || '-', getEffectiveHdrTransportMode())) +
+    ', stage=' + String(hdrMappingState.runtimeStage || '-') +
     ', pref=' + String(hdrMappingState.routePreference || 'auto') +
     ', level=' + String(hdrMappingState.fallbackLevel || 3) +
     ', fallback=' + String(hdrMappingState.fallbackCount) +
@@ -404,11 +540,23 @@ function updateHdrDiagStatus(message) {
     ', readFail=' + String(nativeHdrState.readFailures) +
     ', capFps=' + String(Number(nativeHdrState.captureFps || 0).toFixed(1)) +
     ', renderFps=' + String(Number(nativeHdrState.renderFps || 0).toFixed(1)) +
+    ', blitMs=' + String(Number(nativeHdrState.rendererBlitMsAvg || 0).toFixed(2)) +
     ', queue=' + String(nativeHdrState.queueDepth || 0) +
     ', mainSess=' + String(hdrMappingState.mainSharedSessionCount) +
     ', mainFrame=' + String(hdrMappingState.mainTopFrameSeq) +
     ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
+    ', mainBind=' + String(hdrMappingState.mainTopBindFailures) + '/' + String(hdrMappingState.mainTopBindAttempts) +
+    ', uiBind=' + String(hdrMappingState.uiBindFailures) + '/' + String(hdrMappingState.uiBindAttempts) +
+    ', mainReadMs=' + String(Number(hdrMappingState.mainTopReadMsAvg || 0).toFixed(2)) +
+    ', mainCopyMs=' + String(Number(hdrMappingState.mainTopCopyMsAvg || 0).toFixed(2)) +
+    ', mainJitMs=' + String(Number(hdrMappingState.mainTopPumpJitterMsAvg || 0).toFixed(2)) +
+    ', mainBpf=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerFrameAvg || 0))) +
+    ', mainBps=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerSec || 0))) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
+    ', mainBindReason=' + String(hdrMappingState.mainTopLastBindReason || '-') +
+    ', mainBindErr=' + String(hdrMappingState.mainTopLastBindError || '-') +
+    ', uiBindReason=' + String(hdrMappingState.uiBindLastReason || '-') +
+    ', uiBindErr=' + String(hdrMappingState.uiBindLastError || '-') +
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
@@ -525,6 +673,7 @@ async function copyHdrDiagnosticsSnapshot() {
       hdrRuntimeRoute: hdrMappingState.runtimeRoute,
       hdrRuntimeBackend: hdrMappingState.runtimeBackend,
       hdrRuntimeStage: hdrMappingState.runtimeStage,
+      hdrRuntimeTransportMode: hdrMappingState.runtimeTransportMode,
       hdrRoutePreference: hdrMappingState.routePreference,
       hdrFallbackLevel: hdrMappingState.fallbackLevel,
       hdrRuntimeStatusMessage,
@@ -541,6 +690,21 @@ async function copyHdrDiagnosticsSnapshot() {
       fallbackCount: hdrMappingState.fallbackCount,
       nativeStartAttempts: hdrMappingState.nativeStartAttempts,
       nativeStartFailures: hdrMappingState.nativeStartFailures,
+      mainTopReadMsAvg: hdrMappingState.mainTopReadMsAvg,
+      mainTopBindAttempts: hdrMappingState.mainTopBindAttempts,
+      mainTopBindFailures: hdrMappingState.mainTopBindFailures,
+      mainTopLastBindReason: hdrMappingState.mainTopLastBindReason,
+      mainTopLastBindError: hdrMappingState.mainTopLastBindError,
+      uiBindAttempts: hdrMappingState.uiBindAttempts,
+      uiBindFailures: hdrMappingState.uiBindFailures,
+      uiBindLastReason: hdrMappingState.uiBindLastReason,
+      uiBindLastError: hdrMappingState.uiBindLastError,
+      mainTopCopyMsAvg: hdrMappingState.mainTopCopyMsAvg,
+      mainTopSabWriteMsAvg: hdrMappingState.mainTopSabWriteMsAvg,
+      mainTopBytesPerFrameAvg: hdrMappingState.mainTopBytesPerFrameAvg,
+      mainTopBytesPerSec: hdrMappingState.mainTopBytesPerSec,
+      mainTopPumpJitterMsAvg: hdrMappingState.mainTopPumpJitterMsAvg,
+      mainTopFrameIntervalMsAvg: hdrMappingState.mainTopFrameIntervalMsAvg,
       lastFallbackReason: hdrMappingState.lastFallbackReason,
       lastFallbackAt: hdrMappingState.lastFallbackAt,
       nativeState: {
@@ -556,7 +720,10 @@ async function copyHdrDiagnosticsSnapshot() {
         frameCount: nativeHdrState.frameCount,
         captureFps: nativeHdrState.captureFps,
         renderFps: nativeHdrState.renderFps,
-        queueDepth: nativeHdrState.queueDepth
+        queueDepth: nativeHdrState.queueDepth,
+        rendererBlitMsAvg: nativeHdrState.rendererBlitMsAvg,
+        supportsSharedFrameRead: Boolean(nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView),
+        transportMode: nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView ? 'shared-buffer' : 'http-fallback'
       },
       decisionTrace: hdrDecisionTrace.slice(-80)
     },
@@ -1584,12 +1751,14 @@ async function stopNativeHdrCapture() {
   nativeHdrState.renderFps = 0;
   nativeHdrState.queueDepth = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = false;
+  nativeHdrState.rendererBlitMsAvg = 0;
 }
 
 function blitNativeFrameToCanvas(frame) {
   if (!nativeHdrState.ctx || !nativeHdrState.canvas) {
     return;
   }
+  const blitStart = performance.now();
 
   const width = Math.max(1, Number(frame && frame.width ? frame.width : nativeHdrState.width || 1));
   const height = Math.max(1, Number(frame && frame.height ? frame.height : nativeHdrState.height || 1));
@@ -1655,6 +1824,10 @@ function blitNativeFrameToCanvas(frame) {
   nativeHdrState.lastFrameAtMs = now;
   nativeHdrState.frameCount += 1;
   nativeHdrState.firstFrameReceived = true;
+  const blitMs = Math.max(0, performance.now() - blitStart);
+  nativeHdrState.rendererBlitMsAvg = nativeHdrState.rendererBlitMsAvg > 0
+    ? ((nativeHdrState.rendererBlitMsAvg * 0.8) + (blitMs * 0.2))
+    : blitMs;
 }
 
 function tryReadNativeFrameFromSharedBuffer() {
@@ -1683,6 +1856,7 @@ function tryReadNativeFrameFromSharedBuffer() {
   const height = Math.max(1, Atomics.load(control, 3));
   const stride = Math.max(width * 4, Atomics.load(control, 4));
   const byteLength = Math.max(0, Atomics.load(control, 5));
+  const pixelFormatCode = Atomics.load(control, 8);
   if (byteLength <= 0 || byteLength > frameView.length) {
     return null;
   }
@@ -1694,7 +1868,7 @@ function tryReadNativeFrameFromSharedBuffer() {
     width,
     height,
     stride,
-    pixelFormat: 'RGBA8',
+    pixelFormat: decodeSharedPixelFormat(pixelFormatCode),
     bytes: frameView.slice(0, byteLength)
   };
 }
@@ -1884,7 +2058,9 @@ async function probeHdrNativeSupport(sourceId, displayId) {
   hdrMappingState.probeHdrActive = Boolean(probe && probe.hdrActive);
   hdrMappingState.probeReason = String((probe && probe.reason) || (probe && probe.supported ? 'OK' : 'UNKNOWN'));
   const isolated = typeof window !== 'undefined' && window.crossOriginIsolated === true;
-  const isoTag = isolated ? 'SAB:OK' : 'SAB:OFF';
+  const isoTag = hdrMappingState.sharedBindCloneBlocked
+    ? 'SAB:BLOCKED'
+    : (isolated ? 'SAB:OK' : 'SAB:OFF');
 
   if (probe && probe.supported) {
     setHdrProbeStatus('Probe: Native 可用（' + (probe.hdrActive ? 'HDR 螢幕' : 'SDR/未知') + '，' + isoTag + '）');
@@ -1915,24 +2091,49 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       : normalizeHdrRoutePreference(hdrMappingState.routePreference));
 
   let start = null;
+  const sharedPreferred = typeof window !== 'undefined' && window.crossOriginIsolated === true;
+  const startPayloadBase = {
+    sourceId,
+    displayId,
+    routePreference,
+    maxFps: 60,
+    toneMap: {
+      profile: 'rec709-rolloff-v1',
+      rolloff: 0.0,
+      saturation: 1.0
+    }
+  };
   try {
     start = await electronAPI.hdrSharedStart({
-      sourceId,
-      displayId,
-      routePreference,
-      maxFps: 60,
-      toneMap: {
-        profile: 'rec709-rolloff-v1',
-        rolloff: 0.0,
-        saturation: 1.0
-      }
+      ...startPayloadBase,
+      allowSharedBuffer: sharedPreferred
     });
   } catch (error) {
-    return {
-      ok: false,
-      reason: 'SHARED_START_CLONE_ERROR',
-      message: error && error.message ? error.message : 'Shared start IPC clone error'
-    };
+    const message = error && error.message ? String(error.message) : 'Shared start IPC clone error';
+    const cloneLike = /could not be cloned|clone/i.test(message);
+    if (sharedPreferred && cloneLike) {
+      pushHdrDecisionTrace('shared-start-clone-retry-http', {
+        reason: message
+      });
+      try {
+        start = await electronAPI.hdrSharedStart({
+          ...startPayloadBase,
+          allowSharedBuffer: false
+        });
+      } catch (retryError) {
+        return {
+          ok: false,
+          reason: 'SHARED_START_CLONE_ERROR',
+          message: retryError && retryError.message ? retryError.message : message
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        reason: 'SHARED_START_CLONE_ERROR',
+        message
+      };
+    }
   }
 
   if (!start || !start.ok) {
@@ -1947,13 +2148,75 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   pushHdrDecisionTrace('native-start-ok', {
     sessionId: Number(start.sessionId || 0),
     width: Math.max(1, Number(start.width || 1)),
-    height: Math.max(1, Number(start.height || 1))
+    height: Math.max(1, Number(start.height || 1)),
+    supportsSharedFrameRead: start && start.supportsSharedFrameRead !== false,
+    transportMode: String((start && start.transportMode) || '')
   });
   const width = Math.max(1, Number(start.width || 1));
   const height = Math.max(1, Number(start.height || 1));
   const stride = Math.max(width * 4, Number(start.stride || width * 4));
-  const sharedFrameBuffer = start.sharedFrameBuffer;
-  const sharedControlBuffer = start.sharedControlBuffer;
+  let sharedFrameBuffer = start.sharedFrameBuffer;
+  let sharedControlBuffer = start.sharedControlBuffer;
+  let sharedBindOk = false;
+  if (sharedPreferred && !hdrMappingState.sharedBindCloneBlocked && start && Number(start.sessionId || 0) > 0) {
+    hdrMappingState.uiBindAttempts += 1;
+    hdrMappingState.uiBindLastReason = '';
+    hdrMappingState.uiBindLastError = '';
+    try {
+      const frameBytes = Math.max(1024 * 1024, stride * height);
+      sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
+      sharedControlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * HDR_SHARED_CONTROL_SLOTS);
+      let bindResult = null;
+      try {
+        bindResult = await electronAPI.hdrSharedBind({
+          sessionId: Number(start.sessionId || 0),
+          sharedFrameBuffer,
+          sharedControlBuffer
+        });
+      } catch (bindInvokeError) {
+        bindResult = {
+          ok: false,
+          bound: false,
+          reason: 'BIND_INVOKE_CLONE_ERROR',
+          message: bindInvokeError && bindInvokeError.message ? bindInvokeError.message : 'bind invoke clone error'
+        };
+      }
+      if (!bindResult || !bindResult.ok) {
+        bindResult = await electronAPI.hdrSharedBindAsync({
+          sessionId: Number(start.sessionId || 0),
+          sharedFrameBuffer,
+          sharedControlBuffer
+        });
+      }
+      sharedBindOk = Boolean(bindResult && bindResult.ok && bindResult.bound);
+      hdrMappingState.uiBindLastReason = String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED'));
+      hdrMappingState.uiBindLastError = String((bindResult && bindResult.message) || '');
+      pushHdrDecisionTrace('shared-bind', {
+        ok: sharedBindOk,
+        reason: String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED')),
+        message: String((bindResult && bindResult.message) || '')
+      });
+      if (!sharedBindOk) {
+        hdrMappingState.uiBindFailures += 1;
+        sharedFrameBuffer = null;
+        sharedControlBuffer = null;
+      }
+    } catch (bindError) {
+      hdrMappingState.uiBindFailures += 1;
+      hdrMappingState.uiBindLastReason = 'BIND_EXCEPTION';
+      hdrMappingState.uiBindLastError = bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION';
+      if (/could not be cloned|clone/i.test(String(hdrMappingState.uiBindLastError))) {
+        hdrMappingState.sharedBindCloneBlocked = true;
+        hdrMappingState.uiBindLastReason = 'BIND_CLONE_BLOCKED';
+      }
+      pushHdrDecisionTrace('shared-bind-exception', {
+        message: bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION'
+      });
+      sharedFrameBuffer = null;
+      sharedControlBuffer = null;
+      sharedBindOk = false;
+    }
+  }
 
   nativeHdrState.active = true;
   nativeHdrState.sessionId = Number(start.sessionId || 0);
@@ -1979,12 +2242,16 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   nativeHdrState.lastHttpFrameSeq = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
   hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
-  hdrMappingState.runtimeStage = String(start.pipelineStage || '');
+  hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(
+    sharedBindOk ? 'shared-buffer' : (start.transportMode || 'http-fallback')
+  );
+  hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
+    (hdrMappingState.runtimeTransportMode ? ('/' + hdrMappingState.runtimeTransportMode) : '');
   hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));
   hdrMappingState.routePreference = normalizeHdrRoutePreference(start.requestedRoute || routePreference);
 
   ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
-  setHdrRuntimeRoute(String(start.runtimeRoute || 'native-legacy'), '目前路徑: ' + String(start.runtimeRoute || 'native-legacy'));
+  setHdrRuntimeRoute(String(start.runtimeRoute || 'native-legacy'), null, hdrMappingState.runtimeTransportMode);
 
   await pollNativeHdrFrame();
   return { ok: true, start };
@@ -2147,11 +2414,27 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeRouteStage = '';
     hdrMappingState.runtimeBackend = '';
     hdrMappingState.runtimeStage = '';
+    hdrMappingState.runtimeTransportMode = '';
     hdrMappingState.routePreference = 'auto';
     hdrMappingState.fallbackLevel = 3;
     hdrMappingState.mainSharedSessionCount = 0;
     hdrMappingState.mainTopFrameSeq = 0;
     hdrMappingState.mainTopReadFailures = 0;
+    hdrMappingState.mainTopBindAttempts = 0;
+    hdrMappingState.mainTopBindFailures = 0;
+    hdrMappingState.mainTopLastBindReason = '';
+    hdrMappingState.mainTopLastBindError = '';
+    hdrMappingState.uiBindAttempts = 0;
+    hdrMappingState.uiBindFailures = 0;
+    hdrMappingState.uiBindLastReason = '';
+    hdrMappingState.uiBindLastError = '';
+    hdrMappingState.mainTopReadMsAvg = 0;
+    hdrMappingState.mainTopCopyMsAvg = 0;
+    hdrMappingState.mainTopSabWriteMsAvg = 0;
+    hdrMappingState.mainTopBytesPerFrameAvg = 0;
+    hdrMappingState.mainTopBytesPerSec = 0;
+    hdrMappingState.mainTopPumpJitterMsAvg = 0;
+    hdrMappingState.mainTopFrameIntervalMsAvg = 0;
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
     hdrMappingState.nativeEnvFlag = '';
@@ -2173,6 +2456,7 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeRouteReason = String(result.reason || (result.nativeRouteEnabled ? 'OK' : 'NATIVE_ROUTE_DISABLED'));
   hdrMappingState.nativeRouteStage = String(result.stage || '');
   hdrMappingState.runtimeStage = String(result.wgcStage || result.stage || '');
+  hdrMappingState.runtimeTransportMode = '';
   hdrMappingState.routePreference = normalizeHdrRoutePreference(result.routePreference || hdrMappingState.routePreference);
   const diagnostics = result.diagnostics || {};
   const sessions = Array.isArray(diagnostics.sharedSessions) ? diagnostics.sharedSessions : [];
@@ -2186,10 +2470,25 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainSharedSessionCount = Number(diagnostics.sharedSessionCount || sessions.length || 0);
   hdrMappingState.mainTopFrameSeq = Number(top && top.frameSeq ? top.frameSeq : 0);
   hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
+  hdrMappingState.mainTopBindAttempts = Number(top && top.bindAttempts ? top.bindAttempts : 0);
+  hdrMappingState.mainTopBindFailures = Number(top && top.bindFailures ? top.bindFailures : 0);
+  hdrMappingState.mainTopLastBindReason = String((top && top.lastBindReason) || '');
+  hdrMappingState.mainTopLastBindError = String((top && top.lastBindError) || '');
+  hdrMappingState.mainTopReadMsAvg = Number(top && top.perf && top.perf.readMsAvg ? top.perf.readMsAvg : 0);
+  hdrMappingState.mainTopCopyMsAvg = Number(top && top.perf && top.perf.copyMsAvg ? top.perf.copyMsAvg : 0);
+  hdrMappingState.mainTopSabWriteMsAvg = Number(top && top.perf && top.perf.sabWriteMsAvg ? top.perf.sabWriteMsAvg : 0);
+  hdrMappingState.mainTopBytesPerFrameAvg = Number(top && top.perf && top.perf.bytesPerFrameAvg ? top.perf.bytesPerFrameAvg : 0);
+  hdrMappingState.mainTopBytesPerSec = Number(top && top.perf && top.perf.bytesPerSec ? top.perf.bytesPerSec : 0);
+  hdrMappingState.mainTopPumpJitterMsAvg = Number(top && top.perf && top.perf.pumpJitterMsAvg ? top.perf.pumpJitterMsAvg : 0);
+  hdrMappingState.mainTopFrameIntervalMsAvg = Number(top && top.perf && top.perf.frameIntervalMsAvg ? top.perf.frameIntervalMsAvg : 0);
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
   if (top && top.runtimeRoute) {
-    hdrMappingState.runtimeRoute = String(top.runtimeRoute || hdrMappingState.runtimeRoute || 'fallback');
+    const topTransportMode = normalizeHdrTransportMode(top.transportMode || '') ||
+      (top.supportsSharedFrameRead ? 'shared-buffer' : '');
+    hdrMappingState.runtimeTransportMode = topTransportMode;
+    hdrMappingState.runtimeStage = String((top.pipelineStage || '') + (topTransportMode ? ('/' + topTransportMode) : '')) || hdrMappingState.runtimeStage;
+    setHdrRuntimeRoute(String(top.runtimeRoute || hdrMappingState.runtimeRoute || 'fallback'), null, topTransportMode);
   }
   hdrMappingState.runtimeBackend = String((top && top.nativeBackend) || '');
   hdrMappingState.fallbackLevel = Number((top && top.fallbackLevel) || hdrMappingState.fallbackLevel || 3);
@@ -3422,6 +3721,11 @@ async function startRecording() {
   await electronAPI.overlayCreate(selectedSource.display_id);
   await syncPenStyleToOverlay();
   await electronAPI.overlaySetEnabled(annotationState.enabled);
+  clearInterval(overlayStatePollTimer);
+  overlayStatePollTimer = setInterval(() => {
+    syncOverlayRuntimeState().catch(() => {});
+  }, 350);
+  syncOverlayRuntimeState().catch(() => {});
 
   clearInterval(cursorTimer);
   cursorUpdateInFlight = false;
@@ -3455,15 +3759,9 @@ async function startRecording() {
     hdrMappingModeSelect.disabled = true;
   }
 
-  const hasSystemAudio = sourceStream.getAudioTracks().length > 0;
-  const hasMicAudio = Boolean(micStream && micStream.getAudioTracks().length > 0);
-  const audioMode = hasSystemAudio || hasMicAudio
-    ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
-    : '音訊: 無';
-
   const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || (captureRoute && captureRoute.route) || 'fallback');
-  const routeLabel = runtimeRoute === 'fallback' ? 'Fallback' : runtimeRoute;
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+  hdrMappingState.runtimeRoute = runtimeRoute;
+  refreshRecordingStatusLine();
 }
 
 function stopRecording() {
@@ -3506,8 +3804,10 @@ function stopRecording() {
   }
 
   clearInterval(cursorTimer);
+  clearInterval(overlayStatePollTimer);
   cancelAnimationFrame(drawTimer);
   cursorTimer = 0;
+  overlayStatePollTimer = 0;
   drawTimer = 0;
   cursorUpdateInFlight = false;
   lastDrawNow = 0;
@@ -3541,13 +3841,26 @@ async function setPenMode(enabled) {
   try {
     const mode = await electronAPI.overlaySetEnabled(enabled);
     if (enabled && mode && mode.toggleMode) {
-      penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉）';
+      annotationState.autoNoBlock = Boolean(mode.autoNoBlock);
+      annotationState.autoNoBlockReason = String(mode.autoNoBlockReason || '');
+      const interactionMode = String(mode.interactionMode || annotationState.interactionMode || 'stable');
+      annotationState.interactionMode = interactionMode === 'smooth' ? 'smooth' : 'stable';
+      annotationState.wheelPauseMs = Number(mode.wheelPauseMs || 0);
+      if (penInteractionModeSelect) {
+        penInteractionModeSelect.value = annotationState.interactionMode;
+      }
+      refreshPenToggleLabel();
+      refreshRecordingStatusLine();
       return;
     }
   } catch (_error) {
   }
 
-  penToggleBtn.textContent = enabled ? '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉）' : '畫筆模式: 關';
+  annotationState.autoNoBlock = false;
+  annotationState.autoNoBlockReason = '';
+  annotationState.wheelPauseMs = 0;
+  refreshPenToggleLabel();
+  refreshRecordingStatusLine();
 }
 
 playheadInput.addEventListener('input', () => {
@@ -3762,6 +4075,23 @@ penToggleBtn.addEventListener('click', () => {
   setPenMode(!annotationState.enabled).catch(() => {});
 });
 
+if (penInteractionModeSelect) {
+  penInteractionModeSelect.addEventListener('change', async () => {
+    const selectedMode = String(penInteractionModeSelect.value || 'stable').toLowerCase() === 'smooth' ? 'smooth' : 'stable';
+    annotationState.interactionMode = selectedMode;
+    const result = await electronAPI.overlaySetInteractionMode(selectedMode).catch(() => null);
+    if (result && result.ok) {
+      annotationState.interactionMode = String(result.interactionMode || selectedMode) === 'smooth' ? 'smooth' : 'stable';
+      penInteractionModeSelect.value = annotationState.interactionMode;
+      if (annotationState.enabled) {
+        const wheelPauseMs = Number(result.wheelPauseMs || 0);
+        penToggleBtn.textContent = '畫筆模式: 開（Ctrl 開啟；雙按 Ctrl 關閉；滾輪暫停 ' + wheelPauseMs + 'ms）';
+      }
+    }
+    refreshRecordingStatusLine();
+  });
+}
+
 penColorInput.addEventListener('input', () => {
   annotationState.color = penColorInput.value;
   syncPenStyleToOverlay();
@@ -3795,6 +4125,9 @@ stopBtn.addEventListener('click', stopRecording);
 setEditorVisible(false);
 updateEditorButtons();
 setExportDebug('待命', 'MODE_AUTO', '目前模式: 自動（ffmpeg 優先）');
+if (penInteractionModeSelect) {
+  penInteractionModeSelect.value = annotationState.interactionMode;
+}
 setPenMode(true).catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);

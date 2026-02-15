@@ -23,6 +23,20 @@ const state = {
   bridgeError: "",
   pumpIntervalMs: 16,
   readTimeoutMs: 40,
+  noFrameStreak: 0,
+  reusableFrameBuffer: null,
+  reusableFrameLength: 0,
+  perf: {
+    readMsAvg: 0,
+    copyMsAvg: 0,
+    sabWriteMsAvg: 0,
+    bytesPerFrameAvg: 0,
+    bytesPerSec: 0,
+    pumpJitterMsAvg: 0,
+    frameIntervalMsAvg: 0,
+    lastPumpAt: 0,
+    lastFrameAt: 0,
+  },
 };
 
 const CONTROL_INDEX = {
@@ -34,7 +48,16 @@ const CONTROL_INDEX = {
   BYTE_LENGTH: 5,
   TS_LOW: 6,
   TS_HIGH: 7,
+  PIXEL_FORMAT: 8,
 };
+
+function encodePixelFormat(value) {
+  const fmt = String(value || "").trim().toUpperCase();
+  if (fmt === "BGRA8") {
+    return 2;
+  }
+  return 1; // RGBA8 default
+}
 
 function emit(message) {
   const payload = message || {};
@@ -105,6 +128,32 @@ function clearPumpTimer() {
   state.pumpTimer = 0;
 }
 
+function ewma(prev, sample, alpha = 0.2) {
+  const p = Number(prev || 0);
+  const s = Number(sample || 0);
+  if (!Number.isFinite(s) || s <= 0) {
+    return p;
+  }
+  return p > 0 ? (p * (1 - alpha) + s * alpha) : s;
+}
+
+function toStableBuffer(bytes) {
+  if (!bytes || !bytes.length) {
+    return null;
+  }
+  if (Buffer.isBuffer(bytes)) {
+    return bytes;
+  }
+  const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const required = Number(input.length || 0);
+  if (!state.reusableFrameBuffer || state.reusableFrameBuffer.length < required) {
+    state.reusableFrameBuffer = Buffer.allocUnsafe(required);
+  }
+  state.reusableFrameBuffer.set(input.subarray(0, required), 0);
+  state.reusableFrameLength = required;
+  return state.reusableFrameBuffer.subarray(0, state.reusableFrameLength);
+}
+
 function ensureSharedBuffers(frameByteLength) {
   const safeLength = Math.max(1024 * 1024, Number(frameByteLength || 0));
   if (!state.sharedFrameBuffer || !state.sharedFrameView || state.sharedFrameView.length < safeLength) {
@@ -122,6 +171,7 @@ function writeFrameToSharedBuffer(result, bytes) {
   if (!bytes || !bytes.length) {
     return;
   }
+  const t0 = Number(process.hrtime.bigint()) / 1e6;
   ensureSharedBuffers(bytes.length);
   const len = Math.min(bytes.length, state.sharedFrameView.length);
   state.sharedFrameView.set(bytes.subarray(0, len), 0);
@@ -137,8 +187,15 @@ function writeFrameToSharedBuffer(result, bytes) {
   Atomics.store(state.sharedControlView, CONTROL_INDEX.BYTE_LENGTH, len);
   Atomics.store(state.sharedControlView, CONTROL_INDEX.TS_LOW, tsLow);
   Atomics.store(state.sharedControlView, CONTROL_INDEX.TS_HIGH, tsHigh);
+  Atomics.store(
+    state.sharedControlView,
+    CONTROL_INDEX.PIXEL_FORMAT,
+    encodePixelFormat(result && result.pixelFormat ? result.pixelFormat : state.lastFrameMeta.pixelFormat)
+  );
   Atomics.store(state.sharedControlView, CONTROL_INDEX.FRAME_SEQ, seq);
   Atomics.store(state.sharedControlView, CONTROL_INDEX.STATUS, 1);
+  const t1 = Number(process.hrtime.bigint()) / 1e6;
+  state.perf.sabWriteMsAvg = ewma(state.perf.sabWriteMsAvg, t1 - t0);
 }
 
 async function stopCaptureInternal() {
@@ -150,6 +207,9 @@ async function stopCaptureInternal() {
   const nativeSessionId = Number(state.session.nativeSessionId || 0);
   state.session = null;
   state.latestFrameBytes = null;
+  state.noFrameStreak = 0;
+  state.perf.lastPumpAt = 0;
+  state.perf.lastFrameAt = 0;
   if (bridge && typeof bridge.stopCapture === "function" && nativeSessionId > 0) {
     try {
       await Promise.resolve(bridge.stopCapture({ nativeSessionId }));
@@ -169,19 +229,37 @@ async function pumpFrameLoop() {
     return;
   }
 
+  const loopStartMs = Number(process.hrtime.bigint()) / 1e6;
+  if (state.perf.lastPumpAt > 0) {
+    const expected = Math.max(1, Number(state.pumpIntervalMs || 16));
+    const actual = Math.max(0, loopStartMs - state.perf.lastPumpAt);
+    state.perf.pumpJitterMsAvg = ewma(state.perf.pumpJitterMsAvg, Math.abs(actual - expected));
+  }
+  state.perf.lastPumpAt = loopStartMs;
+
+  let gotFrame = false;
   try {
+    const readStartMs = Number(process.hrtime.bigint()) / 1e6;
     const result = await Promise.resolve(
       bridge.readFrame({
         nativeSessionId: Number(state.session.nativeSessionId || 0),
         timeoutMs: Number(state.readTimeoutMs || 40),
       })
     );
+    const readEndMs = Number(process.hrtime.bigint()) / 1e6;
+    state.perf.readMsAvg = ewma(state.perf.readMsAvg, readEndMs - readStartMs);
     if (result && result.ok) {
       const bytes = result.bytes;
       if (bytes && bytes.length) {
-        state.latestFrameBytes = Buffer.from(bytes);
+        gotFrame = true;
+        state.noFrameStreak = 0;
+        const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
+        state.latestFrameBytes = toStableBuffer(bytes);
+        const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
+        state.perf.copyMsAvg = ewma(state.perf.copyMsAvg, copyEndMs - copyStartMs);
         state.frameSeq += 1;
-        state.lastFrameAt = Date.now();
+        const nowTs = Date.now();
+        state.lastFrameAt = nowTs;
         state.lastFrameMeta = {
           width: Number(result.width || 0),
           height: Number(result.height || 0),
@@ -189,14 +267,29 @@ async function pumpFrameLoop() {
           pixelFormat: String(result.pixelFormat || "BGRA8"),
         };
         writeFrameToSharedBuffer(result, state.latestFrameBytes);
+        const bytesLen = Number(state.latestFrameBytes.length || 0);
+        state.perf.bytesPerFrameAvg = ewma(state.perf.bytesPerFrameAvg, bytesLen);
+        if (state.perf.lastFrameAt > 0) {
+          const deltaMs = Math.max(1, nowTs - state.perf.lastFrameAt);
+          const perSec = (bytesLen * 1000) / deltaMs;
+          state.perf.bytesPerSec = ewma(state.perf.bytesPerSec, perSec);
+          state.perf.frameIntervalMsAvg = ewma(state.perf.frameIntervalMsAvg, deltaMs);
+        }
+        state.perf.lastFrameAt = nowTs;
       }
+    } else {
+      state.noFrameStreak += 1;
     }
   } catch (_error) {
+    state.noFrameStreak += 1;
   } finally {
     if (state.session) {
+      const baseInterval = Math.max(1, Number(state.pumpIntervalMs || 16));
+      const backoffMs = gotFrame ? 0 : Math.min(48, Math.max(0, state.noFrameStreak) * 2);
+      const nextDelay = baseInterval + backoffMs;
       state.pumpTimer = setTimeout(() => {
         pumpFrameLoop().catch(() => {});
-      }, Math.max(1, Number(state.pumpIntervalMs || 16)));
+      }, nextDelay);
     }
   }
 }
@@ -212,6 +305,15 @@ async function handleRequest(requestId, command, payload) {
       bridgeKind: state.bridgeKind || "",
       pumpIntervalMs: Number(state.pumpIntervalMs || 0),
       readTimeoutMs: Number(state.readTimeoutMs || 0),
+      perf: {
+        readMsAvg: Number(state.perf.readMsAvg || 0),
+        copyMsAvg: Number(state.perf.copyMsAvg || 0),
+        sabWriteMsAvg: Number(state.perf.sabWriteMsAvg || 0),
+        bytesPerFrameAvg: Number(state.perf.bytesPerFrameAvg || 0),
+        bytesPerSec: Number(state.perf.bytesPerSec || 0),
+        pumpJitterMsAvg: Number(state.perf.pumpJitterMsAvg || 0),
+        frameIntervalMsAvg: Number(state.perf.frameIntervalMsAvg || 0),
+      },
       bridgeError: state.bridgeError || "",
     });
     return;
@@ -247,6 +349,7 @@ async function handleRequest(requestId, command, payload) {
     state.readTimeoutMs = Math.max(1, Math.min(120, state.pumpIntervalMs + 6));
     state.frameSeq = 0;
     state.lastFrameAt = 0;
+    state.noFrameStreak = 0;
     state.latestFrameBytes = null;
     state.lastFrameMeta = {
       width: Number(result.width || 0),
@@ -272,6 +375,25 @@ async function handleRequest(requestId, command, payload) {
   if (command === "capture-stop") {
     await stopCaptureInternal();
     response(requestId, true, { stopped: true });
+    return;
+  }
+
+  if (command === "bind-shared") {
+    const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
+    const sharedControlBuffer = payload && payload.sharedControlBuffer;
+    if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      response(requestId, false, {
+        reason: "INVALID_SHARED_BUFFER",
+        message: "shared buffers are required",
+      });
+      return;
+    }
+    state.sharedFrameBuffer = sharedFrameBuffer;
+    state.sharedControlBuffer = sharedControlBuffer;
+    state.sharedFrameView = new Uint8Array(sharedFrameBuffer);
+    state.sharedControlView = new Int32Array(sharedControlBuffer);
+    state.sharedControlView.fill(0);
+    response(requestId, true, { bound: true });
     return;
   }
 

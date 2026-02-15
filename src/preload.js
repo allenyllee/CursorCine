@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlayCreate: (displayId) => ipcRenderer.invoke('overlay:create', displayId),
   overlayDestroy: () => ipcRenderer.invoke('overlay:destroy'),
   overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),
+  overlayGetState: () => ipcRenderer.invoke('overlay:get-state'),
+  overlaySetInteractionMode: (mode) => ipcRenderer.invoke('overlay:set-interaction-mode', mode),
   overlaySetPenStyle: (style) => ipcRenderer.invoke('overlay:set-pen-style', style),
   overlayUndo: () => ipcRenderer.invoke('overlay:undo'),
   overlayClear: () => ipcRenderer.invoke('overlay:clear'),
@@ -35,6 +37,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hdrWorkerFrameRead: () => ipcRenderer.invoke('hdr:worker-frame-read'),
   hdrSharedStart: (payload) => ipcRenderer.invoke('hdr:shared-start', payload),
   hdrSharedBind: (payload) => ipcRenderer.invoke('hdr:shared-bind', payload),
+  hdrSharedBindAsync: (payload) => new Promise((resolve) => {
+    const requestId = 'bind-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ipcRenderer.removeListener('hdr:shared-bind-async:result', onResult);
+      resolve(result || { ok: false, bound: false, reason: 'BIND_UNKNOWN', message: 'Unknown bind result' });
+    };
+    const onResult = (_event, message) => {
+      if (!message || String(message.requestId || '') !== requestId) {
+        return;
+      }
+      done(message.result || { ok: false, bound: false, reason: 'BIND_EMPTY_RESULT', message: 'Empty bind result' });
+    };
+    const timer = setTimeout(() => {
+      done({ ok: false, bound: false, reason: 'BIND_TIMEOUT', message: 'Shared bind timeout' });
+    }, 2500);
+    ipcRenderer.on('hdr:shared-bind-async:result', onResult);
+    ipcRenderer.send('hdr:shared-bind-async', {
+      ...(payload || {}),
+      requestId
+    });
+  }),
   hdrSharedStop: (payload) => ipcRenderer.invoke('hdr:shared-stop', payload),
   hdrExperimentalState: (payload) => ipcRenderer.invoke('hdr:experimental-state', payload),
   hdrDiagnosticsSnapshot: () => ipcRenderer.invoke('hdr:diagnostics-snapshot'),

@@ -43,8 +43,17 @@ const HDR_SHARED_CONTROL = {
   STRIDE: 4,
   BYTE_LENGTH: 5,
   TS_LOW: 6,
-  TS_HIGH: 7
+  TS_HIGH: 7,
+  PIXEL_FORMAT: 8
 };
+
+function encodeHdrPixelFormat(value) {
+  const fmt = String(value || '').trim().toUpperCase();
+  if (fmt === 'BGRA8') {
+    return 2;
+  }
+  return 1; // RGBA8 default
+}
 
 let clickHookEnabled = false;
 let clickHookError = '';
@@ -56,13 +65,23 @@ let mainWindow = null;
 let overlayPenEnabled = false;
 let overlayDrawToggle = false;
 let overlayAltPressed = false;
+let overlayCtrlChordActive = false;
 let overlayWheelLockUntil = 0;
 let overlayWheelResumeTimer = null;
+let overlayReentryGraceTimer = null;
 
 let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
+let overlayLastPointerInside = null;
+let overlayReentryGraceUntil = 0;
+let overlaySafeArmUntil = 0;
+let overlaySafeReleaseUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
+let overlayAutoNoBlock = false;
+let overlayAutoNoBlockReason = '';
+let overlayRiskWindowStartMs = 0;
+let overlayRiskTransitionCount = 0;
 let blobUploadSessionSeq = 1;
 const blobUploadSessions = new Map();
 const trackedUploadTempDirs = new Set();
@@ -102,8 +121,48 @@ let hdrNativeSmokeState = {
   readReason: '',
   stopReason: ''
 };
-const OVERLAY_WHEEL_PAUSE_MS = 450;
+const OVERLAY_SAFE_MODE = String(process.env.CURSORCINE_OVERLAY_SAFE_MODE || '0') === '1';
+const OVERLAY_SAFE_RELEASE_MS_BASE = Math.max(
+  120,
+  Math.min(1200, Number(process.env.CURSORCINE_OVERLAY_SAFE_RELEASE_MS || 360) || 360)
+);
+const OVERLAY_RISK_TRANSITION_WINDOW_MS = 2200;
+const OVERLAY_RISK_TRANSITION_THRESHOLD = 3;
+const OVERLAY_INTERACTION_MODE_DEFAULT = String(process.env.CURSORCINE_OVERLAY_INTERACTION_MODE || 'stable').trim().toLowerCase();
+let overlayInteractionMode = OVERLAY_INTERACTION_MODE_DEFAULT === 'smooth' ? 'smooth' : 'stable';
 let crossOriginIsolationHeadersInstalled = false;
+
+function normalizeOverlayInteractionMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return mode === 'smooth' ? 'smooth' : 'stable';
+}
+
+function getOverlayInteractionProfile() {
+  if (overlayInteractionMode === 'smooth') {
+    return {
+      mode: 'smooth',
+      wheelPauseMs: 55,
+      reentryPauseMs: 30,
+      reentryGraceMs: 180,
+      reentryClickThrough: true,
+      keepWheelLockIntercept: false,
+      wheelHideOverlay: false,
+      safeArmMs: 30,
+      safeReleaseMs: 35
+    };
+  }
+  return {
+    mode: 'stable',
+    wheelPauseMs: 450,
+    reentryPauseMs: 140,
+    reentryGraceMs: 1200,
+    reentryClickThrough: false,
+    keepWheelLockIntercept: true,
+    wheelHideOverlay: true,
+    safeArmMs: 320,
+    safeReleaseMs: OVERLAY_SAFE_RELEASE_MS_BASE
+  };
+}
 
 function pushHdrTrace(type, detail = {}) {
   hdrTrace.push({
@@ -114,6 +173,15 @@ function pushHdrTrace(type, detail = {}) {
   if (hdrTrace.length > HDR_TRACE_LIMIT) {
     hdrTrace.splice(0, hdrTrace.length - HDR_TRACE_LIMIT);
   }
+}
+
+function ewma(prev, sample, alpha = 0.2) {
+  const p = Number(prev || 0);
+  const s = Number(sample || 0);
+  if (!Number.isFinite(s) || s <= 0) {
+    return p;
+  }
+  return p > 0 ? (p * (1 - alpha) + s * alpha) : s;
 }
 
 function ensureHdrFrameServer() {
@@ -695,16 +763,38 @@ function pauseOverlayByWheel() {
   if (!overlayDrawEnabled()) {
     return;
   }
+  const profile = getOverlayInteractionProfile();
 
-  overlayWheelLockUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
+  overlayWheelLockUntil = Date.now() + profile.wheelPauseMs;
+  if (OVERLAY_SAFE_MODE) {
+    // After wheel-pause resumes, keep a short capture window to avoid
+    // immediate click-through on the first pointer interaction.
+    const resumeAt = overlayWheelLockUntil;
+    overlaySafeArmUntil = Math.max(overlaySafeArmUntil, resumeAt + profile.safeArmMs);
+    overlaySafeReleaseUntil = Math.max(overlaySafeReleaseUntil, resumeAt + profile.safeReleaseMs);
+  }
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("overlay:clear");
-    overlayWindow.setIgnoreMouseEvents(true);
-    if (overlayWindow.isVisible()) {
-      overlayWindow.hide();
+    if (profile.wheelHideOverlay) {
+      overlayWindow.setIgnoreMouseEvents(true);
+      if (overlayWindow.isVisible()) {
+        overlayWindow.hide();
+      }
+      overlayWindow.blur();
+    } else {
+      // Smooth mode: keep overlay visible during wheel pause to reduce
+      // hide/show flicker and perceived wheel stutter.
+      if (!overlayWindow.isVisible()) {
+        if (typeof overlayWindow.showInactive === "function") {
+          overlayWindow.showInactive();
+        } else {
+          overlayWindow.show();
+        }
+      }
+      overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     }
-    overlayWindow.blur();
   }
 
   scheduleOverlayWheelResume();
@@ -727,6 +817,68 @@ function overlayDrawActive() {
   return overlayDrawEnabled() && Date.now() >= overlayWheelLockUntil;
 }
 
+function scheduleOverlayReentryGraceEnd() {
+  if (overlayReentryGraceTimer) {
+    clearTimeout(overlayReentryGraceTimer);
+    overlayReentryGraceTimer = null;
+  }
+  const waitMs = Math.max(0, overlayReentryGraceUntil - Date.now());
+  if (waitMs <= 0) {
+    applyOverlayMouseMode();
+    return;
+  }
+  overlayReentryGraceTimer = setTimeout(() => {
+    overlayReentryGraceTimer = null;
+    applyOverlayMouseMode();
+  }, waitMs + 10);
+}
+
+function resetOverlayRiskState() {
+  overlayAutoNoBlock = false;
+  overlayAutoNoBlockReason = '';
+  overlayRiskWindowStartMs = 0;
+  overlayRiskTransitionCount = 0;
+}
+
+function enableOverlayAutoNoBlock(reason) {
+  if (overlayAutoNoBlock) {
+    return;
+  }
+  overlayAutoNoBlock = true;
+  overlayAutoNoBlockReason = String(reason || 'RISK_DETECTED');
+  applyOverlayMouseMode();
+  emitOverlayPointer();
+}
+
+function noteOverlayRiskTransition() {
+  if (!overlayRecordingActive || !overlayDrawEnabled() || mouseDown || overlayAutoNoBlock) {
+    return;
+  }
+  const now = Date.now();
+  if (overlayRiskWindowStartMs <= 0 || (now - overlayRiskWindowStartMs) > OVERLAY_RISK_TRANSITION_WINDOW_MS) {
+    overlayRiskWindowStartMs = now;
+    overlayRiskTransitionCount = 1;
+    return;
+  }
+  overlayRiskTransitionCount += 1;
+  if (overlayRiskTransitionCount >= OVERLAY_RISK_TRANSITION_THRESHOLD) {
+    enableOverlayAutoNoBlock('TRANSITION_OSCILLATION');
+  }
+}
+
+function isPointerInsideOverlayBounds() {
+  if (!overlayBounds) {
+    return false;
+  }
+  const p = screen.getCursorScreenPoint();
+  return (
+    p.x >= overlayBounds.x &&
+    p.x < overlayBounds.x + overlayBounds.width &&
+    p.y >= overlayBounds.y &&
+    p.y < overlayBounds.y + overlayBounds.height
+  );
+}
+
 function emitOverlayPointer() {
   if (!overlayWindow || overlayWindow.isDestroyed() || !overlayBounds) {
     return;
@@ -746,17 +898,48 @@ function emitOverlayPointer() {
     down: mouseDown,
     timestamp: Date.now()
   });
+
+  if (overlayLastPointerInside === null || overlayLastPointerInside !== inside) {
+    const wasInside = overlayLastPointerInside;
+    overlayLastPointerInside = inside;
+    noteOverlayRiskTransition();
+    const profile = getOverlayInteractionProfile();
+
+    // Re-entering target display can leave HDR video composition in a bad state on some GPUs.
+    // Perform a short overlay pause/resume cycle (same mechanism as wheel pause) automatically.
+    if (inside && wasInside === false && overlayDrawEnabled()) {
+      overlayWheelLockUntil = Date.now() + profile.reentryPauseMs;
+      overlayReentryGraceUntil = Date.now() + profile.reentryGraceMs;
+      if (OVERLAY_SAFE_MODE) {
+        overlaySafeArmUntil = overlayReentryGraceUntil + profile.safeArmMs;
+      }
+      scheduleOverlayWheelResume();
+      scheduleOverlayReentryGraceEnd();
+    }
+
+    applyOverlayMouseMode();
+  }
 }
 
 function applyOverlayMouseMode() {
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     return;
   }
+  const profile = getOverlayInteractionProfile();
 
+  const now = Date.now();
   const drawEnabled = overlayDrawEnabled();
-  const wheelLocked = Date.now() < overlayWheelLockUntil;
-  const capturePointer = overlayDrawActive();
-  const shouldKeepVisible = drawEnabled && !wheelLocked;
+  const wheelLocked = now < overlayWheelLockUntil;
+  const pointerInside = isPointerInsideOverlayBounds();
+  const capturePointer = overlayDrawActive() && pointerInside;
+  const shouldKeepVisible = drawEnabled && !wheelLocked && pointerInside;
+  const pausedByOutside = drawEnabled && !wheelLocked && !pointerInside;
+  const inReentryGrace = shouldKeepVisible && now < overlayReentryGraceUntil;
+  const inSafeArm = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeArmUntil;
+  const inSafeRelease = shouldKeepVisible && OVERLAY_SAFE_MODE && now < overlaySafeReleaseUntil;
+  const reentryBlock = inReentryGrace && !profile.reentryClickThrough;
+  const shouldBlockBackground = !overlayAutoNoBlock && shouldKeepVisible &&
+    (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease || reentryBlock) : true);
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -769,8 +952,39 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
-    overlayWindow.setIgnoreMouseEvents(false);
+    // In draw-active mode, default behavior blocks background interactions.
+    // Safe mode only blocks while actively drawing (mouse down).
+    overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+    if (!shouldBlockBackground) {
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    } else {
+      overlayWindow.setIgnoreMouseEvents(false);
+    }
   } else if (drawEnabled && wheelLocked) {
+    // In safe mode, keep intercepting while wheel-lock is active so the
+    // first stroke right after wheel input does not click-through.
+    if (OVERLAY_SAFE_MODE && pointerInside && profile.keepWheelLockIntercept) {
+      if (!overlayWindow.isVisible()) {
+        if (typeof overlayWindow.showInactive === "function") {
+          overlayWindow.showInactive();
+        } else {
+          overlayWindow.show();
+        }
+      }
+      overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+      overlayWindow.setIgnoreMouseEvents(false);
+    } else {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+      overlayWindow.setIgnoreMouseEvents(true);
+
+      if (overlayWindow.isVisible()) {
+        overlayWindow.hide();
+      }
+
+      overlayWindow.blur();
+    }
+  } else if (pausedByOutside) {
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true);
 
     if (overlayWindow.isVisible()) {
@@ -783,6 +997,7 @@ function applyOverlayMouseMode() {
       overlayWindow.webContents.send("overlay:clear");
     }
 
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true, { forward: true });
 
     if (overlayWindow.isVisible()) {
@@ -799,7 +1014,8 @@ function applyOverlayMouseMode() {
     mouseDown,
     toggleEnabled: clickHookEnabled,
     toggled: overlayDrawToggle,
-    wheelPaused: wheelLocked
+    wheelPaused: wheelLocked,
+    autoNoBlock: overlayAutoNoBlock
   });
   emitOverlayPointer();
 }
@@ -811,6 +1027,8 @@ function initGlobalClickHook() {
     uIOhook.on('mousedown', () => {
       mouseDown = true;
       overlayWheelLockUntil = 0;
+      overlayRiskWindowStartMs = 0;
+      overlayRiskTransitionCount = 0;
       const p = screen.getCursorScreenPoint();
       lastGlobalClick = {
         x: p.x,
@@ -822,6 +1040,9 @@ function initGlobalClickHook() {
     });
     uIOhook.on('mouseup', () => {
       mouseDown = false;
+      if (OVERLAY_SAFE_MODE && overlayDrawEnabled()) {
+        overlaySafeReleaseUntil = Date.now() + getOverlayInteractionProfile().safeReleaseMs;
+      }
       applyOverlayMouseMode();
       emitOverlayPointer();
     });
@@ -829,23 +1050,56 @@ function initGlobalClickHook() {
       emitOverlayPointer();
     });
     uIOhook.on('keydown', (event) => {
-      if (!isOverlayToggleKey(event)) {
+      const isCtrlKey = isOverlayToggleKey(event);
+      if (!isCtrlKey) {
+        if (overlayAltPressed) {
+          // Ctrl+<key> chord (for example Ctrl+C) should not toggle overlay draw mode.
+          overlayCtrlChordActive = true;
+        }
         return;
       }
       if (overlayAltPressed) {
         return;
       }
       overlayAltPressed = true;
+      overlayCtrlChordActive = false;
 
       if (!overlayPenEnabled) {
+        return;
+      }
+    });
+    uIOhook.on('keyup', (event) => {
+      if (!isOverlayToggleKey(event)) {
+        return;
+      }
+      if (!overlayAltPressed) {
+        return;
+      }
+      overlayAltPressed = false;
+
+      if (!overlayPenEnabled) {
+        return;
+      }
+      if (overlayCtrlChordActive) {
+        overlayCtrlChordActive = false;
         return;
       }
 
       const now = Date.now();
       if (!overlayDrawToggle) {
+        const pointerInside = isPointerInsideOverlayBounds();
         overlayDrawToggle = true;
         overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
+        if (overlayRecordingActive && pointerInside && !overlayAutoNoBlock) {
+          // Guard the highest-risk path: first activation on target display
+          // during recording can black-screen on some HDR/MPO stacks.
+          enableOverlayAutoNoBlock('FIRST_ACTIVATION_GUARD');
+        }
+        if (OVERLAY_SAFE_MODE) {
+          overlaySafeArmUntil = Date.now() + getOverlayInteractionProfile().safeArmMs;
+          overlaySafeReleaseUntil = 0;
+        }
         applyOverlayMouseMode();
         emitOverlayPointer();
         return;
@@ -855,6 +1109,7 @@ function initGlobalClickHook() {
         overlayDrawToggle = false;
         overlayWheelLockUntil = 0;
         overlayCtrlToggleArmUntil = 0;
+        overlaySafeReleaseUntil = 0;
       } else {
         overlayCtrlToggleArmUntil = now + 420;
         overlayWheelLockUntil = 0;
@@ -862,12 +1117,7 @@ function initGlobalClickHook() {
 
       applyOverlayMouseMode();
       emitOverlayPointer();
-    });
-    uIOhook.on('keyup', (event) => {
-      if (!isOverlayToggleKey(event)) {
-        return;
-      }
-      overlayAltPressed = false;
+      overlayCtrlChordActive = false;
     });
     uIOhook.on('wheel', () => {
       pauseOverlayByWheel();
@@ -946,6 +1196,10 @@ function createOverlayWindow(displayId) {
   const targetDisplay = getTargetDisplay(displayId);
   const b = targetDisplay.bounds;
   overlayBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+  overlayLastPointerInside = null;
+  overlayReentryGraceUntil = 0;
+  overlaySafeArmUntil = 0;
+  overlaySafeReleaseUntil = 0;
 
   overlayBorderWindow = new BrowserWindow({
     x: b.x,
@@ -1406,15 +1660,30 @@ function pumpHdrSharedSession(sessionId) {
   if (session.workerMode) {
     return;
   }
+  const loopStartMs = Number(process.hrtime.bigint()) / 1e6;
+  if (session.perf && session.perf.lastPumpAt > 0) {
+    const expected = HDR_SHARED_POLL_INTERVAL_MS;
+    const actual = Math.max(0, loopStartMs - session.perf.lastPumpAt);
+    session.perf.pumpJitterMsAvg = ewma(session.perf.pumpJitterMsAvg, Math.abs(actual - expected));
+  }
+  if (session.perf) {
+    session.perf.lastPumpAt = loopStartMs;
+  }
   try {
+    const readStartMs = Number(process.hrtime.bigint()) / 1e6;
     const frameResult = session.bridge.readFrame({
       nativeSessionId: session.nativeSessionId,
       timeoutMs: 80
     });
+    const readEndMs = Number(process.hrtime.bigint()) / 1e6;
+    if (session.perf) {
+      session.perf.readMsAvg = ewma(session.perf.readMsAvg, readEndMs - readStartMs);
+    }
 
     if (frameResult && frameResult.ok && frameResult.bytes) {
       const bytes = frameResult.bytes;
       const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
       session.frameSeq += 1;
       session.lastFrameAt = Date.now();
       const ts = Number(frameResult.timestampMs || Date.now());
@@ -1429,9 +1698,14 @@ function pumpHdrSharedSession(sessionId) {
       session.latestHeight = height;
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
-      session.latestFrameBytes = Buffer.from(src);
+      session.latestFrameBytes = src;
+      const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
+      if (session.perf) {
+        session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
+      }
 
       if (session.frameView && session.controlView) {
+        const sabStartMs = Number(process.hrtime.bigint()) / 1e6;
         const len = Math.min(src.length, session.frameView.length);
         session.frameView.set(src.subarray(0, len), 0);
         session.bytesPumped += len;
@@ -1442,16 +1716,34 @@ function pumpHdrSharedSession(sessionId) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.BYTE_LENGTH, len);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_LOW, tsLow);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.PIXEL_FORMAT, encodeHdrPixelFormat(session.latestPixelFormat));
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
+        const sabEndMs = Number(process.hrtime.bigint()) / 1e6;
+        if (session.perf) {
+          session.perf.sabWriteMsAvg = ewma(session.perf.sabWriteMsAvg, sabEndMs - sabStartMs);
+        }
+      }
+
+      if (session.perf) {
+        const bytesLen = Number(src.length || 0);
+        session.perf.bytesPerFrameAvg = ewma(session.perf.bytesPerFrameAvg, bytesLen);
+        if (session.perf.lastFrameAt > 0) {
+          const deltaMs = Math.max(1, session.lastFrameAt - session.perf.lastFrameAt);
+          session.perf.frameIntervalMsAvg = ewma(session.perf.frameIntervalMsAvg, deltaMs);
+          session.perf.bytesPerSec = ewma(session.perf.bytesPerSec, (bytesLen * 1000) / deltaMs);
+        }
+        session.perf.lastFrameAt = session.lastFrameAt;
       }
 
       session.readFailures = 0;
+      session.noFrameStreak = 0;
       session.lastReason = 'FRAME_OK';
       session.lastError = '';
     } else {
       session.readFailures += 1;
       session.totalReadFailures += 1;
+      session.noFrameStreak = Number(session.noFrameStreak || 0) + 1;
       session.lastReason = 'NO_FRAME';
       if (session.controlView && session.readFailures >= HDR_RUNTIME_MAX_READ_FAILURES) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 2);
@@ -1471,9 +1763,12 @@ function pumpHdrSharedSession(sessionId) {
     }
   } finally {
     if (hdrSharedSessions.has(sessionId)) {
+      const backoffMs = session.lastReason === 'FRAME_OK'
+        ? 0
+        : Math.min(48, Math.max(0, Number(session.noFrameStreak || 0)) * 2);
       session.pumpTimer = setTimeout(() => {
         pumpHdrSharedSession(sessionId);
-      }, HDR_SHARED_POLL_INTERVAL_MS);
+      }, HDR_SHARED_POLL_INTERVAL_MS + backoffMs);
     }
   }
 }
@@ -1483,12 +1778,32 @@ async function pumpHdrWorkerSession(sessionId) {
   if (!session || !session.workerMode) {
     return;
   }
+  if (session.workerDirectShared) {
+    clearTimeout(session.pumpTimer);
+    session.pumpTimer = 0;
+    return;
+  }
+  const loopStartMs = Number(process.hrtime.bigint()) / 1e6;
+  if (session.perf && session.perf.lastPumpAt > 0) {
+    const expected = HDR_SHARED_POLL_INTERVAL_MS;
+    const actual = Math.max(0, loopStartMs - session.perf.lastPumpAt);
+    session.perf.pumpJitterMsAvg = ewma(session.perf.pumpJitterMsAvg, Math.abs(actual - expected));
+  }
+  if (session.perf) {
+    session.perf.lastPumpAt = loopStartMs;
+  }
 
   try {
+    const readStartMs = Number(process.hrtime.bigint()) / 1e6;
     const frameResult = await hdrWorkerRequest('frame-read', {}, 1000);
+    const readEndMs = Number(process.hrtime.bigint()) / 1e6;
+    if (session.perf) {
+      session.perf.readMsAvg = ewma(session.perf.readMsAvg, readEndMs - readStartMs);
+    }
     if (frameResult && frameResult.ok && frameResult.hasFrame && frameResult.bytes) {
       const bytes = frameResult.bytes;
       const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
       const nextSeq = Number(frameResult.frameSeq || 0);
       session.frameSeq = nextSeq > session.frameSeq ? nextSeq : (session.frameSeq + 1);
       session.lastFrameAt = Date.now();
@@ -1502,14 +1817,50 @@ async function pumpHdrWorkerSession(sessionId) {
       session.latestHeight = height;
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
-      session.latestFrameBytes = Buffer.from(src);
+      session.latestFrameBytes = src;
+      const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
+      if (session.perf) {
+        session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
+      }
       session.bytesPumped += src.length;
+      if (session.frameView && session.controlView) {
+        const tsLow = ts >>> 0;
+        const tsHigh = Math.floor(ts / 4294967296) >>> 0;
+        const len = Math.min(src.length, session.frameView.length);
+        const sabStartMs = Number(process.hrtime.bigint()) / 1e6;
+        session.frameView.set(src.subarray(0, len), 0);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.WIDTH, width);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.HEIGHT, height);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STRIDE, stride);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.BYTE_LENGTH, len);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_LOW, tsLow);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.PIXEL_FORMAT, encodeHdrPixelFormat(session.latestPixelFormat));
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
+        const sabEndMs = Number(process.hrtime.bigint()) / 1e6;
+        if (session.perf) {
+          session.perf.sabWriteMsAvg = ewma(session.perf.sabWriteMsAvg, sabEndMs - sabStartMs);
+        }
+      }
+      if (session.perf) {
+        const bytesLen = Number(src.length || 0);
+        session.perf.bytesPerFrameAvg = ewma(session.perf.bytesPerFrameAvg, bytesLen);
+        if (session.perf.lastFrameAt > 0) {
+          const deltaMs = Math.max(1, session.lastFrameAt - session.perf.lastFrameAt);
+          session.perf.frameIntervalMsAvg = ewma(session.perf.frameIntervalMsAvg, deltaMs);
+          session.perf.bytesPerSec = ewma(session.perf.bytesPerSec, (bytesLen * 1000) / deltaMs);
+        }
+        session.perf.lastFrameAt = session.lastFrameAt;
+      }
       session.readFailures = 0;
+      session.noFrameStreak = 0;
       session.lastReason = 'FRAME_OK';
       session.lastError = '';
     } else {
       session.readFailures += 1;
       session.totalReadFailures += 1;
+      session.noFrameStreak = Number(session.noFrameStreak || 0) + 1;
       session.lastReason = 'NO_FRAME';
     }
   } catch (error) {
@@ -1523,9 +1874,12 @@ async function pumpHdrWorkerSession(sessionId) {
     });
   } finally {
     if (hdrSharedSessions.has(sessionId)) {
+      const backoffMs = session.lastReason === 'FRAME_OK'
+        ? 0
+        : Math.min(48, Math.max(0, Number(session.noFrameStreak || 0)) * 2);
       session.pumpTimer = setTimeout(() => {
         pumpHdrWorkerSession(sessionId).catch(() => {});
-      }, HDR_SHARED_POLL_INTERVAL_MS);
+      }, HDR_SHARED_POLL_INTERVAL_MS + backoffMs);
     }
   }
 }
@@ -1623,6 +1977,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:create', (_event, displayId) => {
     overlayRecordingActive = true;
+    resetOverlayRiskState();
     createOverlayWindow(displayId);
     return { ok: true };
   });
@@ -1655,13 +2010,31 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:destroy', () => {
     overlayRecordingActive = false;
+    resetOverlayRiskState();
+    overlayLastPointerInside = null;
+    overlayReentryGraceUntil = 0;
+    overlaySafeArmUntil = 0;
+    overlaySafeReleaseUntil = 0;
+    if (overlayReentryGraceTimer) {
+      clearTimeout(overlayReentryGraceTimer);
+      overlayReentryGraceTimer = null;
+    }
     destroyOverlayWindow();
     return { ok: true };
   });
 
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
+    const profile = getOverlayInteractionProfile();
     overlayPenEnabled = Boolean(enabled);
+    resetOverlayRiskState();
     overlayLastDrawActive = false;
+    overlayLastPointerInside = null;
+    overlayReentryGraceUntil = 0;
+    overlaySafeArmUntil = 0;
+    if (overlayReentryGraceTimer) {
+      clearTimeout(overlayReentryGraceTimer);
+      overlayReentryGraceTimer = null;
+    }
     overlayDrawToggle = false;
     overlayAltPressed = false;
     overlayWheelLockUntil = 0;
@@ -1684,7 +2057,42 @@ app.whenReady().then(() => {
       ok: true,
       toggleMode: clickHookEnabled,
       toggleKey: 'Ctrl',
-      wheelPauseMs: OVERLAY_WHEEL_PAUSE_MS
+      safeMode: OVERLAY_SAFE_MODE,
+      safeReleaseMs: profile.safeReleaseMs,
+      wheelPauseMs: profile.wheelPauseMs,
+      interactionMode: profile.mode,
+      autoNoBlock: overlayAutoNoBlock,
+      autoNoBlockReason: overlayAutoNoBlockReason
+    };
+  });
+
+  ipcMain.handle('overlay:set-interaction-mode', (_event, mode) => {
+    overlayInteractionMode = normalizeOverlayInteractionMode(mode);
+    if (overlayPenEnabled) {
+      applyOverlayMouseMode();
+      emitOverlayPointer();
+    }
+    const profile = getOverlayInteractionProfile();
+    return {
+      ok: true,
+      interactionMode: profile.mode,
+      safeMode: OVERLAY_SAFE_MODE,
+      safeReleaseMs: profile.safeReleaseMs,
+      wheelPauseMs: profile.wheelPauseMs
+    };
+  });
+
+  ipcMain.handle('overlay:get-state', () => {
+    const profile = getOverlayInteractionProfile();
+    return {
+      ok: true,
+      recordingActive: overlayRecordingActive,
+      penEnabled: overlayPenEnabled,
+      drawToggled: overlayDrawToggle,
+      autoNoBlock: overlayAutoNoBlock,
+      autoNoBlockReason: overlayAutoNoBlockReason,
+      interactionMode: profile.mode,
+      wheelPauseMs: profile.wheelPauseMs
     };
   });
 
@@ -1943,6 +2351,7 @@ app.whenReady().then(() => {
       const width = Math.max(1, Number(startResult.width || 1));
       const height = Math.max(1, Number(startResult.height || 1));
       const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
+      const allowSharedBuffer = !payload || payload.allowSharedBuffer !== false;
       const frameServer = await ensureHdrFrameServer();
       const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
 
@@ -1955,6 +2364,7 @@ app.whenReady().then(() => {
         bridge,
         sender: _event.sender,
         workerMode,
+        workerDirectShared: false,
         runtimeRoute: activeSelection.route,
         fallbackLevel: activeSelection.fallbackLevel,
         pipelineStage: activeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
@@ -1968,6 +2378,11 @@ app.whenReady().then(() => {
         controlView: null,
         frameSeq: 0,
         readFailures: 0,
+        bindAttempts: 0,
+        bindFailures: 0,
+        lastBindReason: '',
+        lastBindError: '',
+        noFrameStreak: 0,
         totalReadFailures: 0,
         bytesPumped: 0,
         startedAt: Date.now(),
@@ -1983,7 +2398,18 @@ app.whenReady().then(() => {
         latestStride: stride,
         latestPixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         latestFrameBytes: null,
-        pumpTimer: 0
+        pumpTimer: 0,
+        perf: {
+          readMsAvg: 0,
+          copyMsAvg: 0,
+          sabWriteMsAvg: 0,
+          bytesPerFrameAvg: 0,
+          bytesPerSec: 0,
+          pumpJitterMsAvg: 0,
+          frameIntervalMsAvg: 0,
+          lastPumpAt: 0,
+          lastFrameAt: 0
+        }
       });
       if (frameToken) {
         hdrFrameTokens.set(frameToken, sessionId);
@@ -2008,6 +2434,10 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
+        sharedFrameBuffer: null,
+        sharedControlBuffer: null,
+        supportsSharedFrameRead: Boolean(allowSharedBuffer),
+        transportMode: allowSharedBuffer ? 'shared-buffer' : 'http-fallback',
         pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         runtimeRoute: activeSelection.route,
         fallbackLevel: activeSelection.fallbackLevel,
@@ -2029,27 +2459,28 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
+  async function bindHdrSharedBuffers(payload) {
     const sessionId = Number(payload && payload.sessionId);
     if (!Number.isFinite(sessionId) || sessionId <= 0) {
       pushHdrTrace('shared-bind-invalid-session', { sessionId });
-      return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
+      return { ok: false, bound: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
     }
     const session = hdrSharedSessions.get(sessionId);
     if (!session) {
       pushHdrTrace('shared-bind-missing-session', { sessionId });
-      return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
+      return { ok: false, bound: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
     }
-    if (session.workerMode) {
-      return { ok: true, bound: false, reason: 'WORKER_MODE_DIRECT_SAB' };
-    }
-
+    session.bindAttempts = Number(session.bindAttempts || 0) + 1;
     const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
     const sharedControlBuffer = payload && payload.sharedControlBuffer;
     if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      session.bindFailures = Number(session.bindFailures || 0) + 1;
+      session.lastBindReason = 'INVALID_SHARED_BUFFER';
+      session.lastBindError = '共享記憶體建立失敗或環境不支援。';
       pushHdrTrace('shared-bind-invalid-buffer', { sessionId });
       return {
         ok: false,
+        bound: false,
         reason: 'INVALID_SHARED_BUFFER',
         message: '共享記憶體建立失敗或環境不支援。'
       };
@@ -2062,7 +2493,30 @@ app.whenReady().then(() => {
     session.readFailures = 0;
     clearTimeout(session.pumpTimer);
     session.pumpTimer = 0;
-    pumpHdrSharedSession(sessionId);
+    if (session.workerMode) {
+      const bindResult = await hdrWorkerRequest('bind-shared', {
+        sharedFrameBuffer,
+        sharedControlBuffer
+      }, 2000).catch(() => null);
+      if (!bindResult || !bindResult.ok) {
+        session.workerDirectShared = false;
+        session.bindFailures = Number(session.bindFailures || 0) + 1;
+        session.lastBindReason = 'WORKER_BIND_SHARED_FAILED';
+        session.lastBindError = bindResult && bindResult.message ? bindResult.message : 'worker shared bind failed';
+        pumpHdrWorkerSession(sessionId).catch(() => {});
+        return {
+          ok: false,
+          bound: false,
+          reason: 'WORKER_BIND_SHARED_FAILED',
+          message: bindResult && bindResult.message ? bindResult.message : 'worker shared bind failed'
+        };
+      }
+      session.workerDirectShared = true;
+    } else {
+      pumpHdrSharedSession(sessionId);
+    }
+    session.lastBindReason = 'OK';
+    session.lastBindError = '';
     pushHdrTrace('shared-bind-ok', {
       sessionId,
       frameBytes: Number(sharedFrameBuffer.byteLength || 0),
@@ -2070,6 +2524,21 @@ app.whenReady().then(() => {
     });
 
     return { ok: true, bound: true };
+  }
+
+  ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
+    return bindHdrSharedBuffers(payload);
+  });
+
+  ipcMain.on('hdr:shared-bind-async', async (event, payload) => {
+    const requestId = String(payload && payload.requestId ? payload.requestId : '');
+    const result = await bindHdrSharedBuffers(payload).catch((error) => ({
+      ok: false,
+      bound: false,
+      reason: 'BIND_EXCEPTION',
+      message: error && error.message ? error.message : 'bind exception'
+    }));
+    event.reply('hdr:shared-bind-async:result', { requestId, result });
   });
 
   ipcMain.handle('hdr:shared-stop', async (_event, payload) => {
@@ -2113,10 +2582,17 @@ app.whenReady().then(() => {
         runtimeRoute: String(session.runtimeRoute || 'native-legacy'),
         fallbackLevel: Number(session.fallbackLevel || 2),
         pipelineStage: String(session.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
+        supportsSharedFrameRead: Boolean(session.frameView && session.controlView),
+        transportMode: session.frameView && session.controlView ? 'shared-buffer' : 'http-fallback',
         requestedRoute: String(session.requestedRoute || 'auto'),
         nativeBackend: String(session.nativeBackend || ''),
         frameSeq: Number(session.frameSeq || 0),
         readFailures: Number(session.readFailures || 0),
+        bindAttempts: Number(session.bindAttempts || 0),
+        bindFailures: Number(session.bindFailures || 0),
+        lastBindReason: String(session.lastBindReason || ''),
+        lastBindError: String(session.lastBindError || ''),
+        noFrameStreak: Number(session.noFrameStreak || 0),
         totalReadFailures: Number(session.totalReadFailures || 0),
         bytesPumped: Number(session.bytesPumped || 0),
         frameEndpoint: String(session.frameEndpoint || ''),
@@ -2124,7 +2600,16 @@ app.whenReady().then(() => {
         lastError: String(session.lastError || ''),
         startedAt: Number(session.startedAt || 0),
         lastFrameAt: Number(session.lastFrameAt || 0),
-        nativeSessionId: Number(session.nativeSessionId || 0)
+        nativeSessionId: Number(session.nativeSessionId || 0),
+        perf: {
+          readMsAvg: Number(session.perf && session.perf.readMsAvg ? session.perf.readMsAvg : 0),
+          copyMsAvg: Number(session.perf && session.perf.copyMsAvg ? session.perf.copyMsAvg : 0),
+          sabWriteMsAvg: Number(session.perf && session.perf.sabWriteMsAvg ? session.perf.sabWriteMsAvg : 0),
+          bytesPerFrameAvg: Number(session.perf && session.perf.bytesPerFrameAvg ? session.perf.bytesPerFrameAvg : 0),
+          bytesPerSec: Number(session.perf && session.perf.bytesPerSec ? session.perf.bytesPerSec : 0),
+          pumpJitterMsAvg: Number(session.perf && session.perf.pumpJitterMsAvg ? session.perf.pumpJitterMsAvg : 0),
+          frameIntervalMsAvg: Number(session.perf && session.perf.frameIntervalMsAvg ? session.perf.frameIntervalMsAvg : 0)
+        }
       });
     }
     return {
@@ -2162,10 +2647,17 @@ app.whenReady().then(() => {
           runtimeRoute: String(sessionObj.runtimeRoute || 'native-legacy'),
           fallbackLevel: Number(sessionObj.fallbackLevel || 2),
           pipelineStage: String(sessionObj.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
+          supportsSharedFrameRead: Boolean(sessionObj.frameView && sessionObj.controlView),
+          transportMode: sessionObj.frameView && sessionObj.controlView ? 'shared-buffer' : 'http-fallback',
           requestedRoute: String(sessionObj.requestedRoute || 'auto'),
           nativeBackend: String(sessionObj.nativeBackend || ''),
           frameSeq: Number(sessionObj.frameSeq || 0),
           readFailures: Number(sessionObj.readFailures || 0),
+          bindAttempts: Number(sessionObj.bindAttempts || 0),
+          bindFailures: Number(sessionObj.bindFailures || 0),
+          lastBindReason: String(sessionObj.lastBindReason || ''),
+          lastBindError: String(sessionObj.lastBindError || ''),
+          noFrameStreak: Number(sessionObj.noFrameStreak || 0),
           totalReadFailures: Number(sessionObj.totalReadFailures || 0),
           bytesPumped: Number(sessionObj.bytesPumped || 0),
           frameEndpoint: String(sessionObj.frameEndpoint || ''),
@@ -2173,7 +2665,16 @@ app.whenReady().then(() => {
           lastError: String(sessionObj.lastError || ''),
           startedAt: Number(sessionObj.startedAt || 0),
           lastFrameAt: Number(sessionObj.lastFrameAt || 0),
-          nativeSessionId: Number(sessionObj.nativeSessionId || 0)
+          nativeSessionId: Number(sessionObj.nativeSessionId || 0),
+          perf: {
+            readMsAvg: Number(sessionObj.perf && sessionObj.perf.readMsAvg ? sessionObj.perf.readMsAvg : 0),
+            copyMsAvg: Number(sessionObj.perf && sessionObj.perf.copyMsAvg ? sessionObj.perf.copyMsAvg : 0),
+            sabWriteMsAvg: Number(sessionObj.perf && sessionObj.perf.sabWriteMsAvg ? sessionObj.perf.sabWriteMsAvg : 0),
+            bytesPerFrameAvg: Number(sessionObj.perf && sessionObj.perf.bytesPerFrameAvg ? sessionObj.perf.bytesPerFrameAvg : 0),
+            bytesPerSec: Number(sessionObj.perf && sessionObj.perf.bytesPerSec ? sessionObj.perf.bytesPerSec : 0),
+            pumpJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.pumpJitterMsAvg ? sessionObj.perf.pumpJitterMsAvg : 0),
+            frameIntervalMsAvg: Number(sessionObj.perf && sessionObj.perf.frameIntervalMsAvg ? sessionObj.perf.frameIntervalMsAvg : 0)
+          }
         });
       }
       return {
