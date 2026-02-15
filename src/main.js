@@ -728,6 +728,13 @@ function pauseOverlayByWheel() {
   }
 
   overlayWheelLockUntil = Date.now() + OVERLAY_WHEEL_PAUSE_MS;
+  if (OVERLAY_SAFE_MODE) {
+    // After wheel-pause resumes, keep a short capture window to avoid
+    // immediate click-through on the first pointer interaction.
+    const resumeAt = overlayWheelLockUntil;
+    overlaySafeArmUntil = Math.max(overlaySafeArmUntil, resumeAt + OVERLAY_SAFE_ARM_MS);
+    overlaySafeReleaseUntil = Math.max(overlaySafeReleaseUntil, resumeAt + OVERLAY_SAFE_RELEASE_MS);
+  }
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("overlay:clear");
