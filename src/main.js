@@ -746,6 +746,19 @@ function overlayDrawActive() {
   return overlayDrawEnabled() && Date.now() >= overlayWheelLockUntil;
 }
 
+function isPointerInsideOverlayBounds() {
+  if (!overlayBounds) {
+    return false;
+  }
+  const p = screen.getCursorScreenPoint();
+  return (
+    p.x >= overlayBounds.x &&
+    p.x < overlayBounds.x + overlayBounds.width &&
+    p.y >= overlayBounds.y &&
+    p.y < overlayBounds.y + overlayBounds.height
+  );
+}
+
 function emitOverlayPointer() {
   if (!overlayWindow || overlayWindow.isDestroyed() || !overlayBounds) {
     return;
@@ -774,8 +787,10 @@ function applyOverlayMouseMode() {
 
   const drawEnabled = overlayDrawEnabled();
   const wheelLocked = Date.now() < overlayWheelLockUntil;
-  const capturePointer = overlayDrawActive();
-  const shouldKeepVisible = drawEnabled && !wheelLocked;
+  const pointerInside = isPointerInsideOverlayBounds();
+  const capturePointer = overlayDrawActive() && pointerInside;
+  const shouldKeepVisible = drawEnabled && !wheelLocked && pointerInside;
+  const pausedByOutside = drawEnabled && !wheelLocked && !pointerInside;
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -789,7 +804,7 @@ function applyOverlayMouseMode() {
     }
 
     overlayWindow.setIgnoreMouseEvents(false);
-  } else if (drawEnabled && wheelLocked) {
+  } else if ((drawEnabled && wheelLocked) || pausedByOutside) {
     overlayWindow.setIgnoreMouseEvents(true);
 
     if (overlayWindow.isVisible()) {
