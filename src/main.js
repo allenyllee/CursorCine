@@ -68,6 +68,7 @@ let overlayAltPressed = false;
 let overlayCtrlChordActive = false;
 let overlayWheelLockUntil = 0;
 let overlayWheelResumeTimer = null;
+let overlayReentryGraceTimer = null;
 
 let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
@@ -749,6 +750,22 @@ function overlayDrawActive() {
   return overlayDrawEnabled() && Date.now() >= overlayWheelLockUntil;
 }
 
+function scheduleOverlayReentryGraceEnd() {
+  if (overlayReentryGraceTimer) {
+    clearTimeout(overlayReentryGraceTimer);
+    overlayReentryGraceTimer = null;
+  }
+  const waitMs = Math.max(0, overlayReentryGraceUntil - Date.now());
+  if (waitMs <= 0) {
+    applyOverlayMouseMode();
+    return;
+  }
+  overlayReentryGraceTimer = setTimeout(() => {
+    overlayReentryGraceTimer = null;
+    applyOverlayMouseMode();
+  }, waitMs + 10);
+}
+
 function isPointerInsideOverlayBounds() {
   if (!overlayBounds) {
     return false;
@@ -792,6 +809,7 @@ function emitOverlayPointer() {
       overlayWheelLockUntil = Date.now() + 140;
       overlayReentryGraceUntil = Date.now() + OVERLAY_REENTRY_GRACE_MS;
       scheduleOverlayWheelResume();
+      scheduleOverlayReentryGraceEnd();
     }
 
     applyOverlayMouseMode();
@@ -1839,6 +1857,10 @@ app.whenReady().then(() => {
     overlayRecordingActive = false;
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
+    if (overlayReentryGraceTimer) {
+      clearTimeout(overlayReentryGraceTimer);
+      overlayReentryGraceTimer = null;
+    }
     destroyOverlayWindow();
     return { ok: true };
   });
@@ -1848,6 +1870,10 @@ app.whenReady().then(() => {
     overlayLastDrawActive = false;
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
+    if (overlayReentryGraceTimer) {
+      clearTimeout(overlayReentryGraceTimer);
+      overlayReentryGraceTimer = null;
+    }
     overlayDrawToggle = false;
     overlayAltPressed = false;
     overlayWheelLockUntil = 0;
