@@ -1567,6 +1567,25 @@ async function pumpHdrWorkerSession(sessionId) {
         session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
       }
       session.bytesPumped += src.length;
+      if (session.frameView && session.controlView) {
+        const tsLow = ts >>> 0;
+        const tsHigh = Math.floor(ts / 4294967296) >>> 0;
+        const len = Math.min(src.length, session.frameView.length);
+        const sabStartMs = Number(process.hrtime.bigint()) / 1e6;
+        session.frameView.set(src.subarray(0, len), 0);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.WIDTH, width);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.HEIGHT, height);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STRIDE, stride);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.BYTE_LENGTH, len);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_LOW, tsLow);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
+        Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
+        const sabEndMs = Number(process.hrtime.bigint()) / 1e6;
+        if (session.perf) {
+          session.perf.sabWriteMsAvg = ewma(session.perf.sabWriteMsAvg, sabEndMs - sabStartMs);
+        }
+      }
       if (session.perf) {
         const bytesLen = Number(src.length || 0);
         session.perf.bytesPerFrameAvg = ewma(session.perf.bytesPerFrameAvg, bytesLen);
@@ -2016,6 +2035,15 @@ app.whenReady().then(() => {
       const width = Math.max(1, Number(startResult.width || 1));
       const height = Math.max(1, Number(startResult.height || 1));
       const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
+      const allowSharedBuffer = !payload || payload.allowSharedBuffer !== false;
+      const frameBytes = Math.max(1024 * 1024, stride * height);
+      const sharedFrameBuffer = allowSharedBuffer ? new SharedArrayBuffer(frameBytes) : null;
+      const sharedControlBuffer = allowSharedBuffer ? new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 16) : null;
+      const frameView = sharedFrameBuffer ? new Uint8Array(sharedFrameBuffer) : null;
+      const controlView = sharedControlBuffer ? new Int32Array(sharedControlBuffer) : null;
+      if (controlView) {
+        controlView.fill(0);
+      }
       const frameServer = await ensureHdrFrameServer();
       const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
 
@@ -2037,8 +2065,8 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
-        frameView: null,
-        controlView: null,
+        frameView,
+        controlView,
         frameSeq: 0,
         readFailures: 0,
         totalReadFailures: 0,
@@ -2092,6 +2120,10 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
+        sharedFrameBuffer,
+        sharedControlBuffer,
+        supportsSharedFrameRead: Boolean(sharedFrameBuffer && sharedControlBuffer),
+        transportMode: sharedFrameBuffer && sharedControlBuffer ? 'shared-buffer' : 'http-fallback',
         pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         runtimeRoute: activeSelection.route,
         fallbackLevel: activeSelection.fallbackLevel,

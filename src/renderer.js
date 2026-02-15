@@ -578,7 +578,9 @@ async function copyHdrDiagnosticsSnapshot() {
         captureFps: nativeHdrState.captureFps,
         renderFps: nativeHdrState.renderFps,
         queueDepth: nativeHdrState.queueDepth,
-        rendererBlitMsAvg: nativeHdrState.rendererBlitMsAvg
+        rendererBlitMsAvg: nativeHdrState.rendererBlitMsAvg,
+        supportsSharedFrameRead: Boolean(nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView),
+        transportMode: nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView ? 'shared-buffer' : 'http-fallback'
       },
       decisionTrace: hdrDecisionTrace.slice(-80)
     },
@@ -1947,6 +1949,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
     start = await electronAPI.hdrSharedStart({
       sourceId,
       displayId,
+      allowSharedBuffer: typeof window !== 'undefined' && window.crossOriginIsolated === true,
       routePreference,
       maxFps: 60,
       toneMap: {
@@ -2007,7 +2010,8 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   nativeHdrState.lastHttpFrameSeq = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
   hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
-  hdrMappingState.runtimeStage = String(start.pipelineStage || '');
+  hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
+    (start && start.transportMode ? ('/' + String(start.transportMode)) : '');
   hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));
   hdrMappingState.routePreference = normalizeHdrRoutePreference(start.requestedRoute || routePreference);
 
