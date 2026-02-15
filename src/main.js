@@ -1478,6 +1478,58 @@ function pumpHdrSharedSession(sessionId) {
   }
 }
 
+async function pumpHdrWorkerSession(sessionId) {
+  const session = hdrSharedSessions.get(sessionId);
+  if (!session || !session.workerMode) {
+    return;
+  }
+
+  try {
+    const frameResult = await hdrWorkerRequest('frame-read', {}, 1000);
+    if (frameResult && frameResult.ok && frameResult.hasFrame && frameResult.bytes) {
+      const bytes = frameResult.bytes;
+      const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const nextSeq = Number(frameResult.frameSeq || 0);
+      session.frameSeq = nextSeq > session.frameSeq ? nextSeq : (session.frameSeq + 1);
+      session.lastFrameAt = Date.now();
+      const ts = Number(frameResult.lastFrameAt || Date.now());
+      const width = Number(frameResult.width || session.width);
+      const height = Number(frameResult.height || session.height);
+      const stride = Number(frameResult.stride || session.stride);
+      session.latestFrameSeq = session.frameSeq;
+      session.latestTimestampMs = ts;
+      session.latestWidth = width;
+      session.latestHeight = height;
+      session.latestStride = stride;
+      session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
+      session.latestFrameBytes = Buffer.from(src);
+      session.bytesPumped += src.length;
+      session.readFailures = 0;
+      session.lastReason = 'FRAME_OK';
+      session.lastError = '';
+    } else {
+      session.readFailures += 1;
+      session.totalReadFailures += 1;
+      session.lastReason = 'NO_FRAME';
+    }
+  } catch (error) {
+    session.readFailures += 1;
+    session.totalReadFailures += 1;
+    session.lastReason = 'READ_EXCEPTION';
+    session.lastError = error && error.message ? error.message : 'WORKER_FRAME_READ_FAILED';
+    pushHdrTrace('shared-worker-read-exception', {
+      sessionId,
+      message: session.lastError
+    });
+  } finally {
+    if (hdrSharedSessions.has(sessionId)) {
+      session.pumpTimer = setTimeout(() => {
+        pumpHdrWorkerSession(sessionId).catch(() => {});
+      }, HDR_SHARED_POLL_INTERVAL_MS);
+    }
+  }
+}
+
 function installCrossOriginIsolationHeaders() {
   if (crossOriginIsolationHeadersInstalled) {
     return;
@@ -1937,7 +1989,9 @@ app.whenReady().then(() => {
         hdrFrameTokens.set(frameToken, sessionId);
       }
       // Worker mode already maintains a non-blocking pump and exposes SAB directly.
-      if (!workerMode) {
+      if (workerMode) {
+        pumpHdrWorkerSession(sessionId).catch(() => {});
+      } else {
         pumpHdrSharedSession(sessionId);
       }
       pushHdrTrace('shared-start-ok', {
