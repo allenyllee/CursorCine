@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.1] - 2026-02-15
+
+### Changed
+* Windows native addon build flow now runs through `scripts/build-native-hdr-win.js`, forcing generated vcxproj `PlatformToolset` to `v143` for stable builds without requiring local `ClangCL`.
+* CI Windows build setup now aligns with the native build script strategy (`Python 3.11` + `GYP_MSVS_VERSION=2022`) and keeps version-gated release behavior.
+* Windows build documentation in `README.md` and `native/windows-hdr-capture/README.md` was updated to reflect the current `v143`-first workflow and troubleshooting path.
+
+### Fixed
+* Native HDR capture now composites the system cursor into captured frames, resolving missing cursor arrows in recorded output.
+* Release metadata bump from `0.6.0` to `0.6.1`.
+
 ## [0.6.0] - 2026-02-14
 
 ### Added
