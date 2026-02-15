@@ -4,11 +4,12 @@
 
 This module is the new route entrypoint for `wgc-v1` in CursorCine's HDR pipeline.
 
-Current implementation is a migration skeleton:
+Current implementation is an independent native backend (MVP):
 
 - Node-API addon target exists (`windows_wgc_hdr_capture`)
-- JS bridge exists and is wired into Electron route selection
-- Runtime currently falls through to legacy `windows-hdr-capture` behavior
+- JS bridge is bound directly to the module's own native binary
+- Runtime no longer forwards to legacy `windows-hdr-capture` at JS layer
+- Capture core is currently GDI-backed while keeping `wgc-v1` route separation
 
 ## Why this exists
 

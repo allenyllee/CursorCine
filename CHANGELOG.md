@@ -12,6 +12,7 @@ All notable changes to this project are documented in this file.
 * `scripts/build-native-hdr-win.js` now builds and patches vcxproj toolsets for both native modules (`windows-hdr-capture` and `windows-wgc-hdr-capture`).
 * Windows HDR shared start now applies explicit fallback order: `wgc-v1 -> native-legacy -> builtin-desktop`.
 * Worker capture path now supports route-aware bridge loading so hot path frame reads stay off the Electron main process.
+* `windows-wgc-hdr-capture` is now loaded as an independent native backend (no JS-layer forwarding to legacy bridge), with worker-session frames pumped into the shared HTTP endpoint path.
 
 ## [0.6.1] - 2026-02-15
 
