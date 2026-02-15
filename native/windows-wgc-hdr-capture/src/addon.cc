@@ -335,7 +335,10 @@ void ScaleBgraNearest(const uint8_t* src,
   if (!src || !dst || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
     return;
   }
-  dst->resize(static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4);
+  const size_t dstBytes = static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4;
+  if (dst->size() != dstBytes) {
+    dst->resize(dstBytes);
+  }
   uint8_t* out = dst->data();
   const float xRatio = static_cast<float>(srcW) / static_cast<float>(dstW);
   const float yRatio = static_cast<float>(srcH) / static_cast<float>(dstH);
@@ -414,7 +417,9 @@ bool CaptureFrame(CaptureSession* session) {
   }
 
   if (session->outputWidth == session->rect.width && session->outputHeight == session->rect.height) {
-    session->frameBytes.resize(captureBytes);
+    if (session->frameBytes.size() != captureBytes) {
+      session->frameBytes.resize(captureBytes);
+    }
     std::memcpy(session->frameBytes.data(), session->bitmapBits, captureBytes);
   } else {
     ScaleBgraNearest(reinterpret_cast<const uint8_t*>(session->bitmapBits),
@@ -452,6 +457,9 @@ std::unique_ptr<CaptureSession> CreateSession(napi_env env, napi_value payload, 
   const int64_t maxOutputPixels = ResolveMaxOutputPixels(env, payload);
   ComputeOutputSize(session->rect.width, session->rect.height, maxOutputPixels, &session->outputWidth, &session->outputHeight);
   session->outputStride = session->outputWidth * 4;
+  const size_t initialOutputBytes =
+      static_cast<size_t>(std::max(1, session->outputWidth)) * static_cast<size_t>(std::max(1, session->outputHeight)) * 4;
+  session->frameBytes.reserve(initialOutputBytes);
 
   session->desktopDc = GetDC(nullptr);
   if (!session->desktopDc) {
