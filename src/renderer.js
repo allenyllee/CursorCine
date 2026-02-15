@@ -117,6 +117,7 @@ const HDR_NATIVE_MAX_READ_FAILURES = 8;
 const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 16;
 const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
+const HDR_SHARED_CONTROL_SLOTS = 16;
 
 let sources = [];
 let sourceStream;
@@ -2052,8 +2053,30 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   const width = Math.max(1, Number(start.width || 1));
   const height = Math.max(1, Number(start.height || 1));
   const stride = Math.max(width * 4, Number(start.stride || width * 4));
-  const sharedFrameBuffer = start.sharedFrameBuffer;
-  const sharedControlBuffer = start.sharedControlBuffer;
+  let sharedFrameBuffer = start.sharedFrameBuffer;
+  let sharedControlBuffer = start.sharedControlBuffer;
+  let sharedBindOk = false;
+  if (sharedPreferred && start && start.supportsSharedFrameRead !== false) {
+    try {
+      const frameBytes = Math.max(1024 * 1024, stride * height);
+      sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
+      sharedControlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * HDR_SHARED_CONTROL_SLOTS);
+      const bindResult = await electronAPI.hdrSharedBind({
+        sessionId: Number(start.sessionId || 0),
+        sharedFrameBuffer,
+        sharedControlBuffer
+      });
+      sharedBindOk = Boolean(bindResult && bindResult.ok && bindResult.bound);
+      if (!sharedBindOk) {
+        sharedFrameBuffer = null;
+        sharedControlBuffer = null;
+      }
+    } catch (_bindError) {
+      sharedFrameBuffer = null;
+      sharedControlBuffer = null;
+      sharedBindOk = false;
+    }
+  }
 
   nativeHdrState.active = true;
   nativeHdrState.sessionId = Number(start.sessionId || 0);
@@ -2079,7 +2102,9 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   nativeHdrState.lastHttpFrameSeq = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
   hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
-  hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(start.transportMode || '');
+  hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(
+    sharedBindOk ? 'shared-buffer' : (start.transportMode || 'http-fallback')
+  );
   hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
     (hdrMappingState.runtimeTransportMode ? ('/' + hdrMappingState.runtimeTransportMode) : '');
   hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));

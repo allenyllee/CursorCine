@@ -2057,14 +2057,6 @@ app.whenReady().then(() => {
       const height = Math.max(1, Number(startResult.height || 1));
       const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
       const allowSharedBuffer = !payload || payload.allowSharedBuffer !== false;
-      const frameBytes = Math.max(1024 * 1024, stride * height);
-      const sharedFrameBuffer = allowSharedBuffer ? new SharedArrayBuffer(frameBytes) : null;
-      const sharedControlBuffer = allowSharedBuffer ? new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 16) : null;
-      const frameView = sharedFrameBuffer ? new Uint8Array(sharedFrameBuffer) : null;
-      const controlView = sharedControlBuffer ? new Int32Array(sharedControlBuffer) : null;
-      if (controlView) {
-        controlView.fill(0);
-      }
       const frameServer = await ensureHdrFrameServer();
       const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
 
@@ -2086,8 +2078,8 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
-        frameView,
-        controlView,
+        frameView: null,
+        controlView: null,
         frameSeq: 0,
         readFailures: 0,
         noFrameStreak: 0,
@@ -2142,10 +2134,10 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
-        sharedFrameBuffer,
-        sharedControlBuffer,
-        supportsSharedFrameRead: Boolean(sharedFrameBuffer && sharedControlBuffer),
-        transportMode: sharedFrameBuffer && sharedControlBuffer ? 'shared-buffer' : 'http-fallback',
+        sharedFrameBuffer: null,
+        sharedControlBuffer: null,
+        supportsSharedFrameRead: Boolean(allowSharedBuffer),
+        transportMode: allowSharedBuffer ? 'shared-buffer' : 'http-fallback',
         pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         runtimeRoute: activeSelection.route,
         fallbackLevel: activeSelection.fallbackLevel,
@@ -2178,10 +2170,6 @@ app.whenReady().then(() => {
       pushHdrTrace('shared-bind-missing-session', { sessionId });
       return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
     }
-    if (session.workerMode) {
-      return { ok: true, bound: false, reason: 'WORKER_MODE_DIRECT_SAB' };
-    }
-
     const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
     const sharedControlBuffer = payload && payload.sharedControlBuffer;
     if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
@@ -2200,7 +2188,11 @@ app.whenReady().then(() => {
     session.readFailures = 0;
     clearTimeout(session.pumpTimer);
     session.pumpTimer = 0;
-    pumpHdrSharedSession(sessionId);
+    if (session.workerMode) {
+      pumpHdrWorkerSession(sessionId).catch(() => {});
+    } else {
+      pumpHdrSharedSession(sessionId);
+    }
     pushHdrTrace('shared-bind-ok', {
       sessionId,
       frameBytes: Number(sharedFrameBuffer.byteLength || 0),
