@@ -1,0 +1,10 @@
+{
+  "name": "windows-wgc-hdr-capture",
+  "version": "0.1.0",
+  "private": true,
+  "gypfile": true,
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp rebuild"
+  }
+}

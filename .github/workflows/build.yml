@@ -138,6 +138,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify Windows native module manifests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path "native/windows-hdr-capture/binding.gyp")) { throw "missing legacy hdr native module" }
+          if (!(Test-Path "native/windows-wgc-hdr-capture/binding.gyp")) { throw "missing wgc hdr native module" }
+
       - name: Build
         run: ${{ matrix.build_command }}
         env:

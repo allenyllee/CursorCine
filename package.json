@@ -34,6 +34,7 @@
     "files": [
       "src/**/*",
       "native/windows-hdr-capture/**/*",
+      "native/windows-wgc-hdr-capture/**/*",
       "package.json"
     ],
     "win": {
