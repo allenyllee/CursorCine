@@ -340,6 +340,26 @@ function setStatus(message) {
   statusEl.textContent = message;
 }
 
+function getRecordingAudioModeLabel() {
+  const hasSystemAudio = Boolean(sourceStream && sourceStream.getAudioTracks().length > 0);
+  const hasMicAudio = Boolean(micStream && micStream.getAudioTracks().length > 0);
+  if (!hasSystemAudio && !hasMicAudio) {
+    return '音訊: 無';
+  }
+  return `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`;
+}
+
+function refreshRecordingStatusLine() {
+  if (!(mediaRecorder && mediaRecorder.state === 'recording')) {
+    return;
+  }
+  const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || 'fallback');
+  const routeLabel = getHdrRouteLabel(runtimeRoute, getEffectiveHdrTransportMode());
+  const qualityLabel = String((recordingQualityPreset && recordingQualityPreset.label) || '平衡');
+  const audioMode = getRecordingAudioModeLabel();
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+}
+
 async function withTimeout(promise, ms, message) {
   let timer = 0;
   try {
@@ -424,6 +444,7 @@ function setHdrRuntimeRoute(route, message, transportMode) {
   }
   hdrRuntimeStatusMessage = message || ('目前路徑: ' + getHdrRouteLabel(hdrMappingState.runtimeRoute, getEffectiveHdrTransportMode()));
   updateHdrMappingStatusUi();
+  refreshRecordingStatusLine();
 }
 
 function setHdrProbeStatus(message) {
@@ -3602,15 +3623,9 @@ async function startRecording() {
     hdrMappingModeSelect.disabled = true;
   }
 
-  const hasSystemAudio = sourceStream.getAudioTracks().length > 0;
-  const hasMicAudio = Boolean(micStream && micStream.getAudioTracks().length > 0);
-  const audioMode = hasSystemAudio || hasMicAudio
-    ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
-    : '音訊: 無';
-
   const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || (captureRoute && captureRoute.route) || 'fallback');
-  const routeLabel = getHdrRouteLabel(runtimeRoute, getEffectiveHdrTransportMode());
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+  hdrMappingState.runtimeRoute = runtimeRoute;
+  refreshRecordingStatusLine();
 }
 
 function stopRecording() {
