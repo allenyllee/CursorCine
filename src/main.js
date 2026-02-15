@@ -1891,12 +1891,6 @@ app.whenReady().then(() => {
       const width = Math.max(1, Number(startResult.width || 1));
       const height = Math.max(1, Number(startResult.height || 1));
       const stride = Math.max(width * 4, Number(startResult.stride || width * 4));
-      const sharedFrameBuffer = startResult.sharedFrameBuffer instanceof SharedArrayBuffer
-        ? startResult.sharedFrameBuffer
-        : null;
-      const sharedControlBuffer = startResult.sharedControlBuffer instanceof SharedArrayBuffer
-        ? startResult.sharedControlBuffer
-        : null;
       const frameServer = await ensureHdrFrameServer();
       const port = Number(frameServer && frameServer.port ? frameServer.port : 0);
 
@@ -1965,8 +1959,6 @@ app.whenReady().then(() => {
         fallbackLevel: activeSelection.fallbackLevel,
         pipelineStage: activeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
         requestedRoute,
-        sharedFrameBuffer,
-        sharedControlBuffer,
         frameEndpoint,
         frameToken,
         nativeBackend: String(startResult.nativeBackend || activeSelection.backendLabel || 'windows-hdr-capture')
