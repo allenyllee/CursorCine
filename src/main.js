@@ -1801,19 +1801,20 @@ app.whenReady().then(() => {
 
     const requestedRoute = normalizeHdrRoutePreference(payload && payload.routePreference ? payload.routePreference : '');
     const bridgeSelection = selectHdrBridge(requestedRoute);
-    const bridge = bridgeSelection.bridge;
+    let activeSelection = bridgeSelection;
+    let bridge = activeSelection.bridge;
     if (!bridge || typeof bridge.startCapture !== 'function' || typeof bridge.readFrame !== 'function') {
       pushHdrTrace('shared-start-native-unavailable', {
-        message: bridgeSelection.reason || 'NATIVE_UNAVAILABLE',
+        message: activeSelection.reason || 'NATIVE_UNAVAILABLE',
         requestedRoute
       });
       return {
         ok: false,
         reason: 'NATIVE_UNAVAILABLE',
-        message: bridgeSelection.reason || windowsHdrWgcLoadError || windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。',
+        message: activeSelection.reason || windowsHdrWgcLoadError || windowsHdrNativeLoadError || 'Windows HDR 原生模組不可用。',
         requestedRoute,
-        runtimeRoute: bridgeSelection.route,
-        fallbackLevel: bridgeSelection.fallbackLevel
+        runtimeRoute: activeSelection.route,
+        fallbackLevel: activeSelection.fallbackLevel
       };
     }
 
@@ -1821,7 +1822,7 @@ app.whenReady().then(() => {
       const displayHint = getDisplayHdrHint(displayId);
       const physicalW = Math.max(1, Math.round(Number(displayHint.bounds.width || 1) * Number(displayHint.scaleFactor || 1)));
       const physicalH = Math.max(1, Math.round(Number(displayHint.bounds.height || 1) * Number(displayHint.scaleFactor || 1)));
-      const workerMode = bridgeSelection.route === 'wgc-v1';
+      let workerMode = activeSelection.route === 'wgc-v1';
       let startResult = null;
       if (workerMode) {
         const workerStartPayload = {
@@ -1847,6 +1848,32 @@ app.whenReady().then(() => {
           routePreference: requestedRoute,
           displayHint
         }));
+      }
+
+      if ((!startResult || !startResult.ok) && workerMode && requestedRoute !== 'legacy') {
+        const legacySelection = selectHdrBridge('legacy');
+        if (legacySelection.bridge &&
+            typeof legacySelection.bridge.startCapture === 'function' &&
+            typeof legacySelection.bridge.readFrame === 'function') {
+          const previousReason = String((startResult && startResult.reason) || 'START_FAILED');
+          const previousMessage = String((startResult && startResult.message) || '');
+          pushHdrTrace('shared-start-wgc-fallback-legacy', {
+            wgcReason: previousReason,
+            wgcMessage: previousMessage
+          });
+          activeSelection = legacySelection;
+          bridge = legacySelection.bridge;
+          workerMode = false;
+          startResult = await Promise.resolve(bridge.startCapture({
+            sourceId,
+            displayId: displayHint.displayId,
+            maxFps: Number(payload && payload.maxFps ? payload.maxFps : 60),
+            maxOutputPixels: Math.max(640 * 360, physicalW * physicalH),
+            toneMap: payload && payload.toneMap ? payload.toneMap : {},
+            routePreference: 'legacy',
+            displayHint
+          }));
+        }
       }
 
       if (!startResult || !startResult.ok) {
@@ -1882,11 +1909,11 @@ app.whenReady().then(() => {
         bridge,
         sender: _event.sender,
         workerMode,
-        runtimeRoute: bridgeSelection.route,
-        fallbackLevel: bridgeSelection.fallbackLevel,
-        pipelineStage: bridgeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
+        runtimeRoute: activeSelection.route,
+        fallbackLevel: activeSelection.fallbackLevel,
+        pipelineStage: activeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
         requestedRoute,
-        nativeBackend: String(startResult.nativeBackend || bridgeSelection.backendLabel || 'windows-hdr-capture'),
+        nativeBackend: String(startResult.nativeBackend || activeSelection.backendLabel || 'windows-hdr-capture'),
         nativeSessionId: Number(startResult.nativeSessionId || 0),
         width,
         height,
@@ -1925,7 +1952,7 @@ app.whenReady().then(() => {
         width,
         height,
         stride,
-        runtimeRoute: bridgeSelection.route
+        runtimeRoute: activeSelection.route
       });
       return {
         ok: true,
@@ -1934,15 +1961,15 @@ app.whenReady().then(() => {
         height,
         stride,
         pixelFormat: String(startResult.pixelFormat || 'RGBA8'),
-        runtimeRoute: bridgeSelection.route,
-        fallbackLevel: bridgeSelection.fallbackLevel,
-        pipelineStage: bridgeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
+        runtimeRoute: activeSelection.route,
+        fallbackLevel: activeSelection.fallbackLevel,
+        pipelineStage: activeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
         requestedRoute,
         sharedFrameBuffer,
         sharedControlBuffer,
         frameEndpoint,
         frameToken,
-        nativeBackend: String(startResult.nativeBackend || bridgeSelection.backendLabel || 'windows-hdr-capture')
+        nativeBackend: String(startResult.nativeBackend || activeSelection.backendLabel || 'windows-hdr-capture')
       };
     } catch (error) {
       pushHdrTrace('shared-start-exception', {
