@@ -236,6 +236,13 @@ const hdrMappingState = {
   mainTopReadFailures: 0,
   mainTopLastReason: '',
   mainTopLastError: '',
+  mainTopReadMsAvg: 0,
+  mainTopCopyMsAvg: 0,
+  mainTopSabWriteMsAvg: 0,
+  mainTopBytesPerFrameAvg: 0,
+  mainTopBytesPerSec: 0,
+  mainTopPumpJitterMsAvg: 0,
+  mainTopFrameIntervalMsAvg: 0,
   nativeEnvFlag: '',
   nativeEnvFlagEnabled: false,
   nativeLiveEnvFlag: '',
@@ -279,7 +286,8 @@ const nativeHdrState = {
   captureFps: 0,
   renderFps: 0,
   queueDepth: 0,
-  runtimeLegacyRetryAttempted: false
+  runtimeLegacyRetryAttempted: false,
+  rendererBlitMsAvg: 0
 };
 
 const viewState = {
@@ -404,10 +412,16 @@ function updateHdrDiagStatus(message) {
     ', readFail=' + String(nativeHdrState.readFailures) +
     ', capFps=' + String(Number(nativeHdrState.captureFps || 0).toFixed(1)) +
     ', renderFps=' + String(Number(nativeHdrState.renderFps || 0).toFixed(1)) +
+    ', blitMs=' + String(Number(nativeHdrState.rendererBlitMsAvg || 0).toFixed(2)) +
     ', queue=' + String(nativeHdrState.queueDepth || 0) +
     ', mainSess=' + String(hdrMappingState.mainSharedSessionCount) +
     ', mainFrame=' + String(hdrMappingState.mainTopFrameSeq) +
     ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
+    ', mainReadMs=' + String(Number(hdrMappingState.mainTopReadMsAvg || 0).toFixed(2)) +
+    ', mainCopyMs=' + String(Number(hdrMappingState.mainTopCopyMsAvg || 0).toFixed(2)) +
+    ', mainJitMs=' + String(Number(hdrMappingState.mainTopPumpJitterMsAvg || 0).toFixed(2)) +
+    ', mainBpf=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerFrameAvg || 0))) +
+    ', mainBps=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerSec || 0))) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
@@ -541,6 +555,13 @@ async function copyHdrDiagnosticsSnapshot() {
       fallbackCount: hdrMappingState.fallbackCount,
       nativeStartAttempts: hdrMappingState.nativeStartAttempts,
       nativeStartFailures: hdrMappingState.nativeStartFailures,
+      mainTopReadMsAvg: hdrMappingState.mainTopReadMsAvg,
+      mainTopCopyMsAvg: hdrMappingState.mainTopCopyMsAvg,
+      mainTopSabWriteMsAvg: hdrMappingState.mainTopSabWriteMsAvg,
+      mainTopBytesPerFrameAvg: hdrMappingState.mainTopBytesPerFrameAvg,
+      mainTopBytesPerSec: hdrMappingState.mainTopBytesPerSec,
+      mainTopPumpJitterMsAvg: hdrMappingState.mainTopPumpJitterMsAvg,
+      mainTopFrameIntervalMsAvg: hdrMappingState.mainTopFrameIntervalMsAvg,
       lastFallbackReason: hdrMappingState.lastFallbackReason,
       lastFallbackAt: hdrMappingState.lastFallbackAt,
       nativeState: {
@@ -556,7 +577,8 @@ async function copyHdrDiagnosticsSnapshot() {
         frameCount: nativeHdrState.frameCount,
         captureFps: nativeHdrState.captureFps,
         renderFps: nativeHdrState.renderFps,
-        queueDepth: nativeHdrState.queueDepth
+        queueDepth: nativeHdrState.queueDepth,
+        rendererBlitMsAvg: nativeHdrState.rendererBlitMsAvg
       },
       decisionTrace: hdrDecisionTrace.slice(-80)
     },
@@ -1584,12 +1606,14 @@ async function stopNativeHdrCapture() {
   nativeHdrState.renderFps = 0;
   nativeHdrState.queueDepth = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = false;
+  nativeHdrState.rendererBlitMsAvg = 0;
 }
 
 function blitNativeFrameToCanvas(frame) {
   if (!nativeHdrState.ctx || !nativeHdrState.canvas) {
     return;
   }
+  const blitStart = performance.now();
 
   const width = Math.max(1, Number(frame && frame.width ? frame.width : nativeHdrState.width || 1));
   const height = Math.max(1, Number(frame && frame.height ? frame.height : nativeHdrState.height || 1));
@@ -1655,6 +1679,10 @@ function blitNativeFrameToCanvas(frame) {
   nativeHdrState.lastFrameAtMs = now;
   nativeHdrState.frameCount += 1;
   nativeHdrState.firstFrameReceived = true;
+  const blitMs = Math.max(0, performance.now() - blitStart);
+  nativeHdrState.rendererBlitMsAvg = nativeHdrState.rendererBlitMsAvg > 0
+    ? ((nativeHdrState.rendererBlitMsAvg * 0.8) + (blitMs * 0.2))
+    : blitMs;
 }
 
 function tryReadNativeFrameFromSharedBuffer() {
@@ -2152,6 +2180,13 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainSharedSessionCount = 0;
     hdrMappingState.mainTopFrameSeq = 0;
     hdrMappingState.mainTopReadFailures = 0;
+    hdrMappingState.mainTopReadMsAvg = 0;
+    hdrMappingState.mainTopCopyMsAvg = 0;
+    hdrMappingState.mainTopSabWriteMsAvg = 0;
+    hdrMappingState.mainTopBytesPerFrameAvg = 0;
+    hdrMappingState.mainTopBytesPerSec = 0;
+    hdrMappingState.mainTopPumpJitterMsAvg = 0;
+    hdrMappingState.mainTopFrameIntervalMsAvg = 0;
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
     hdrMappingState.nativeEnvFlag = '';
@@ -2186,6 +2221,13 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainSharedSessionCount = Number(diagnostics.sharedSessionCount || sessions.length || 0);
   hdrMappingState.mainTopFrameSeq = Number(top && top.frameSeq ? top.frameSeq : 0);
   hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
+  hdrMappingState.mainTopReadMsAvg = Number(top && top.perf && top.perf.readMsAvg ? top.perf.readMsAvg : 0);
+  hdrMappingState.mainTopCopyMsAvg = Number(top && top.perf && top.perf.copyMsAvg ? top.perf.copyMsAvg : 0);
+  hdrMappingState.mainTopSabWriteMsAvg = Number(top && top.perf && top.perf.sabWriteMsAvg ? top.perf.sabWriteMsAvg : 0);
+  hdrMappingState.mainTopBytesPerFrameAvg = Number(top && top.perf && top.perf.bytesPerFrameAvg ? top.perf.bytesPerFrameAvg : 0);
+  hdrMappingState.mainTopBytesPerSec = Number(top && top.perf && top.perf.bytesPerSec ? top.perf.bytesPerSec : 0);
+  hdrMappingState.mainTopPumpJitterMsAvg = Number(top && top.perf && top.perf.pumpJitterMsAvg ? top.perf.pumpJitterMsAvg : 0);
+  hdrMappingState.mainTopFrameIntervalMsAvg = Number(top && top.perf && top.perf.frameIntervalMsAvg ? top.perf.frameIntervalMsAvg : 0);
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
   if (top && top.runtimeRoute) {

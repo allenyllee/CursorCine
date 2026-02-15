@@ -116,6 +116,15 @@ function pushHdrTrace(type, detail = {}) {
   }
 }
 
+function ewma(prev, sample, alpha = 0.2) {
+  const p = Number(prev || 0);
+  const s = Number(sample || 0);
+  if (!Number.isFinite(s) || s <= 0) {
+    return p;
+  }
+  return p > 0 ? (p * (1 - alpha) + s * alpha) : s;
+}
+
 function ensureHdrFrameServer() {
   if (hdrFrameServer && hdrFrameServerPort > 0) {
     return Promise.resolve({ ok: true, port: hdrFrameServerPort });
@@ -1406,15 +1415,30 @@ function pumpHdrSharedSession(sessionId) {
   if (session.workerMode) {
     return;
   }
+  const loopStartMs = Number(process.hrtime.bigint()) / 1e6;
+  if (session.perf && session.perf.lastPumpAt > 0) {
+    const expected = HDR_SHARED_POLL_INTERVAL_MS;
+    const actual = Math.max(0, loopStartMs - session.perf.lastPumpAt);
+    session.perf.pumpJitterMsAvg = ewma(session.perf.pumpJitterMsAvg, Math.abs(actual - expected));
+  }
+  if (session.perf) {
+    session.perf.lastPumpAt = loopStartMs;
+  }
   try {
+    const readStartMs = Number(process.hrtime.bigint()) / 1e6;
     const frameResult = session.bridge.readFrame({
       nativeSessionId: session.nativeSessionId,
       timeoutMs: 80
     });
+    const readEndMs = Number(process.hrtime.bigint()) / 1e6;
+    if (session.perf) {
+      session.perf.readMsAvg = ewma(session.perf.readMsAvg, readEndMs - readStartMs);
+    }
 
     if (frameResult && frameResult.ok && frameResult.bytes) {
       const bytes = frameResult.bytes;
       const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
       session.frameSeq += 1;
       session.lastFrameAt = Date.now();
       const ts = Number(frameResult.timestampMs || Date.now());
@@ -1430,8 +1454,13 @@ function pumpHdrSharedSession(sessionId) {
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
       session.latestFrameBytes = Buffer.from(src);
+      const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
+      if (session.perf) {
+        session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
+      }
 
       if (session.frameView && session.controlView) {
+        const sabStartMs = Number(process.hrtime.bigint()) / 1e6;
         const len = Math.min(src.length, session.frameView.length);
         session.frameView.set(src.subarray(0, len), 0);
         session.bytesPumped += len;
@@ -1444,6 +1473,21 @@ function pumpHdrSharedSession(sessionId) {
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.TS_HIGH, tsHigh);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.FRAME_SEQ, session.frameSeq);
         Atomics.store(session.controlView, HDR_SHARED_CONTROL.STATUS, 1);
+        const sabEndMs = Number(process.hrtime.bigint()) / 1e6;
+        if (session.perf) {
+          session.perf.sabWriteMsAvg = ewma(session.perf.sabWriteMsAvg, sabEndMs - sabStartMs);
+        }
+      }
+
+      if (session.perf) {
+        const bytesLen = Number(src.length || 0);
+        session.perf.bytesPerFrameAvg = ewma(session.perf.bytesPerFrameAvg, bytesLen);
+        if (session.perf.lastFrameAt > 0) {
+          const deltaMs = Math.max(1, session.lastFrameAt - session.perf.lastFrameAt);
+          session.perf.frameIntervalMsAvg = ewma(session.perf.frameIntervalMsAvg, deltaMs);
+          session.perf.bytesPerSec = ewma(session.perf.bytesPerSec, (bytesLen * 1000) / deltaMs);
+        }
+        session.perf.lastFrameAt = session.lastFrameAt;
       }
 
       session.readFailures = 0;
@@ -1483,12 +1527,27 @@ async function pumpHdrWorkerSession(sessionId) {
   if (!session || !session.workerMode) {
     return;
   }
+  const loopStartMs = Number(process.hrtime.bigint()) / 1e6;
+  if (session.perf && session.perf.lastPumpAt > 0) {
+    const expected = HDR_SHARED_POLL_INTERVAL_MS;
+    const actual = Math.max(0, loopStartMs - session.perf.lastPumpAt);
+    session.perf.pumpJitterMsAvg = ewma(session.perf.pumpJitterMsAvg, Math.abs(actual - expected));
+  }
+  if (session.perf) {
+    session.perf.lastPumpAt = loopStartMs;
+  }
 
   try {
+    const readStartMs = Number(process.hrtime.bigint()) / 1e6;
     const frameResult = await hdrWorkerRequest('frame-read', {}, 1000);
+    const readEndMs = Number(process.hrtime.bigint()) / 1e6;
+    if (session.perf) {
+      session.perf.readMsAvg = ewma(session.perf.readMsAvg, readEndMs - readStartMs);
+    }
     if (frameResult && frameResult.ok && frameResult.hasFrame && frameResult.bytes) {
       const bytes = frameResult.bytes;
       const src = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const copyStartMs = Number(process.hrtime.bigint()) / 1e6;
       const nextSeq = Number(frameResult.frameSeq || 0);
       session.frameSeq = nextSeq > session.frameSeq ? nextSeq : (session.frameSeq + 1);
       session.lastFrameAt = Date.now();
@@ -1503,7 +1562,21 @@ async function pumpHdrWorkerSession(sessionId) {
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
       session.latestFrameBytes = Buffer.from(src);
+      const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
+      if (session.perf) {
+        session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
+      }
       session.bytesPumped += src.length;
+      if (session.perf) {
+        const bytesLen = Number(src.length || 0);
+        session.perf.bytesPerFrameAvg = ewma(session.perf.bytesPerFrameAvg, bytesLen);
+        if (session.perf.lastFrameAt > 0) {
+          const deltaMs = Math.max(1, session.lastFrameAt - session.perf.lastFrameAt);
+          session.perf.frameIntervalMsAvg = ewma(session.perf.frameIntervalMsAvg, deltaMs);
+          session.perf.bytesPerSec = ewma(session.perf.bytesPerSec, (bytesLen * 1000) / deltaMs);
+        }
+        session.perf.lastFrameAt = session.lastFrameAt;
+      }
       session.readFailures = 0;
       session.lastReason = 'FRAME_OK';
       session.lastError = '';
@@ -1983,7 +2056,18 @@ app.whenReady().then(() => {
         latestStride: stride,
         latestPixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         latestFrameBytes: null,
-        pumpTimer: 0
+        pumpTimer: 0,
+        perf: {
+          readMsAvg: 0,
+          copyMsAvg: 0,
+          sabWriteMsAvg: 0,
+          bytesPerFrameAvg: 0,
+          bytesPerSec: 0,
+          pumpJitterMsAvg: 0,
+          frameIntervalMsAvg: 0,
+          lastPumpAt: 0,
+          lastFrameAt: 0
+        }
       });
       if (frameToken) {
         hdrFrameTokens.set(frameToken, sessionId);
@@ -2124,7 +2208,16 @@ app.whenReady().then(() => {
         lastError: String(session.lastError || ''),
         startedAt: Number(session.startedAt || 0),
         lastFrameAt: Number(session.lastFrameAt || 0),
-        nativeSessionId: Number(session.nativeSessionId || 0)
+        nativeSessionId: Number(session.nativeSessionId || 0),
+        perf: {
+          readMsAvg: Number(session.perf && session.perf.readMsAvg ? session.perf.readMsAvg : 0),
+          copyMsAvg: Number(session.perf && session.perf.copyMsAvg ? session.perf.copyMsAvg : 0),
+          sabWriteMsAvg: Number(session.perf && session.perf.sabWriteMsAvg ? session.perf.sabWriteMsAvg : 0),
+          bytesPerFrameAvg: Number(session.perf && session.perf.bytesPerFrameAvg ? session.perf.bytesPerFrameAvg : 0),
+          bytesPerSec: Number(session.perf && session.perf.bytesPerSec ? session.perf.bytesPerSec : 0),
+          pumpJitterMsAvg: Number(session.perf && session.perf.pumpJitterMsAvg ? session.perf.pumpJitterMsAvg : 0),
+          frameIntervalMsAvg: Number(session.perf && session.perf.frameIntervalMsAvg ? session.perf.frameIntervalMsAvg : 0)
+        }
       });
     }
     return {
@@ -2173,7 +2266,16 @@ app.whenReady().then(() => {
           lastError: String(sessionObj.lastError || ''),
           startedAt: Number(sessionObj.startedAt || 0),
           lastFrameAt: Number(sessionObj.lastFrameAt || 0),
-          nativeSessionId: Number(sessionObj.nativeSessionId || 0)
+          nativeSessionId: Number(sessionObj.nativeSessionId || 0),
+          perf: {
+            readMsAvg: Number(sessionObj.perf && sessionObj.perf.readMsAvg ? sessionObj.perf.readMsAvg : 0),
+            copyMsAvg: Number(sessionObj.perf && sessionObj.perf.copyMsAvg ? sessionObj.perf.copyMsAvg : 0),
+            sabWriteMsAvg: Number(sessionObj.perf && sessionObj.perf.sabWriteMsAvg ? sessionObj.perf.sabWriteMsAvg : 0),
+            bytesPerFrameAvg: Number(sessionObj.perf && sessionObj.perf.bytesPerFrameAvg ? sessionObj.perf.bytesPerFrameAvg : 0),
+            bytesPerSec: Number(sessionObj.perf && sessionObj.perf.bytesPerSec ? sessionObj.perf.bytesPerSec : 0),
+            pumpJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.pumpJitterMsAvg ? sessionObj.perf.pumpJitterMsAvg : 0),
+            frameIntervalMsAvg: Number(sessionObj.perf && sessionObj.perf.frameIntervalMsAvg ? sessionObj.perf.frameIntervalMsAvg : 0)
+          }
         });
       }
       return {
