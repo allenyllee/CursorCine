@@ -72,6 +72,7 @@ let overlayWheelResumeTimer = null;
 let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
 let overlayLastPointerInside = null;
+let overlayReentryGraceUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
 let blobUploadSessionSeq = 1;
@@ -114,6 +115,7 @@ let hdrNativeSmokeState = {
   stopReason: ''
 };
 const OVERLAY_WHEEL_PAUSE_MS = 450;
+const OVERLAY_REENTRY_GRACE_MS = 1200;
 let crossOriginIsolationHeadersInstalled = false;
 
 function pushHdrTrace(type, detail = {}) {
@@ -788,6 +790,7 @@ function emitOverlayPointer() {
     // Perform a short overlay pause/resume cycle (same mechanism as wheel pause) automatically.
     if (inside && wasInside === false && overlayDrawEnabled()) {
       overlayWheelLockUntil = Date.now() + 140;
+      overlayReentryGraceUntil = Date.now() + OVERLAY_REENTRY_GRACE_MS;
       scheduleOverlayWheelResume();
     }
 
@@ -800,12 +803,14 @@ function applyOverlayMouseMode() {
     return;
   }
 
+  const now = Date.now();
   const drawEnabled = overlayDrawEnabled();
-  const wheelLocked = Date.now() < overlayWheelLockUntil;
+  const wheelLocked = now < overlayWheelLockUntil;
   const pointerInside = isPointerInsideOverlayBounds();
   const capturePointer = overlayDrawActive() && pointerInside;
   const shouldKeepVisible = drawEnabled && !wheelLocked && pointerInside;
   const pausedByOutside = drawEnabled && !wheelLocked && !pointerInside;
+  const inReentryGrace = shouldKeepVisible && now < overlayReentryGraceUntil;
 
   if (shouldKeepVisible) {
     if (!overlayWindow.isVisible()) {
@@ -820,7 +825,11 @@ function applyOverlayMouseMode() {
 
     // In draw-active mode, block background interactions to match pen-mode expectation.
     overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
-    overlayWindow.setIgnoreMouseEvents(false);
+    if (inReentryGrace) {
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    } else {
+      overlayWindow.setIgnoreMouseEvents(false);
+    }
   } else if ((drawEnabled && wheelLocked) || pausedByOutside) {
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true);
@@ -1018,6 +1027,7 @@ function createOverlayWindow(displayId) {
   const b = targetDisplay.bounds;
   overlayBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
   overlayLastPointerInside = null;
+  overlayReentryGraceUntil = 0;
 
   overlayBorderWindow = new BrowserWindow({
     x: b.x,
@@ -1828,6 +1838,7 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:destroy', () => {
     overlayRecordingActive = false;
     overlayLastPointerInside = null;
+    overlayReentryGraceUntil = 0;
     destroyOverlayWindow();
     return { ok: true };
   });
@@ -1836,6 +1847,7 @@ app.whenReady().then(() => {
     overlayPenEnabled = Boolean(enabled);
     overlayLastDrawActive = false;
     overlayLastPointerInside = null;
+    overlayReentryGraceUntil = 0;
     overlayDrawToggle = false;
     overlayAltPressed = false;
     overlayWheelLockUntil = 0;
