@@ -72,13 +72,17 @@ UI 提供：
 注意：
 
 - Linux 仍固定走 fallback 路由；Native HDR 路由目前僅支援 Windows。
+- `hdr:shared-start` 會使用分級回退：`wgc-v1 -> native-legacy -> builtin-desktop`。
 - 打包後執行檔預設啟用 Native 路由旗標；要停用可設：
   - `CURSORCINE_ENABLE_HDR_NATIVE_IPC=0`
   - `CURSORCINE_ENABLE_HDR_NATIVE_LIVE=0`
+  - `CURSORCINE_ENABLE_HDR_WGC=0`
+- 可指定預設路由偏好：
+  - `CURSORCINE_HDR_ROUTE_PREFERENCE=auto|wgc|legacy`
 
 ## Windows 編譯 Native 模組需求
 
-若要編譯 `native/windows-hdr-capture`，請先安裝：
+若要編譯 `native/windows-hdr-capture` 與 `native/windows-wgc-hdr-capture`，請先安裝：
 
 1. Node.js（建議 LTS 或目前專案可用版本）
 2. Python 3.11（建議 3.11.x；`node-gyp@9` 在 3.12 可能遇到 `distutils` 問題）
@@ -98,7 +102,7 @@ npm.cmd run build:native-hdr-win
 若看到 `MSB8020: 找不到 ClangCL 的建置工具 (平台工具集='ClangCL')`：
 
 - `build:native-hdr-win` 會在 `node-gyp configure` 後自動把產生的 vcxproj toolset 固定為 `v143`，通常不需要安裝 ClangCL。
-- 若仍出現 ClangCL 相關錯誤，先刪除 `native/windows-hdr-capture/build` 後重跑 `npm.cmd run build:native-hdr-win`。
+- 若仍出現 ClangCL 相關錯誤，先刪除 `native/windows-hdr-capture/build` 與 `native/windows-wgc-hdr-capture/build` 後重跑 `npm.cmd run build:native-hdr-win`。
 
 啟動：
 
@@ -179,6 +183,7 @@ GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈�
 - `scripts/check-dist-win-env.js`: Windows 打包前置檢查（非 Windows 時檢查 `wine`）
 - `native/windows-hdr-capture/`: Windows 原生 HDR 擷取 Node-API 模組
 - `native/windows-hdr-capture/src/addon.cc`: 原生擷取與 tone mapping MVP 實作
+- `native/windows-wgc-hdr-capture/`: Windows WGC 路由 Native 模組骨架（目前與既有 bridge 相容，逐步替換）
 - `.github/workflows/build.yml`: CI 供應鏈檢查與 Windows/Linux 打包發佈流程
 
 ## 注意事項

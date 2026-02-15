@@ -4,8 +4,16 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const moduleDir = path.join(__dirname, "..", "native", "windows-hdr-capture");
-const vcxprojPath = path.join(moduleDir, "build", "windows_hdr_capture.vcxproj");
+const modules = [
+  {
+    dir: "native/windows-hdr-capture",
+    vcxproj: "windows_hdr_capture.vcxproj",
+  },
+  {
+    dir: "native/windows-wgc-hdr-capture",
+    vcxproj: "windows_wgc_hdr_capture.vcxproj",
+  },
+];
 
 function runNodeGyp(args) {
   const cmd = process.platform === "win32" ? "node-gyp.cmd" : "node-gyp";
@@ -20,7 +28,8 @@ function runNodeGyp(args) {
   }
 }
 
-function patchPlatformToolset() {
+function patchPlatformToolset(moduleDir, vcxprojName) {
+  const vcxprojPath = path.join(moduleDir, "build", vcxprojName);
   if (!fs.existsSync(vcxprojPath)) {
     console.error("[build:native-hdr-win] vcxproj not found:", vcxprojPath);
     process.exit(1);
@@ -32,11 +41,14 @@ function patchPlatformToolset() {
   }
 }
 
-if (process.platform !== "win32") {
-  runNodeGyp(["rebuild", "--directory", "native/windows-hdr-capture"]);
-  process.exit(0);
-}
+for (const moduleItem of modules) {
+  if (process.platform !== "win32") {
+    runNodeGyp(["rebuild", "--directory", moduleItem.dir]);
+    continue;
+  }
 
-runNodeGyp(["configure", "--directory", "native/windows-hdr-capture"]);
-patchPlatformToolset();
-runNodeGyp(["build", "--directory", "native/windows-hdr-capture"]);
+  const absDir = path.join(__dirname, "..", moduleItem.dir);
+  runNodeGyp(["configure", "--directory", moduleItem.dir]);
+  patchPlatformToolset(absDir, moduleItem.vcxproj);
+  runNodeGyp(["build", "--directory", moduleItem.dir]);
+}

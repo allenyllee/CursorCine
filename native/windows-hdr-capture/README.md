@@ -76,6 +76,7 @@ Shared/live route IPC wrappers:
 ## Notes
 
 - This is an MVP path for stability and integration testing.
+- It now serves as the `native-legacy` fallback route under the new `wgc-v1 -> native-legacy -> builtin-desktop` chain.
 - A future phase can replace GDI with WGC/D3D11 for lower latency and truer HDR source handling.
 - Native frame output is `RGBA8` to avoid per-frame channel conversion overhead in renderer.
 - On non-Windows platforms, native route is not used and app falls back automatically.

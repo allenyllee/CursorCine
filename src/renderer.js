@@ -216,6 +216,10 @@ const hdrCompState = {
 const hdrMappingState = {
   mode: (hdrMappingModeSelect && hdrMappingModeSelect.value) || 'auto',
   runtimeRoute: 'fallback',
+  runtimeBackend: '',
+  runtimeStage: '',
+  routePreference: 'auto',
+  fallbackLevel: 3,
   probeSupported: false,
   probeHdrActive: false,
   probeReason: 'NOT_PROBED',
@@ -236,6 +240,8 @@ const hdrMappingState = {
   nativeEnvFlagEnabled: false,
   nativeLiveEnvFlag: '',
   nativeLiveEnvFlagEnabled: false,
+  wgcEnvFlag: '',
+  wgcEnvFlagEnabled: false,
   nativeSmokeRan: false,
   nativeSmokeOk: false,
   nativeSmokeForSource: false,
@@ -269,7 +275,11 @@ const nativeHdrState = {
   firstFrameReceived: false,
   startupDeadlineMs: 0,
   frameEndpoint: '',
-  lastHttpFrameSeq: 0
+  lastHttpFrameSeq: 0,
+  captureFps: 0,
+  renderFps: 0,
+  queueDepth: 0,
+  runtimeLegacyRetryAttempted: false
 };
 
 const viewState = {
@@ -338,6 +348,14 @@ function normalizeHdrMappingMode(value) {
   return value === 'off' || value === 'force-native' ? value : 'auto';
 }
 
+function normalizeHdrRoutePreference(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (v === 'wgc' || v === 'legacy' || v === 'auto') {
+    return v;
+  }
+  return 'auto';
+}
+
 function updateHdrMappingStatusUi() {
   if (hdrMappingRuntimeEl) {
     hdrMappingRuntimeEl.textContent = hdrRuntimeStatusMessage;
@@ -351,8 +369,9 @@ function updateHdrMappingStatusUi() {
 }
 
 function setHdrRuntimeRoute(route, message) {
-  hdrMappingState.runtimeRoute = route === 'native' ? 'native' : 'fallback';
-  hdrRuntimeStatusMessage = message || (hdrMappingState.runtimeRoute === 'native' ? '目前路徑: Native HDR' : '目前路徑: Fallback');
+  hdrMappingState.runtimeRoute = String(route || 'fallback');
+  const isNativeRoute = hdrMappingState.runtimeRoute !== 'fallback';
+  hdrRuntimeStatusMessage = message || (isNativeRoute ? ('目前路徑: ' + hdrMappingState.runtimeRoute) : '目前路徑: Fallback');
   updateHdrMappingStatusUi();
 }
 
@@ -376,10 +395,16 @@ function updateHdrDiagStatus(message) {
     : '-';
   hdrDiagStatusMessage =
     'Diag: attempt=' + attemptLabel +
+    ', route=' + String(hdrMappingState.runtimeRoute || '-') +
+    ', pref=' + String(hdrMappingState.routePreference || 'auto') +
+    ', level=' + String(hdrMappingState.fallbackLevel || 3) +
     ', fallback=' + String(hdrMappingState.fallbackCount) +
     ', nativeStart=' + String(hdrMappingState.nativeStartAttempts) +
     ', nativeFail=' + String(hdrMappingState.nativeStartFailures) +
     ', readFail=' + String(nativeHdrState.readFailures) +
+    ', capFps=' + String(Number(nativeHdrState.captureFps || 0).toFixed(1)) +
+    ', renderFps=' + String(Number(nativeHdrState.renderFps || 0).toFixed(1)) +
+    ', queue=' + String(nativeHdrState.queueDepth || 0) +
     ', mainSess=' + String(hdrMappingState.mainSharedSessionCount) +
     ', mainFrame=' + String(hdrMappingState.mainTopFrameSeq) +
     ', mainReadFail=' + String(hdrMappingState.mainTopReadFailures) +
@@ -388,6 +413,7 @@ function updateHdrDiagStatus(message) {
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
     ', live=' + (hdrMappingState.nativeLiveEnvFlag || '-') + ':' + (hdrMappingState.nativeLiveEnvFlagEnabled ? '1' : '0') +
+    ', wgc=' + (hdrMappingState.wgcEnvFlag || '-') + ':' + (hdrMappingState.wgcEnvFlagEnabled ? '1' : '0') +
     ', smoke=' + (
       !hdrMappingState.nativeSmokeRan
         ? 'required'
@@ -453,7 +479,7 @@ function updateHdrModeAvailabilityUi() {
   if (!hdrMappingModeSelect) {
     return;
   }
-  const visible = Boolean(hdrMappingState.nativeEnvFlagEnabled);
+  const visible = Boolean(hdrMappingState.nativeEnvFlagEnabled || hdrMappingState.wgcEnvFlagEnabled);
   let forceOption = Array.from(hdrMappingModeSelect.options || []).find((opt) => opt.value === 'force-native');
   if (!visible && forceOption) {
     forceOption.remove();
@@ -497,6 +523,10 @@ async function copyHdrDiagnosticsSnapshot() {
       displayId,
       hdrMappingMode: hdrMappingState.mode,
       hdrRuntimeRoute: hdrMappingState.runtimeRoute,
+      hdrRuntimeBackend: hdrMappingState.runtimeBackend,
+      hdrRuntimeStage: hdrMappingState.runtimeStage,
+      hdrRoutePreference: hdrMappingState.routePreference,
+      hdrFallbackLevel: hdrMappingState.fallbackLevel,
       hdrRuntimeStatusMessage,
       hdrProbeStatusMessage,
       hdrDiagStatusMessage,
@@ -523,7 +553,10 @@ async function copyHdrDiagnosticsSnapshot() {
         lastHttpFrameSeq: nativeHdrState.lastHttpFrameSeq,
         readFailures: nativeHdrState.readFailures,
         droppedFrames: nativeHdrState.droppedFrames,
-        frameCount: nativeHdrState.frameCount
+        frameCount: nativeHdrState.frameCount,
+        captureFps: nativeHdrState.captureFps,
+        renderFps: nativeHdrState.renderFps,
+        queueDepth: nativeHdrState.queueDepth
       },
       decisionTrace: hdrDecisionTrace.slice(-80)
     },
@@ -1547,6 +1580,10 @@ async function stopNativeHdrCapture() {
   nativeHdrState.startupDeadlineMs = 0;
   nativeHdrState.frameEndpoint = '';
   nativeHdrState.lastHttpFrameSeq = 0;
+  nativeHdrState.captureFps = 0;
+  nativeHdrState.renderFps = 0;
+  nativeHdrState.queueDepth = 0;
+  nativeHdrState.runtimeLegacyRetryAttempted = false;
 }
 
 function blitNativeFrameToCanvas(frame) {
@@ -1604,7 +1641,18 @@ function blitNativeFrameToCanvas(frame) {
   }
 
   nativeHdrState.ctx.putImageData(nativeHdrState.frameImageData, 0, 0);
-  nativeHdrState.lastFrameAtMs = performance.now();
+  const now = performance.now();
+  const delta = nativeHdrState.lastFrameAtMs > 0 ? Math.max(1, now - nativeHdrState.lastFrameAtMs) : 0;
+  if (delta > 0) {
+    const fps = 1000 / delta;
+    nativeHdrState.renderFps = nativeHdrState.renderFps > 0
+      ? ((nativeHdrState.renderFps * 0.8) + (fps * 0.2))
+      : fps;
+    nativeHdrState.captureFps = nativeHdrState.captureFps > 0
+      ? ((nativeHdrState.captureFps * 0.8) + (fps * 0.2))
+      : fps;
+  }
+  nativeHdrState.lastFrameAtMs = now;
   nativeHdrState.frameCount += 1;
   nativeHdrState.firstFrameReceived = true;
 }
@@ -1625,6 +1673,11 @@ function tryReadNativeFrameFromSharedBuffer() {
   if (frameSeq <= nativeHdrState.lastSharedFrameSeq) {
     return null;
   }
+  const queueDepth = Math.max(0, frameSeq - nativeHdrState.lastSharedFrameSeq - 1);
+  nativeHdrState.queueDepth = queueDepth;
+  if (queueDepth > 0) {
+    nativeHdrState.droppedFrames += queueDepth;
+  }
 
   const width = Math.max(1, Atomics.load(control, 2));
   const height = Math.max(1, Atomics.load(control, 3));
@@ -1637,6 +1690,7 @@ function tryReadNativeFrameFromSharedBuffer() {
   nativeHdrState.lastSharedFrameSeq = frameSeq;
   return {
     ok: true,
+    frameSeq,
     width,
     height,
     stride,
@@ -1677,6 +1731,11 @@ async function tryReadNativeFrameFromHttpEndpoint() {
   if (frameSeq <= Number(nativeHdrState.lastHttpFrameSeq || 0)) {
     return null;
   }
+  const queueDepth = Math.max(0, frameSeq - Number(nativeHdrState.lastHttpFrameSeq || 0) - 1);
+  nativeHdrState.queueDepth = queueDepth;
+  if (queueDepth > 0) {
+    nativeHdrState.droppedFrames += queueDepth;
+  }
   const width = Math.max(1, Number(response.headers.get('x-hdr-width') || nativeHdrState.width || 1));
   const height = Math.max(1, Number(response.headers.get('x-hdr-height') || nativeHdrState.height || 1));
   const stride = Math.max(width * 4, Number(response.headers.get('x-hdr-stride') || nativeHdrState.stride || width * 4));
@@ -1685,6 +1744,7 @@ async function tryReadNativeFrameFromHttpEndpoint() {
   nativeHdrState.lastHttpFrameSeq = frameSeq;
   return {
     ok: true,
+    frameSeq,
     width,
     height,
     stride,
@@ -1698,11 +1758,29 @@ async function fallbackNativeToDesktopVideo(reason) {
     return;
   }
   nativeHdrFallbackAttempted = true;
+  let keepNativeSession = false;
+  const fallbackReason = String(reason || 'NATIVE_RUNTIME_FALLBACK');
 
   const oldSourceStream = sourceStream;
 
   try {
-    noteHdrFallback(reason || 'NATIVE_RUNTIME_FALLBACK');
+    noteHdrFallback(fallbackReason);
+    const runtimeRoute = String(hdrMappingState.runtimeRoute || '');
+    if (runtimeRoute === 'wgc-v1' && !nativeHdrState.runtimeLegacyRetryAttempted) {
+      nativeHdrState.runtimeLegacyRetryAttempted = true;
+      const retrySourceId = String(nativeHdrState.sourceId || (sourceSelect && sourceSelect.value ? sourceSelect.value : ''));
+      const retryDisplayId = String(nativeHdrState.displayId || (selectedSource && selectedSource.display_id ? selectedSource.display_id : ''));
+      await stopNativeHdrCapture();
+      const legacyRetry = await tryStartNativeHdrCapture(retrySourceId, retryDisplayId, {
+        routePreference: 'legacy'
+      });
+      if (legacyRetry && legacyRetry.ok) {
+        keepNativeSession = true;
+        setStatus('WGC 路徑中斷，已自動降級到 Legacy Native HDR。原因: ' + fallbackReason);
+        return;
+      }
+    }
+    hdrMappingState.fallbackLevel = 3;
     const fallbackStream = await getDesktopStream(nativeHdrState.sourceId || sourceSelect.value);
     sourceStream = fallbackStream;
     applyQualityHints(sourceStream);
@@ -1714,11 +1792,13 @@ async function fallbackNativeToDesktopVideo(reason) {
       extraCaptureStreams.push(oldSourceStream);
     }
 
-    setStatus('偵測到 Native HDR 擷取中斷，已自動回退既有錄影管線。' + (reason ? ' 原因: ' + reason : ''));
+    setStatus('偵測到 Native HDR 擷取中斷，已自動回退既有錄影管線。' + (fallbackReason ? ' 原因: ' + fallbackReason : ''));
   } catch (error) {
     setStatus('Native HDR 擷取中斷且回退失敗: ' + (error && error.message ? error.message : String(error)));
   } finally {
-    await stopNativeHdrCapture();
+    if (!keepNativeSession) {
+      await stopNativeHdrCapture();
+    }
   }
 }
 
@@ -1825,15 +1905,21 @@ async function probeHdrNativeSupport(sourceId, displayId) {
   return probe || { ok: false, supported: false, reason: 'UNKNOWN' };
 }
 
-async function tryStartNativeHdrCapture(sourceId, displayId) {
+async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   hdrMappingState.nativeStartAttempts += 1;
   updateHdrDiagStatus();
+  const routePreference = options && options.routePreference
+    ? normalizeHdrRoutePreference(options.routePreference)
+    : (normalizeHdrMappingMode(hdrMappingState.mode) === 'force-native'
+      ? 'wgc'
+      : normalizeHdrRoutePreference(hdrMappingState.routePreference));
 
   let start = null;
   try {
     start = await electronAPI.hdrSharedStart({
       sourceId,
       displayId,
+      routePreference,
       maxFps: 60,
       toneMap: {
         profile: 'rec709-rolloff-v1',
@@ -1891,9 +1977,14 @@ async function tryStartNativeHdrCapture(sourceId, displayId) {
   nativeHdrState.startupDeadlineMs = performance.now() + HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS;
   nativeHdrState.frameEndpoint = String(start.frameEndpoint || '');
   nativeHdrState.lastHttpFrameSeq = 0;
+  nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
+  hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
+  hdrMappingState.runtimeStage = String(start.pipelineStage || '');
+  hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));
+  hdrMappingState.routePreference = normalizeHdrRoutePreference(start.requestedRoute || routePreference);
 
   ensureNativeHdrCanvas(nativeHdrState.width, nativeHdrState.height);
-  setHdrRuntimeRoute('native', '目前路徑: Native HDR (Rec.709 Mapping)');
+  setHdrRuntimeRoute(String(start.runtimeRoute || 'native-legacy'), '目前路徑: ' + String(start.runtimeRoute || 'native-legacy'));
 
   await pollNativeHdrFrame();
   return { ok: true, start };
@@ -1984,6 +2075,7 @@ async function buildCaptureStreams(sourceId, selectedDisplayId) {
   if (decision.route === 'blocked') {
     const reason = decision && decision.message ? String(decision.message) : 'Native HDR 路徑不可用。';
     await stopNativeHdrCapture();
+    hdrMappingState.fallbackLevel = 3;
     sourceStream = await getDesktopStream(sourceId);
     applyQualityHints(sourceStream);
     micStream = await getMicStreamIfEnabled();
@@ -2009,6 +2101,7 @@ async function buildCaptureStreams(sourceId, selectedDisplayId) {
   }
 
   await stopNativeHdrCapture();
+  hdrMappingState.fallbackLevel = 3;
   sourceStream = await getDesktopStream(sourceId);
   applyQualityHints(sourceStream);
   micStream = await getMicStreamIfEnabled();
@@ -2052,6 +2145,10 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeRouteEnabled = false;
     hdrMappingState.nativeRouteReason = 'HDR_EXPERIMENTAL_STATE_UNAVAILABLE';
     hdrMappingState.nativeRouteStage = '';
+    hdrMappingState.runtimeBackend = '';
+    hdrMappingState.runtimeStage = '';
+    hdrMappingState.routePreference = 'auto';
+    hdrMappingState.fallbackLevel = 3;
     hdrMappingState.mainSharedSessionCount = 0;
     hdrMappingState.mainTopFrameSeq = 0;
     hdrMappingState.mainTopReadFailures = 0;
@@ -2061,6 +2158,8 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeEnvFlagEnabled = false;
     hdrMappingState.nativeLiveEnvFlag = '';
     hdrMappingState.nativeLiveEnvFlagEnabled = false;
+    hdrMappingState.wgcEnvFlag = '';
+    hdrMappingState.wgcEnvFlagEnabled = false;
     hdrMappingState.nativeSmokeRan = false;
     hdrMappingState.nativeSmokeOk = false;
     hdrMappingState.nativeSmokeForSource = false;
@@ -2073,6 +2172,8 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeRouteEnabled = Boolean(result.nativeRouteEnabled);
   hdrMappingState.nativeRouteReason = String(result.reason || (result.nativeRouteEnabled ? 'OK' : 'NATIVE_ROUTE_DISABLED'));
   hdrMappingState.nativeRouteStage = String(result.stage || '');
+  hdrMappingState.runtimeStage = String(result.wgcStage || result.stage || '');
+  hdrMappingState.routePreference = normalizeHdrRoutePreference(result.routePreference || hdrMappingState.routePreference);
   const diagnostics = result.diagnostics || {};
   const sessions = Array.isArray(diagnostics.sharedSessions) ? diagnostics.sharedSessions : [];
   const top = sessions.length > 0
@@ -2087,10 +2188,17 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopReadFailures = Number(top && top.totalReadFailures ? top.totalReadFailures : 0);
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
+  if (top && top.runtimeRoute) {
+    hdrMappingState.runtimeRoute = String(top.runtimeRoute || hdrMappingState.runtimeRoute || 'fallback');
+  }
+  hdrMappingState.runtimeBackend = String((top && top.nativeBackend) || '');
+  hdrMappingState.fallbackLevel = Number((top && top.fallbackLevel) || hdrMappingState.fallbackLevel || 3);
   hdrMappingState.nativeEnvFlag = String(result.envFlag || '');
   hdrMappingState.nativeEnvFlagEnabled = Boolean(result.envFlagEnabled);
   hdrMappingState.nativeLiveEnvFlag = String(result.liveEnvFlag || '');
   hdrMappingState.nativeLiveEnvFlagEnabled = Boolean(result.liveEnvFlagEnabled);
+  hdrMappingState.wgcEnvFlag = String(result.wgcEnvFlag || '');
+  hdrMappingState.wgcEnvFlagEnabled = Boolean(result.wgcEnvFlagEnabled);
   hdrMappingState.nativeSmokeRan = Boolean(result.smoke && result.smoke.ran);
   hdrMappingState.nativeSmokeOk = Boolean(result.smoke && result.smoke.ok);
   hdrMappingState.nativeSmokeForSource = Boolean(result.smokeMatchesRequestedSource);
@@ -3353,7 +3461,8 @@ async function startRecording() {
     ? `音訊: ${hasSystemAudio ? '喇叭輸出' : ''}${hasSystemAudio && hasMicAudio ? ' + ' : ''}${hasMicAudio ? '麥克風' : ''} (已混音 + 增益)`
     : '音訊: 無';
 
-  const routeLabel = captureRoute && captureRoute.route === 'native' ? 'Native HDR->SDR' : 'Fallback';
+  const runtimeRoute = String((hdrMappingState && hdrMappingState.runtimeRoute) || (captureRoute && captureRoute.route) || 'fallback');
+  const routeLabel = runtimeRoute === 'fallback' ? 'Fallback' : runtimeRoute;
   setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫質: ' + qualityPreset.label + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
