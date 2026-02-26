@@ -50,6 +50,21 @@ npm install
 npm start
 ```
 
+## 測試
+
+```bash
+# Unit + Integration
+npm test
+
+# E2E（Linux）
+npm run test:e2e:linux
+
+# E2E（Windows）
+npm run test:e2e:windows
+```
+
+CI 的 E2E 預設使用 `CURSORCINE_TEST_MODE=1`（mock capture/export），避免依賴真實螢幕錄製權限與手動存檔操作。
+
 在 Windows PowerShell 若遇到 `npm` 指令被 execution policy 阻擋，請改用：
 
 ```powershell

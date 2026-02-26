@@ -7,6 +7,9 @@ const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
 const http = require('http');
 const crypto = require('crypto');
+const { normalizeOverlayInteractionMode, getOverlayInteractionProfile: getOverlayProfile } = require('./core/overlay-interaction');
+const { normalizeHdrRoutePreference, selectHdrBridge: selectHdrBridgeCore } = require('./core/hdr-route');
+const { createIpcHandlers, registerIpcHandlers } = require('./ipc-handlers');
 
 const CURSOR_POLL_MS = 16;
 const BLOB_UPLOAD_CHUNK_MAX_BYTES = 8 * 1024 * 1024;
@@ -46,6 +49,9 @@ const HDR_SHARED_CONTROL = {
   TS_HIGH: 7,
   PIXEL_FORMAT: 8
 };
+const CURSORCINE_TEST_MODE = String(process.env.CURSORCINE_TEST_MODE || '0') === '1';
+const CURSORCINE_TEST_CAPTURE_MODE = String(process.env.CURSORCINE_TEST_CAPTURE_MODE || 'mock').trim().toLowerCase();
+const CURSORCINE_TEST_EXPORT_MODE = String(process.env.CURSORCINE_TEST_EXPORT_MODE || 'mock').trim().toLowerCase();
 
 function encodeHdrPixelFormat(value) {
   const fmt = String(value || '').trim().toUpperCase();
@@ -128,40 +134,14 @@ const OVERLAY_SAFE_RELEASE_MS_BASE = Math.max(
 );
 const OVERLAY_RISK_TRANSITION_WINDOW_MS = 2200;
 const OVERLAY_RISK_TRANSITION_THRESHOLD = 3;
-const OVERLAY_INTERACTION_MODE_DEFAULT = String(process.env.CURSORCINE_OVERLAY_INTERACTION_MODE || 'stable').trim().toLowerCase();
-let overlayInteractionMode = OVERLAY_INTERACTION_MODE_DEFAULT === 'smooth' ? 'smooth' : 'stable';
+const OVERLAY_INTERACTION_MODE_DEFAULT = normalizeOverlayInteractionMode(process.env.CURSORCINE_OVERLAY_INTERACTION_MODE || 'stable');
+let overlayInteractionMode = OVERLAY_INTERACTION_MODE_DEFAULT;
 let crossOriginIsolationHeadersInstalled = false;
 
-function normalizeOverlayInteractionMode(value) {
-  const mode = String(value || '').trim().toLowerCase();
-  return mode === 'smooth' ? 'smooth' : 'stable';
-}
-
 function getOverlayInteractionProfile() {
-  if (overlayInteractionMode === 'smooth') {
-    return {
-      mode: 'smooth',
-      wheelPauseMs: 55,
-      reentryPauseMs: 30,
-      reentryGraceMs: 180,
-      reentryClickThrough: true,
-      keepWheelLockIntercept: false,
-      wheelHideOverlay: false,
-      safeArmMs: 30,
-      safeReleaseMs: 35
-    };
-  }
-  return {
-    mode: 'stable',
-    wheelPauseMs: 450,
-    reentryPauseMs: 140,
-    reentryGraceMs: 1200,
-    reentryClickThrough: false,
-    keepWheelLockIntercept: true,
-    wheelHideOverlay: true,
-    safeArmMs: 320,
-    safeReleaseMs: OVERLAY_SAFE_RELEASE_MS_BASE
-  };
+  return getOverlayProfile(overlayInteractionMode, {
+    safeReleaseBase: OVERLAY_SAFE_RELEASE_MS_BASE
+  });
 }
 
 function pushHdrTrace(type, detail = {}) {
@@ -514,59 +494,16 @@ function loadWindowsHdrWgcBridge() {
   }
 }
 
-function normalizeHdrRoutePreference(value) {
-  const v = String(value || '').trim().toLowerCase();
-  if (v === 'wgc' || v === 'legacy' || v === 'auto') {
-    return v;
-  }
-  return 'auto';
-}
-
 function selectHdrBridge(requestedRoute) {
-  const preference = normalizeHdrRoutePreference(requestedRoute || HDR_ROUTE_PREFERENCE);
-  const tries = preference === 'legacy'
-    ? ['legacy', 'wgc']
-    : (preference === 'wgc' ? ['wgc', 'legacy'] : ['wgc', 'legacy']);
-  const errors = [];
-
-  for (const candidate of tries) {
-    if (candidate === 'wgc') {
-      if (!HDR_WGC_ROUTE_ENABLED) {
-        errors.push('WGC_ROUTE_DISABLED');
-        continue;
-      }
-      const bridge = loadWindowsHdrWgcBridge();
-      if (bridge && typeof bridge.startCapture === 'function' && typeof bridge.readFrame === 'function') {
-        return {
-          route: 'wgc-v1',
-          fallbackLevel: 1,
-          bridge,
-          backendLabel: String(bridge.backendName || 'windows-wgc-hdr-capture')
-        };
-      }
-      errors.push(windowsHdrWgcLoadError || 'WGC_UNAVAILABLE');
-      continue;
-    }
-
-    const bridge = loadWindowsHdrNativeBridge();
-    if (bridge && typeof bridge.startCapture === 'function' && typeof bridge.readFrame === 'function') {
-      return {
-        route: 'native-legacy',
-        fallbackLevel: 2,
-        bridge,
-        backendLabel: String(bridge.backendName || 'windows-hdr-capture')
-      };
-    }
-    errors.push(windowsHdrNativeLoadError || 'LEGACY_UNAVAILABLE');
-  }
-
-  return {
-    route: 'builtin-desktop',
-    fallbackLevel: 3,
-    bridge: null,
-    backendLabel: '',
-    reason: errors.length > 0 ? errors.join('|') : 'NATIVE_UNAVAILABLE'
-  };
+  return selectHdrBridgeCore({
+    requestedRoute: requestedRoute || HDR_ROUTE_PREFERENCE,
+    defaultRoute: HDR_ROUTE_PREFERENCE,
+    wgcEnabled: HDR_WGC_ROUTE_ENABLED,
+    getWgcBridge: () => loadWindowsHdrWgcBridge(),
+    getLegacyBridge: () => loadWindowsHdrNativeBridge(),
+    wgcLoadError: windowsHdrWgcLoadError,
+    legacyLoadError: windowsHdrNativeLoadError
+  });
 }
 
 async function runHdrNativeRouteSmoke(payload = {}) {
@@ -1905,9 +1842,28 @@ function installCrossOriginIsolationHeaders() {
   });
 }
 
+async function safeShowSaveDialog(options) {
+  if (CURSORCINE_TEST_MODE && CURSORCINE_TEST_EXPORT_MODE === 'mock') {
+    const defaultName = String((options && options.defaultPath) || 'cursorcine-test-output.webm');
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursorcine-test-save-'));
+    const filePath = path.join(tempDir, defaultName);
+    return {
+      canceled: false,
+      filePath
+    };
+  }
+  return dialog.showSaveDialog(options);
+}
+
 app.whenReady().then(() => {
   installCrossOriginIsolationHeaders();
   initGlobalClickHook();
+  registerIpcHandlers(ipcMain, createIpcHandlers({
+    desktopCapturer,
+    testMode: CURSORCINE_TEST_MODE,
+    testCaptureMode: CURSORCINE_TEST_CAPTURE_MODE,
+    testExportMode: CURSORCINE_TEST_EXPORT_MODE
+  }));
 
   ipcMain.handle('cursor:get', (_event, displayId) => {
     const p = screen.getCursorScreenPoint();
@@ -2132,14 +2088,6 @@ app.whenReady().then(() => {
 
     overlayBorderWindow.webContents.send('overlay:double-click-marker', payload || {});
     return { ok: true };
-  });
-
-  ipcMain.handle('desktop-sources:get', async () => {
-    return desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: 0, height: 0 },
-      fetchWindowIcons: false
-    });
   });
 
   ipcMain.handle('hdr:worker-status', async () => {
@@ -2988,7 +2936,7 @@ app.whenReady().then(() => {
     const requestedOutputPath = String(payload && payload.outputPath ? payload.outputPath : '');
     let filePath = requestedOutputPath;
     if (!filePath) {
-      const saveDialog = await dialog.showSaveDialog({
+      const saveDialog = await safeShowSaveDialog({
         title: '儲存剪輯影片',
         defaultPath: `${safeBaseName}.${outputExt}`,
         filters: [{ name: `${outputExt.toUpperCase()} Video`, extensions: [outputExt] }]
@@ -3116,7 +3064,7 @@ app.whenReady().then(() => {
       });
     } else if (mode === 'save') {
       const title = String(payload && payload.title ? payload.title : '儲存影片');
-      const { canceled, filePath: selectedPath } = await dialog.showSaveDialog({
+      const { canceled, filePath: selectedPath } = await safeShowSaveDialog({
         title,
         defaultPath: `${safeBaseName}.${ext}`,
         filters: [{ name: `${ext.toUpperCase()} Video`, extensions: [ext] }]
@@ -3272,7 +3220,7 @@ app.whenReady().then(() => {
     try {
       await fs.writeFile(inputPath, Buffer.from(bytes));
       return await (async () => {
-        const { canceled, filePath } = await dialog.showSaveDialog({
+        const { canceled, filePath } = await safeShowSaveDialog({
           title: '另存 MP4',
           defaultPath: `${safeBaseName}.mp4`,
           filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
@@ -3340,7 +3288,7 @@ app.whenReady().then(() => {
 
     const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
     const taskId = Number(payload && payload.taskId);
-    const { canceled, filePath } = await dialog.showSaveDialog({
+    const { canceled, filePath } = await safeShowSaveDialog({
       title: '另存 MP4',
       defaultPath: `${safeBaseName}.mp4`,
       filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
@@ -3435,7 +3383,7 @@ app.whenReady().then(() => {
     const ext = sanitizeExt(payload && payload.ext ? payload.ext : 'webm');
     const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
     const title = String(payload && payload.title ? payload.title : '儲存影片');
-    const { canceled, filePath } = await dialog.showSaveDialog({
+    const { canceled, filePath } = await safeShowSaveDialog({
       title,
       defaultPath: `${safeBaseName}.${ext}`,
       filters: [{ name: `${ext.toUpperCase()} Video`, extensions: [ext] }]
@@ -3458,7 +3406,7 @@ app.whenReady().then(() => {
 
     const ext = sanitizeExt(payload && payload.ext ? payload.ext : 'webm');
     const safeBaseName = sanitizeBaseName(payload && payload.baseName ? payload.baseName : 'cursorcine-export');
-    const { canceled, filePath } = await dialog.showSaveDialog({
+    const { canceled, filePath } = await safeShowSaveDialog({
       title: '儲存影片',
       defaultPath: `${safeBaseName}.${ext}`,
       filters: [{ name: `${ext.toUpperCase()} Video`, extensions: [ext] }]

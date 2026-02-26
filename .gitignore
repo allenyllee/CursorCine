@@ -6,3 +6,5 @@ Thumbs.db
 dist/
 native/windows-hdr-capture/build/
 native/windows-wgc-hdr-capture/build/
+playwright-report/
+test-results/

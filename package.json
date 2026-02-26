@@ -10,7 +10,13 @@
     "predist:win": "node scripts/check-dist-win-env.js && npm run build:native-hdr-win",
     "dist:win": "electron-builder --win nsis",
     "dist:linux": "electron-builder --linux AppImage deb",
-    "build:native-hdr-win": "node scripts/build-native-hdr-win.js"
+    "build:native-hdr-win": "node scripts/build-native-hdr-win.js",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "playwright test",
+    "test:e2e:linux": "xvfb-run -a playwright test --project=linux-electron",
+    "test:e2e:windows": "playwright test --project=windows-electron",
+    "test": "npm run test:unit && npm run test:integration"
   },
   "author": {
     "name": "allenyl",
@@ -18,8 +24,11 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@playwright/test": "^1.50.1",
     "electron": "^35.0.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "playwright": "^1.58.2",
+    "vitest": "^2.1.8"
   },
   "dependencies": {
     "uiohook-napi": "^1.5.4"

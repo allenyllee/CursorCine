@@ -1,5 +1,11 @@
 /* global electronAPI */
 const runtimeElectronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+const runtimeTestConfig = {
+  loaded: false,
+  testMode: false,
+  captureMode: 'real',
+  exportMode: 'real'
+};
 
 const sourceSelect = document.getElementById('sourceSelect');
 const refreshBtn = document.getElementById('refreshBtn');
@@ -147,8 +153,6 @@ let recordingChunkCount = 0;
 let recordingBytes = 0;
 let recordingStopRequestedAtMs = 0;
 let recordingUploadSession = null;
-let recordingUploadQueue = Promise.resolve();
-let recordingUploadFailure = null;
 let hdrRuntimeStatusMessage = '尚未探測';
 let hdrProbeStatusMessage = '尚未探測';
 let hdrDiagStatusMessage = '尚未開始';
@@ -174,6 +178,18 @@ let recordingMeta = {
   requestedFormat: 'webm',
   fallbackFromMp4: false
 };
+
+async function ensureRuntimeTestConfig() {
+  if (runtimeTestConfig.loaded || !runtimeElectronAPI || typeof runtimeElectronAPI.getTestConfig !== 'function') {
+    return runtimeTestConfig;
+  }
+  const result = await runtimeElectronAPI.getTestConfig().catch(() => null);
+  runtimeTestConfig.loaded = true;
+  runtimeTestConfig.testMode = Boolean(result && result.testMode);
+  runtimeTestConfig.captureMode = String((result && result.captureMode) || 'real').toLowerCase();
+  runtimeTestConfig.exportMode = String((result && result.exportMode) || 'real').toLowerCase();
+  return runtimeTestConfig;
+}
 
 let clickState = {
   enabled: false,
@@ -1612,6 +1628,40 @@ function applyQualityHints(stream) {
 }
 
 async function getDesktopStream(sourceId) {
+  await ensureRuntimeTestConfig();
+  if (runtimeTestConfig.testMode && runtimeTestConfig.captureMode === 'mock') {
+    const mockCanvas = document.createElement('canvas');
+    mockCanvas.width = 1280;
+    mockCanvas.height = 720;
+    const mockCtx = mockCanvas.getContext('2d');
+    let frame = 0;
+    const drawFrame = () => {
+      frame += 1;
+      const t = frame / 60;
+      const w = mockCanvas.width;
+      const h = mockCanvas.height;
+      if (!mockCtx) {
+        return;
+      }
+      mockCtx.fillStyle = '#0b1220';
+      mockCtx.fillRect(0, 0, w, h);
+      mockCtx.fillStyle = '#5ac8a8';
+      mockCtx.font = '32px sans-serif';
+      mockCtx.fillText('CursorCine Mock Capture', 40, 64);
+      mockCtx.fillStyle = '#7ad6ff';
+      mockCtx.fillText('source=' + String(sourceId || 'mock'), 40, 108);
+      const x = Math.floor((w * 0.1) + (Math.sin(t * 1.8) * w * 0.32));
+      const y = Math.floor((h * 0.52) + (Math.cos(t * 1.2) * h * 0.2));
+      mockCtx.beginPath();
+      mockCtx.fillStyle = '#ffd166';
+      mockCtx.arc(x + w * 0.4, y, 18, 0, Math.PI * 2);
+      mockCtx.fill();
+      requestAnimationFrame(drawFrame);
+    };
+    drawFrame();
+    return mockCanvas.captureStream(60);
+  }
+
   try {
     return await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -2889,47 +2939,13 @@ async function enterEditorModeFromPath(filePath, tempDir, fallbackDurationSec = 
   setStatus('錄製完成：請在下方時間軸剪輯並回放，定稿後按「儲存定稿」。');
 }
 
-async function appendRecordingChunkToDisk(data) {
-  if (!recordingUploadSession || !recordingUploadSession.ok) {
-    throw new Error('錄影上傳工作階段未建立。');
-  }
-  const chunkBytes = new Uint8Array(await data.arrayBuffer());
-  const chunkResult = await electronAPI.blobUploadChunk({
-    sessionId: Number(recordingUploadSession.sessionId),
-    bytes: chunkBytes
-  });
-  if (!chunkResult || !chunkResult.ok) {
-    throw new Error((chunkResult && chunkResult.message) || '寫入錄影區塊失敗。');
-  }
-}
-
-function queueRecordingChunkToDisk(data) {
-  recordingUploadQueue = recordingUploadQueue.then(async () => {
-    await appendRecordingChunkToDisk(data);
-  }).catch((error) => {
-    recordingUploadFailure = error;
-    throw error;
-  });
-  return recordingUploadQueue;
-}
-
 async function abortRecordingUploadSession() {
   if (!recordingUploadSession || !recordingUploadSession.ok) {
     recordingUploadSession = null;
-    recordingUploadFailure = null;
-    recordingUploadQueue = Promise.resolve();
     return;
   }
-  const sessionId = Number(recordingUploadSession.sessionId || 0);
   recordingUploadSession = null;
-  recordingUploadFailure = null;
-  recordingUploadQueue = Promise.resolve();
-  if (sessionId > 0) {
-    await electronAPI.blobUploadClose({
-      sessionId,
-      abort: true
-    }).catch(() => {});
-  }
+  await electronAPI.recordingUploadAbort().catch(() => {});
 }
 
 function stopEditorPlayback() {
@@ -3376,6 +3392,7 @@ async function saveEditedClip() {
     }
 
     const mode = getExportEngineMode();
+    let shouldRunBuiltin = mode === 'builtin';
     if (mode !== 'builtin') {
       const ffmpegOutputExt = recordingMeta.requestedFormat === 'mp4' ? 'mp4' : 'webm';
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -3404,32 +3421,38 @@ async function saveEditedClip() {
       } else if (ffmpegResult && Array.isArray(ffmpegResult.ffmpegArgs) && ffmpegResult.ffmpegArgs.length > 0) {
         appendExportTrace('ffmpeg args: ' + ffmpegResult.ffmpegArgs.join(' '));
       }
-      if (ffmpegResult && ffmpegResult.ok) {
+      const decision = electronAPI.decideExportAction({
+        mode,
+        ffmpegResult,
+        preselectedOutputPath
+      });
+      if (decision && decision.done && decision.route === 'ffmpeg' && decision.reason === 'FFMPEG_OK') {
         setExportDebug('ffmpeg', 'OK', 'ffmpeg 輸出完成');
         setStatus('儲存完成（ffmpeg）');
         return;
       }
-
-      if (ffmpegResult && ffmpegResult.reason === 'CANCELED') {
-        setExportDebug('ffmpeg', 'CANCELED', ffmpegResult.message || '使用者取消儲存');
+      if (decision && decision.done && decision.reason === 'CANCELED') {
+        setExportDebug('ffmpeg', 'CANCELED', (ffmpegResult && ffmpegResult.message) || '使用者取消儲存');
         setStatus('已取消儲存');
         return;
       }
-      if (ffmpegResult && ffmpegResult.reason === 'EXPORT_ABORTED') {
+      if (decision && decision.done && decision.reason === 'EXPORT_ABORTED') {
         throw createExportAbortedError();
       }
-
-      if (mode === 'ffmpeg') {
+      if (decision && decision.error) {
         setExportDebug('ffmpeg', (ffmpegResult && ffmpegResult.reason) || 'FFMPEG_FAILED', (ffmpegResult && ffmpegResult.message) || 'ffmpeg 剪輯失敗');
         throw new Error((ffmpegResult && ffmpegResult.message) || 'ffmpeg 剪輯失敗');
       }
-
-      if (ffmpegResult && ffmpegResult.reason && ffmpegResult.reason !== 'NO_FFMPEG') {
-        setExportDebug('ffmpeg -> 內建', ffmpegResult.reason, ffmpegResult.message || 'ffmpeg 失敗，改內建');
-        setStatus('ffmpeg 失敗，改用內建剪輯器輸出...');
-      } else {
-        setExportDebug('ffmpeg -> 內建', (ffmpegResult && ffmpegResult.reason) || 'NO_FFMPEG', (ffmpegResult && ffmpegResult.message) || '未偵測到 ffmpeg');
-        setStatus('未偵測到 ffmpeg，改用內建剪輯器輸出...');
+      if (decision && decision.useBuiltin) {
+        shouldRunBuiltin = true;
+        preselectedOutputPath = String(decision.reuseOutputPath || preselectedOutputPath || '');
+        if (ffmpegResult && ffmpegResult.reason && ffmpegResult.reason !== 'NO_FFMPEG') {
+          setExportDebug('ffmpeg -> 內建', ffmpegResult.reason, ffmpegResult.message || 'ffmpeg 失敗，改內建');
+          setStatus('ffmpeg 失敗，改用內建剪輯器輸出...');
+        } else {
+          setExportDebug('ffmpeg -> 內建', (ffmpegResult && ffmpegResult.reason) || 'NO_FFMPEG', (ffmpegResult && ffmpegResult.message) || '未偵測到 ffmpeg');
+          setStatus('未偵測到 ffmpeg，改用內建剪輯器輸出...');
+        }
       }
     } else {
       setStatus('正在輸出剪輯片段（內建）...');
@@ -3437,6 +3460,9 @@ async function saveEditedClip() {
     }
 
     try {
+      if (!shouldRunBuiltin) {
+        return;
+      }
       if (recordingMeta.requestedFormat !== 'mp4') {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         setStatus(preselectedOutputPath ? '沿用先前儲存位置...' : '請選擇儲存位置...');
@@ -3641,9 +3667,7 @@ async function startRecording() {
     requestedFormat,
     fallbackFromMp4: Boolean(recorderConfig.fallbackFromMp4)
   };
-  recordingUploadQueue = Promise.resolve();
-  recordingUploadFailure = null;
-  recordingUploadSession = await electronAPI.blobUploadOpen({
+  recordingUploadSession = await electronAPI.recordingUploadOpen({
     mode: 'temp',
     baseName: `cursorcine-recording-${new Date().toISOString().replace(/[:.]/g, '-')}`,
     ext: recordingMeta.outputExt
@@ -3658,7 +3682,7 @@ async function startRecording() {
     if (event.data.size > 0) {
       recordingChunkCount += 1;
       recordingBytes += event.data.size;
-      queueRecordingChunkToDisk(event.data).catch(() => {});
+      electronAPI.recordingUploadChunk(event.data).catch(() => {});
       if (recordingStopRequestedAtMs > 0) {
         setStatus(
           '錄製停止中，正在載入剪輯時間軸... 已接收 ' +
@@ -3672,6 +3696,11 @@ async function startRecording() {
   };
 
   mediaRecorder.onstop = async () => {
+    const stats = electronAPI.recordingUploadStats();
+    if (stats && Number(stats.chunkCount || 0) > 0) {
+      recordingChunkCount = Number(stats.chunkCount || recordingChunkCount);
+      recordingBytes = Number(stats.totalBytes || recordingBytes);
+    }
     setStatus(
       '錄製停止中，正在載入剪輯時間軸... 正在整理 ' +
       recordingChunkCount +
@@ -3680,22 +3709,8 @@ async function startRecording() {
       '）'
     );
     try {
-      await recordingUploadQueue;
-      if (recordingUploadFailure) {
-        throw recordingUploadFailure;
-      }
-      if (!recordingUploadSession || !recordingUploadSession.ok) {
-        throw new Error('錄影暫存檔已失效。');
-      }
-      const finishedSession = recordingUploadSession;
+      const finishedSession = await electronAPI.recordingUploadFinish();
       recordingUploadSession = null;
-      const closeResult = await electronAPI.blobUploadClose({
-        sessionId: Number(finishedSession.sessionId),
-        abort: false
-      });
-      if (!closeResult || !closeResult.ok) {
-        throw new Error((closeResult && closeResult.message) || '無法關閉錄影暫存檔。');
-      }
       await enterEditorModeFromPath(
         finishedSession.filePath,
         finishedSession.tempDir,
@@ -3706,8 +3721,7 @@ async function startRecording() {
       await abortRecordingUploadSession();
       setStatus(`錄製後處理失敗: ${error.message}`);
     } finally {
-      recordingUploadFailure = null;
-      recordingUploadQueue = Promise.resolve();
+      electronAPI.recordingUploadReset();
       recordingStopRequestedAtMs = 0;
     }
   };
@@ -4152,6 +4166,7 @@ setHdrProbeStatus('Probe: 尚未探測');
 updateHdrDiagStatus('Diag: 初始化中');
 
 Promise.resolve()
+  .then(() => ensureRuntimeTestConfig())
   .then(() => loadHdrExperimentalState())
   .then(() => loadSources())
   .catch((error) => {
