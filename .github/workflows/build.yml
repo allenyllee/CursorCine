@@ -96,11 +96,12 @@ jobs:
       - name: Upload coverage to Codecov (Linux)
         if: runner.os == 'Linux'
         uses: codecov/codecov-action@v5
+        continue-on-error: true
         with:
           files: ./coverage/lcov.info
           flags: unittests
           use_oidc: true
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
 
       - name: Run e2e tests (Linux)
@@ -126,20 +127,21 @@ jobs:
 
           & $openCppCoverageExe `
             --quiet `
-            --export_type cobertura:coverage-native/native-windows-cobertura.xml `
-            --sources native/windows-hdr-capture/src `
-            --sources native/windows-wgc-hdr-capture/src `
+            --export_type cobertura:coverage-native\native-windows-cobertura.xml `
+            --sources native\windows-hdr-capture\src `
+            --sources native\windows-wgc-hdr-capture\src `
             -- `
             node tests/native/windows-native-coverage-smoke.js
 
       - name: Upload native coverage to Codecov (Windows)
         if: runner.os == 'Windows'
         uses: codecov/codecov-action@v5
+        continue-on-error: true
         with:
           files: ./coverage-native/native-windows-cobertura.xml
           flags: native-windows
           use_oidc: true
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
 
       - name: Upload test artifacts
