@@ -47,7 +47,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -98,9 +97,9 @@ jobs:
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
           flags: unittests
-          use_oidc: true
           fail_ci_if_error: false
           verbose: true
 
@@ -127,6 +126,7 @@ jobs:
 
           & $openCppCoverageExe `
             --quiet `
+            --export_type html:coverage-native\html `
             --export_type cobertura:coverage-native\native-windows-cobertura.xml `
             --sources native\windows-hdr-capture\src `
             --sources native\windows-wgc-hdr-capture\src `
@@ -138,9 +138,9 @@ jobs:
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage-native/native-windows-cobertura.xml
           flags: native-windows
-          use_oidc: true
           fail_ci_if_error: false
           verbose: true
 
@@ -152,6 +152,7 @@ jobs:
           path: |
             playwright-report/**
             test-results/**
+            coverage/**
             coverage-native/**
           if-no-files-found: ignore
 
