@@ -24,7 +24,8 @@
     "devcontainer:select:portable": "node scripts/select-devcontainer-config.js --portable",
     "test:native:coverage:windows": "node tests/native/windows-native-coverage-smoke.js",
     "test:native:coverage:report": "node scripts/render-native-coverage-report.js",
-    "test:native:coverage:windows:full": "npm run test:native:coverage:windows && npm run test:native:coverage:report"
+    "test:native:coverage:summary": "node scripts/print-native-coverage-summary.js",
+    "test:native:coverage:windows:full": "node scripts/run-native-coverage-full.js"
   },
   "author": {
     "name": "allenyl",

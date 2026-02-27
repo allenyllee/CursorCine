@@ -1,7 +1,31 @@
 #!/usr/bin/env node
 
+const quietMode = String(process.env.CURSORCINE_NATIVE_COVERAGE_QUIET || '') === '1';
+
+function compactPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return { type: 'array', length: payload.length };
+  }
+  const keys = Object.keys(payload);
+  const out = {};
+  for (const key of keys.slice(0, 6)) {
+    const value = payload[key];
+    out[key] = Array.isArray(value) ? '[array:' + value.length + ']' : value;
+  }
+  if (keys.length > 6) {
+    out._keys = keys.length;
+  }
+  return out;
+}
+
 function log(step, payload) {
-  const body = payload && typeof payload === 'object' ? JSON.stringify(payload) : String(payload || '');
+  const printPayload = quietMode ? compactPayload(payload) : payload;
+  const body = printPayload && typeof printPayload === 'object'
+    ? JSON.stringify(printPayload)
+    : String(printPayload || '');
   process.stdout.write('[native-smoke] ' + step + ' ' + body + '\n');
 }
 

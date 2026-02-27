@@ -114,11 +114,19 @@ start coverage-native\index.html
 npm run test:native:coverage:report
 ```
 
+在終端機輸出摘要報表：
+
+```powershell
+npm run test:native:coverage:summary
+```
+
 一鍵跑完 smoke + 報表：
 
 ```powershell
 npm run test:native:coverage:windows:full
 ```
+
+> `windows:full` 會預設隱藏中間大量輸出，只保留錯誤與最終摘要。
 
 在 Windows PowerShell 若遇到 `npm` 指令被 execution policy 阻擋，請改用：
 
