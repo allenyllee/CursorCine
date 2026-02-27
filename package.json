@@ -16,6 +16,7 @@
     "test:e2e": "playwright test",
     "test:e2e:linux": "npm run check:e2e:linux-env && xvfb-run -a playwright test --project=linux-electron",
     "test:e2e:windows": "playwright test --project=windows-electron",
+    "test:coverage": "vitest run --coverage",
     "test": "npm run test:unit && npm run test:integration",
     "check:e2e:linux-env": "node scripts/check-e2e-linux-env.js",
     "devcontainer:select": "node scripts/select-devcontainer-config.js",
@@ -29,6 +30,7 @@
   "license": "MIT",
   "devDependencies": {
     "@playwright/test": "^1.50.1",
+    "@vitest/coverage-v8": "^2.1.9",
     "electron": "^35.0.0",
     "electron-builder": "^25.1.8",
     "playwright": "^1.58.2",

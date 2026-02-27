@@ -5,6 +5,11 @@ module.exports = {
     environment: 'node',
     globals: true,
     restoreMocks: true,
-    clearMocks: true
+    clearMocks: true,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'lcov'],
+      reportsDirectory: 'coverage'
+    }
   }
 };
