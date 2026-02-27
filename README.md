@@ -64,6 +64,7 @@ npm run test:e2e:windows
 ```
 
 CI 的 E2E 預設使用 `CURSORCINE_TEST_MODE=1`（mock capture/export），避免依賴真實螢幕錄製權限與手動存檔操作。
+若在 Linux/WSL 偵測到 `electron.exe`（Windows binary），`test:e2e:linux` 會先中止並提示重新安裝 Linux 版依賴。
 
 在 Windows PowerShell 若遇到 `npm` 指令被 execution policy 阻擋，請改用：
 
@@ -134,15 +135,27 @@ npm.cmd start
 使用方式：
 
 1. 安裝 Docker。
-2. 用 VS Code / Cursor 開啟專案後，執行「Reopen in Container」。
-3. 首次建立容器會自動執行 `npm install`（由 `postCreateCommand` 設定）。
-4. 在容器終端執行 `npm start` 啟動開發。
+2. 在本機終端先執行 `npm run devcontainer:select`（自動選擇 Linux GUI/Audio 或 Portable 設定）。
+3. 用 VS Code / Cursor 開啟專案後，執行「Reopen in Container」。
+4. 首次建立容器會自動執行 `npm ci`（由 `postCreateCommand` 設定），並使用容器專用 `node_modules` volume 避免主機與容器依賴互相污染。
+5. 在容器終端執行 `npm start` 啟動開發。
+
+可選強制模式：
+
+- `npm run devcontainer:select:linux`
+- `npm run devcontainer:select:portable`
+
+目前 `.devcontainer/` 包含三個檔案：
+
+- `devcontainer.portable.json`：Windows / 一般環境穩定版
+- `devcontainer.linux.json`：Linux + X11/Wayland/PulseAudio 版
+- `devcontainer.json`：目前生效版本（由 `devcontainer:select` 產生）
 
 目前 devcontainer 內容重點：
 
 - 以 `mcr.microsoft.com/devcontainers/javascript-node:1-20-bookworm` 為基底
 - 預裝 Electron 常用系統套件與 `ffmpeg`
-- 掛載音訊與顯示相關 socket（X11 / Wayland / PulseAudio）
+- Linux 設定可掛載音訊與顯示相關 socket（X11 / Wayland / PulseAudio）
 - 設定 `ELECTRON_DISABLE_SANDBOX=1` 以降低容器中執行限制
 
 若你修改了 `.devcontainer/Dockerfile` 或 `.devcontainer/devcontainer.json`，請執行「Rebuild Container」讓變更生效。

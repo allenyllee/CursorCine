@@ -35,5 +35,7 @@ RUN apt-get update \
         libxss1 \
         libxtst6 \
         pulseaudio-utils \
+        xauth \
+        xvfb \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*

@@ -4,8 +4,12 @@ const { _electron: electron } = require('playwright');
 
 async function launchApp() {
   const appRoot = path.join(__dirname, '..', '..');
+  const launchArgs = [path.join(appRoot, 'src', 'main.js')];
+  if (process.platform === 'linux') {
+    launchArgs.unshift('--no-sandbox', '--disable-setuid-sandbox');
+  }
   const app = await electron.launch({
-    args: [path.join(appRoot, 'src', 'main.js')],
+    args: launchArgs,
     cwd: appRoot,
     env: {
       ...process.env,

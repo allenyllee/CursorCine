@@ -1,13 +1,19 @@
 {
-  "name": "CursorCine Dev (Portable)",
+  "name": "CursorCine Dev (Linux GUI/Audio)",
   "build": {
     "dockerfile": "Dockerfile"
   },
   "runArgs": [
-    "--ipc=host"
+    "--ipc=host",
+    "--device=/dev/snd",
+    "--group-add=audio"
   ],
   "mounts": [
     "type=volume,source=cursorcine-node-modules,target=${containerWorkspaceFolder}/node_modules",
+    "type=bind,source=/tmp/.X11-unix,target=/tmp/.X11-unix",
+    "type=bind,source=${localEnv:XDG_RUNTIME_DIR}/${localEnv:WAYLAND_DISPLAY},target=/tmp/vscode-wayland.sock",
+    "type=bind,source=${localEnv:XDG_RUNTIME_DIR}/pulse/native,target=/tmp/pulse/native",
+    "type=bind,source=${localEnv:HOME}/.config/pulse/cookie,target=/home/node/.config/pulse/cookie,readonly",
     "type=volume,source=cursorcine-codex-home,target=/home/node/.codex"
   ],
   "remoteUser": "node",
@@ -23,7 +29,11 @@
   },
   "postCreateCommand": "bash -lc 'sudo mkdir -p node_modules && sudo chown -R node:node node_modules && rm -rf node_modules/* node_modules/.[!.]* node_modules/..?* 2>/dev/null || true; npm ci'",
   "containerEnv": {
-    "ELECTRON_DISABLE_SANDBOX": "1"
+    "ELECTRON_DISABLE_SANDBOX": "1",
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "XDG_RUNTIME_DIR": "/tmp",
+    "WAYLAND_DISPLAY": "vscode-wayland.sock",
+    "PULSE_SERVER": "unix:/tmp/pulse/native"
   },
   "postStartCommand": "bash -lc 'sudo mkdir -p node_modules && sudo chown -R node:node node_modules || true'"
 }
