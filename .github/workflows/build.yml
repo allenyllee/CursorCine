@@ -75,6 +75,11 @@ jobs:
         if: runner.os == 'Windows'
         run: npm run build:native-hdr-win
 
+      - name: Install OpenCppCoverage (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install opencppcoverage -y --no-progress
+
       - name: Run unit tests
         run: npm run test:unit
 
@@ -102,6 +107,28 @@ jobs:
         if: runner.os == 'Windows'
         run: npm run test:e2e:windows
 
+      - name: Run native addon coverage smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path coverage-native | Out-Null
+          OpenCppCoverage `
+            --quiet `
+            --export_type cobertura:coverage-native/native-windows-cobertura.xml `
+            --sources native/windows-hdr-capture/src `
+            --sources native/windows-wgc-hdr-capture/src `
+            -- `
+            node tests/native/windows-native-coverage-smoke.js
+
+      - name: Upload native coverage to Codecov (Windows)
+        if: runner.os == 'Windows'
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage-native/native-windows-cobertura.xml
+          flags: native-windows
+          fail_ci_if_error: true
+          verbose: true
+
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -110,6 +137,7 @@ jobs:
           path: |
             playwright-report/**
             test-results/**
+            coverage-native/**
           if-no-files-found: ignore
 
   detect-version-change:

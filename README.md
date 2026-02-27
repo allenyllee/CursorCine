@@ -71,6 +71,54 @@ npm run test:e2e:windows
 CI 的 E2E 預設使用 `CURSORCINE_TEST_MODE=1`（mock capture/export），避免依賴真實螢幕錄製權限與手動存檔操作。
 若在 Linux/WSL 偵測到 `electron.exe`（Windows binary），`test:e2e:linux` 會先中止並提示重新安裝 Linux 版依賴。
 
+### Windows 原生碼 Coverage（OpenCppCoverage）
+
+安裝（擇一）：
+
+```powershell
+winget install OpenCppCoverage.OpenCppCoverage
+```
+
+或（已安裝 Chocolatey 時）：
+
+```powershell
+choco install opencppcoverage -y
+```
+
+本機執行（PowerShell）：
+
+```powershell
+New-Item -ItemType Directory -Force -Path coverage-native | Out-Null
+OpenCppCoverage `
+  --quiet `
+  --export_type cobertura:coverage-native/native-windows-cobertura.xml `
+  --sources native\windows-hdr-capture\src `
+  --sources native\windows-wgc-hdr-capture\src `
+  -- `
+  node tests/native/windows-native-coverage-smoke.js
+```
+
+> `OpenCppCoverage` 的 `--sources` 路徑需使用 Windows 分隔符 `\`。
+
+產生可讀報表：
+
+```powershell
+node scripts/render-native-coverage-report.js
+start coverage-native\index.html
+```
+
+也可用 npm script（若 PowerShell policy 允許）：
+
+```powershell
+npm run test:native:coverage:report
+```
+
+一鍵跑完 smoke + 報表：
+
+```powershell
+npm run test:native:coverage:windows:full
+```
+
 在 Windows PowerShell 若遇到 `npm` 指令被 execution policy 阻擋，請改用：
 
 ```powershell
@@ -203,6 +251,8 @@ GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈�
 - `pull_request` 會執行 `actions/dependency-review-action`，阻擋高風險依賴與禁止授權（AGPL/GPL）。
 - `push` / `workflow_dispatch` 會執行 `npm audit --omit=dev --audit-level=high`。
 - 只有供應鏈檢查通過後，才會繼續版本變更判斷與 build/release 流程。
+- Linux test runner 會上傳 Vitest (`lcov`) 覆蓋率到 Codecov。
+- Windows test runner 會使用 `OpenCppCoverage` 對原生 addon (`native/windows-*/src/addon.cc`) 跑 smoke coverage，並上傳到 Codecov（`native-windows` flag）。
 - Windows runner 會先設定 `Python 3.11` 與 `GYP_MSVS_VERSION=2022`，並使用 `scripts/build-native-hdr-win.js` 以確保 native addon 使用 `v143` toolset 編譯。
 
 這代表如果依賴存在 `high` 以上漏洞，或稽核流程失敗，CI 會直接中止，不會產生釋出產物。

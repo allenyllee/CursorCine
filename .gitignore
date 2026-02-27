@@ -9,3 +9,4 @@ native/windows-wgc-hdr-capture/build/
 playwright-report/
 test-results/
 coverage/
+coverage-native/
