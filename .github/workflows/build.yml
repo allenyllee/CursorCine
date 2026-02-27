@@ -45,6 +45,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,6 +99,7 @@ jobs:
         with:
           files: ./coverage/lcov.info
           flags: unittests
+          use_oidc: true
           fail_ci_if_error: true
           verbose: true
 
@@ -112,7 +116,15 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path coverage-native | Out-Null
-          OpenCppCoverage `
+          $openCppCoverageExe = "$env:ProgramFiles\OpenCppCoverage\OpenCppCoverage.exe"
+          if (!(Test-Path $openCppCoverageExe)) {
+            $openCppCoverageExe = "$env:ChocolateyInstall\lib\opencppcoverage\tools\OpenCppCoverage\OpenCppCoverage.exe"
+          }
+          if (!(Test-Path $openCppCoverageExe)) {
+            throw "OpenCppCoverage executable not found after installation."
+          }
+
+          & $openCppCoverageExe `
             --quiet `
             --export_type cobertura:coverage-native/native-windows-cobertura.xml `
             --sources native/windows-hdr-capture/src `
@@ -126,6 +138,7 @@ jobs:
         with:
           files: ./coverage-native/native-windows-cobertura.xml
           flags: native-windows
+          use_oidc: true
           fail_ci_if_error: true
           verbose: true
 
