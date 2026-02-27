@@ -84,6 +84,7 @@ let overlaySafeArmUntil = 0;
 let overlaySafeReleaseUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
+let overlayTargetDisplayId = '';
 let overlayAutoNoBlock = false;
 let overlayAutoNoBlockReason = '';
 let overlayRiskWindowStartMs = 0;
@@ -1112,6 +1113,109 @@ function getTargetDisplay(displayId) {
   return screen.getPrimaryDisplay();
 }
 
+function getDisplayBounds(display) {
+  const bounds = display && display.bounds
+    ? display.bounds
+    : { x: 0, y: 0, width: 0, height: 0 };
+
+  return {
+    x: Number(bounds.x || 0),
+    y: Number(bounds.y || 0),
+    width: Math.max(1, Number(bounds.width || 1)),
+    height: Math.max(1, Number(bounds.height || 1))
+  };
+}
+
+function applyOverlayWindowBounds(win, bounds) {
+  if (!win || win.isDestroyed() || !bounds) {
+    return;
+  }
+  const normalized = {
+    x: Number(bounds.x || 0),
+    y: Number(bounds.y || 0),
+    width: Math.max(1, Number(bounds.width || 1)),
+    height: Math.max(1, Number(bounds.height || 1))
+  };
+  try {
+    win.setBounds(normalized);
+  } catch (_error) {
+  }
+  try {
+    win.setContentBounds(normalized);
+  } catch (_error) {
+  }
+}
+
+function extractDisplayIdFromSourceId(sourceId) {
+  const raw = String(sourceId || '');
+  const match = /^screen:([^:]+):/i.exec(raw);
+  if (!match || !match[1]) {
+    return '';
+  }
+  return String(match[1]);
+}
+
+async function resolveOverlayTargetDisplayId(payload) {
+  const inputDisplayId = payload && typeof payload === 'object'
+    ? String(payload.displayId || '')
+    : String(payload || '');
+  const inputSourceId = payload && typeof payload === 'object'
+    ? String(payload.sourceId || '')
+    : '';
+
+  const allDisplays = screen.getAllDisplays();
+  const hasDisplayIdMatch = inputDisplayId &&
+    allDisplays.some((d) => String(d.id) === inputDisplayId);
+  if (hasDisplayIdMatch) {
+    return {
+      displayId: inputDisplayId,
+      sourceId: inputSourceId,
+      resolveMethod: 'input-display-id'
+    };
+  }
+
+  const parsedFromSourceId = extractDisplayIdFromSourceId(inputSourceId);
+  const hasParsedMatch = parsedFromSourceId &&
+    allDisplays.some((d) => String(d.id) === parsedFromSourceId);
+  if (hasParsedMatch) {
+    return {
+      displayId: parsedFromSourceId,
+      sourceId: inputSourceId,
+      resolveMethod: 'source-id-prefix'
+    };
+  }
+
+  if (inputSourceId) {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 0, height: 0 },
+        fetchWindowIcons: false
+      });
+      const matched = Array.isArray(sources)
+        ? sources.find((item) => String(item && item.id ? item.id : '') === inputSourceId)
+        : null;
+      const mappedDisplayId = String(matched && matched.display_id ? matched.display_id : '');
+      const hasMappedMatch = mappedDisplayId &&
+        allDisplays.some((d) => String(d.id) === mappedDisplayId);
+      if (hasMappedMatch) {
+        return {
+          displayId: mappedDisplayId,
+          sourceId: inputSourceId,
+          resolveMethod: 'desktop-capturer-map'
+        };
+      }
+    } catch (_error) {
+    }
+  }
+
+  return {
+    displayId: '',
+    sourceId: inputSourceId,
+    resolveMethod: 'fallback-primary'
+  };
+}
+
 function destroyOverlayWindow() {
 
   const windows = [overlayWindow, overlayBorderWindow];
@@ -1125,13 +1229,15 @@ function destroyOverlayWindow() {
   overlayWindow = null;
   overlayBorderWindow = null;
   overlayBounds = null;
+  overlayTargetDisplayId = '';
 }
 
 function createOverlayWindow(displayId) {
   destroyOverlayWindow();
 
   const targetDisplay = getTargetDisplay(displayId);
-  const b = targetDisplay.bounds;
+  const b = getDisplayBounds(targetDisplay);
+  overlayTargetDisplayId = String(targetDisplay && targetDisplay.id ? targetDisplay.id : '');
   overlayBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
   overlayLastPointerInside = null;
   overlayReentryGraceUntil = 0;
@@ -1143,6 +1249,7 @@ function createOverlayWindow(displayId) {
     y: b.y,
     width: b.width,
     height: b.height,
+    enableLargerThanScreen: true,
     frame: false,
     transparent: true,
     resizable: false,
@@ -1166,12 +1273,14 @@ function createOverlayWindow(displayId) {
   overlayBorderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayBorderWindow.setFocusable(false);
   overlayBorderWindow.blur();
+  applyOverlayWindowBounds(overlayBorderWindow, b);
   overlayBorderWindow.loadFile(path.join(__dirname, 'overlay.html'));
 
   overlayBorderWindow.webContents.once('did-finish-load', () => {
     if (!overlayBorderWindow || overlayBorderWindow.isDestroyed()) {
       return;
     }
+    applyOverlayWindowBounds(overlayBorderWindow, b);
     overlayBorderWindow.webContents.send('overlay:init', {
       width: b.width,
       height: b.height
@@ -1198,6 +1307,7 @@ function createOverlayWindow(displayId) {
     y: b.y,
     width: b.width,
     height: b.height,
+    enableLargerThanScreen: true,
     frame: false,
     transparent: true,
     resizable: false,
@@ -1221,12 +1331,14 @@ function createOverlayWindow(displayId) {
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setFocusable(false);
   overlayWindow.blur();
+  applyOverlayWindowBounds(overlayWindow, b);
   overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
 
   overlayWindow.webContents.once('did-finish-load', () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return;
     }
+    applyOverlayWindowBounds(overlayWindow, b);
     overlayWindow.webContents.send('overlay:init', {
       width: b.width,
       height: b.height
@@ -1931,11 +2043,27 @@ app.whenReady().then(() => {
     };
   });
 
-  ipcMain.handle('overlay:create', (_event, displayId) => {
+  ipcMain.handle('overlay:create', async (_event, payload) => {
+    const resolved = await resolveOverlayTargetDisplayId(payload);
+    const targetDisplayId = String(resolved.displayId || '');
+    const displayId = payload && typeof payload === 'object'
+      ? String(payload.displayId || '')
+      : String(payload || '');
+    const sourceId = String(resolved.sourceId || '');
+
     overlayRecordingActive = true;
     resetOverlayRiskState();
-    createOverlayWindow(displayId);
-    return { ok: true };
+    createOverlayWindow(targetDisplayId);
+
+    const targetDisplay = getTargetDisplay(targetDisplayId);
+    return {
+      ok: true,
+      requestedDisplayId: displayId,
+      requestedSourceId: sourceId,
+      resolveMethod: resolved.resolveMethod,
+      resolvedDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : '',
+      resolvedDisplayBounds: getDisplayBounds(targetDisplay)
+    };
   });
 
   ipcMain.handle('window:should-auto-minimize', (_event, targetDisplayId) => {
@@ -2040,6 +2168,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:get-state', () => {
     const profile = getOverlayInteractionProfile();
+    const targetDisplay = getTargetDisplay(overlayTargetDisplayId);
+    const targetBounds = getDisplayBounds(targetDisplay);
     return {
       ok: true,
       recordingActive: overlayRecordingActive,
@@ -2048,7 +2178,12 @@ app.whenReady().then(() => {
       autoNoBlock: overlayAutoNoBlock,
       autoNoBlockReason: overlayAutoNoBlockReason,
       interactionMode: profile.mode,
-      wheelPauseMs: profile.wheelPauseMs
+      wheelPauseMs: profile.wheelPauseMs,
+      overlayBounds: overlayBounds ? { ...overlayBounds } : null,
+      targetDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : '',
+      targetDisplayBounds: targetBounds,
+      overlayWindowBounds: overlayWindow && !overlayWindow.isDestroyed() ? overlayWindow.getBounds() : null,
+      overlayBorderWindowBounds: overlayBorderWindow && !overlayBorderWindow.isDestroyed() ? overlayBorderWindow.getBounds() : null
     };
   });
 

@@ -160,7 +160,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pathToFileUrl: (payload) => ipcRenderer.invoke('path:to-file-url', payload),
   cleanupTempDir: (payload) => ipcRenderer.invoke('path:cleanup-temp-dir', payload),
   copyText: (payload) => ipcRenderer.invoke('app:copy-text', payload),
-  overlayCreate: (displayId) => ipcRenderer.invoke('overlay:create', displayId),
+  overlayCreate: (payload) => ipcRenderer.invoke('overlay:create', payload),
   overlayDestroy: () => ipcRenderer.invoke('overlay:destroy'),
   overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),
   overlayGetState: () => ipcRenderer.invoke('overlay:get-state'),

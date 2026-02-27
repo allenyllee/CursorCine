@@ -27,18 +27,24 @@ const state = {
     y: 0,
     activeUntil: 0
   },
-  recordingIndicator: false
+  recordingIndicator: false,
+  logicalWidth: 0,
+  logicalHeight: 0
 };
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(1, Math.floor(window.innerWidth * dpr));
-  const height = Math.max(1, Math.floor(window.innerHeight * dpr));
+  const logicalWidth = Math.max(1, Number(state.logicalWidth || window.innerWidth || 1));
+  const logicalHeight = Math.max(1, Number(state.logicalHeight || window.innerHeight || 1));
+  const width = Math.max(1, Math.floor(logicalWidth * dpr));
+  const height = Math.max(1, Math.floor(logicalHeight * dpr));
 
   if (canvas.width === width && canvas.height === height) {
     return;
   }
 
+  canvas.style.width = logicalWidth + 'px';
+  canvas.style.height = logicalHeight + 'px';
   canvas.width = width;
   canvas.height = height;
 }
@@ -357,7 +363,11 @@ function applyGlobalPointer(payload) {
   }
 }
 
-ipcRenderer.on('overlay:init', () => {
+ipcRenderer.on('overlay:init', (_event, payload) => {
+  if (payload && typeof payload === 'object') {
+    state.logicalWidth = Number(payload.width || 0);
+    state.logicalHeight = Number(payload.height || 0);
+  }
   resizeCanvas();
 });
 
@@ -434,6 +444,10 @@ function renderLoop() {
   requestAnimationFrame(renderLoop);
 }
 
-window.addEventListener('resize', resizeCanvas);
+window.addEventListener('resize', () => {
+  state.logicalWidth = Math.max(1, Number(window.innerWidth || state.logicalWidth || 1));
+  state.logicalHeight = Math.max(1, Number(window.innerHeight || state.logicalHeight || 1));
+  resizeCanvas();
+});
 resizeCanvas();
 renderLoop();

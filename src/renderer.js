@@ -3732,7 +3732,25 @@ async function startRecording() {
   updateRecordingTimeLabel(0);
   startRecordingTimer();
 
-  await electronAPI.overlayCreate(selectedSource.display_id);
+  const overlayCreateResult = await electronAPI.overlayCreate({
+    sourceId,
+    displayId: selectedSource.display_id
+  });
+  if (overlayCreateResult && overlayCreateResult.ok) {
+    const requestedDisplayId = String(overlayCreateResult.requestedDisplayId || '');
+    const resolvedDisplayId = String(overlayCreateResult.resolvedDisplayId || '');
+    if (requestedDisplayId && resolvedDisplayId && requestedDisplayId !== resolvedDisplayId) {
+      console.warn(
+        '[overlay] display resolved mismatch',
+        {
+          requestedDisplayId,
+          resolvedDisplayId,
+          method: overlayCreateResult.resolveMethod,
+          resolvedBounds: overlayCreateResult.resolvedDisplayBounds
+        }
+      );
+    }
+  }
   await syncPenStyleToOverlay();
   await electronAPI.overlaySetEnabled(annotationState.enabled);
   clearInterval(overlayStatePollTimer);
