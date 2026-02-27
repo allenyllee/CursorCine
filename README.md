@@ -4,7 +4,8 @@
 
 # CursorCine (Electron)
 
-[![codecov](https://codecov.io/gh/allenyllee/CursorCine/graph/badge.svg)](https://codecov.io/gh/allenyllee/CursorCine)
+[![codecov-js](https://codecov.io/gh/allenyllee/CursorCine/graph/badge.svg?flag=unittests)](https://codecov.io/gh/allenyllee/CursorCine?flags%5B0%5D=unittests)
+[![codecov-native-windows](https://codecov.io/gh/allenyllee/CursorCine/graph/badge.svg?flag=native-windows)](https://codecov.io/gh/allenyllee/CursorCine?flags%5B0%5D=native-windows)
 
 可在 Windows / Linux 執行的桌面錄影工具，特色是錄影畫面會跟隨游標自動縮放，並內建錄後剪輯時間軸，方便快速產出教學影片。
 
