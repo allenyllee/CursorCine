@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-02-27
+
+### Added
+* Added an `overlay-display` core module and dedicated unit coverage for multi-display overlay viewport alignment behavior.
+* Added a Windows native coverage full-run CLI summary mode and improved local/native coverage reporting workflow.
+
+### Changed
+* Expanded test infrastructure with full unit/integration/E2E stack hardening for mockable runtime paths and Windows mock-flow stability.
+* Improved CI/native coverage pipeline reliability (Codecov upload flow, OpenCppCoverage invocation, and Windows coverage artifact handling).
+
+### Fixed
+* Fixed secondary-display overlay sizing so the red frame and pen drawing area stay aligned with the selected display visible bounds.
+* Fixed overlay target display resolution by hardening `displayId`/`sourceId` mapping and enforcing overlay window bounds consistency.
+* Release metadata bump from `0.8.0` to `0.8.1`.
+
 ## [0.8.0] - 2026-02-15
 
 ### Added
