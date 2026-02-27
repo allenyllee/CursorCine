@@ -40,6 +40,199 @@ function safeCall(name, fn) {
   }
 }
 
+function withEnv(name, value, fn) {
+  const prev = Object.prototype.hasOwnProperty.call(process.env, name) ? process.env[name] : undefined;
+  if (value === undefined || value === null) {
+    delete process.env[name];
+  } else {
+    process.env[name] = String(value);
+  }
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = prev;
+    }
+  }
+}
+
+function exerciseSessionPaths(label, bridge, nativeSessionId) {
+  safeCall(label + '.readFrame.invalidZero', () => bridge.readFrame({
+    nativeSessionId: 0,
+    timeoutMs: 10
+  }));
+  safeCall(label + '.readFrame.invalidMissing', () => bridge.readFrame({
+    nativeSessionId: 999999,
+    timeoutMs: 10
+  }));
+  safeCall(label + '.readFrame.valid', () => bridge.readFrame({
+    nativeSessionId,
+    timeoutMs: 10
+  }));
+
+  safeCall(label + '.stopCapture.invalidZero', () => bridge.stopCapture({
+    nativeSessionId: 0
+  }));
+  safeCall(label + '.stopCapture.invalidMissing', () => bridge.stopCapture({
+    nativeSessionId: 999999
+  }));
+  safeCall(label + '.stopCapture.valid', () => bridge.stopCapture({ nativeSessionId }));
+}
+
+function exerciseInjectedFailures(label, bridge) {
+  const startPayload = {
+    sourceId: 'coverage-smoke-source',
+    displayId: 'coverage-display',
+    maxOutputPixels: 640 * 360
+  };
+
+  safeCall(label + '.inject.failGetDC', () => withEnv('CURSORCINE_NATIVE_TEST_FAIL_GETDC', '1', () => (
+    bridge.startCapture(startPayload)
+  )));
+
+  safeCall(label + '.inject.failCreateCompatibleDC', () => withEnv('CURSORCINE_NATIVE_TEST_FAIL_CREATE_COMPATIBLE_DC', '1', () => (
+    bridge.startCapture(startPayload)
+  )));
+
+  safeCall(label + '.inject.failCreateDIBSection', () => withEnv('CURSORCINE_NATIVE_TEST_FAIL_CREATE_DIB_SECTION', '1', () => (
+    bridge.startCapture(startPayload)
+  )));
+
+  safeCall(label + '.inject.failSelectObject', () => withEnv('CURSORCINE_NATIVE_TEST_FAIL_SELECT_OBJECT', '1', () => (
+    bridge.startCapture(startPayload)
+  )));
+
+  safeCall(label + '.inject.forceSessionRegistrationFail', () => withEnv(
+    'CURSORCINE_NATIVE_TEST_FORCE_SESSION_REGISTRATION_FAIL',
+    '1',
+    () => bridge.startCapture(startPayload)
+  ));
+
+  safeCall(label + '.inject.forceReadFail', () => {
+    const started = bridge.startCapture(startPayload);
+    const sid = Number(started && started.nativeSessionId ? started.nativeSessionId : 0);
+    if (sid > 0) {
+      safeCall(label + '.inject.forceReadFail.read', () => withEnv('CURSORCINE_NATIVE_TEST_FORCE_READ_FAIL', '1', () => (
+        bridge.readFrame({ nativeSessionId: sid, timeoutMs: 10 })
+      )));
+      safeCall(label + '.inject.forceReadFail.stop', () => bridge.stopCapture({ nativeSessionId: sid }));
+    }
+    return started;
+  });
+}
+
+function exerciseStartVariants(label, bridge) {
+  safeCall(label + '.startCapture.frameTooLarge', () => bridge.startCapture({
+    sourceId: 'coverage-smoke-source',
+    displayId: 'coverage-display',
+    displayHint: {
+      bounds: { x: 0, y: 0, width: 6000, height: 6000 },
+      scaleFactor: 1
+    }
+  }));
+
+  safeCall(label + '.startCapture.invalidBounds', () => bridge.startCapture({
+    sourceId: 'coverage-smoke-source',
+    displayId: 'coverage-display',
+    displayHint: {
+      bounds: { x: 0, y: 0, width: 0, height: 0 },
+      scaleFactor: 1
+    }
+  }));
+
+  safeCall(label + '.startCapture.noToneMap', () => {
+    const started = bridge.startCapture({
+      sourceId: 'coverage-smoke-source',
+      displayId: 'coverage-display',
+      maxOutputPixels: 640 * 360
+    });
+    const sid = Number(started && started.nativeSessionId ? started.nativeSessionId : 0);
+    if (sid > 0) {
+      safeCall(label + '.startCapture.noToneMap.read', () => bridge.readFrame({
+        nativeSessionId: sid,
+        timeoutMs: 10
+      }));
+      safeCall(label + '.startCapture.noToneMap.stop', () => bridge.stopCapture({ nativeSessionId: sid }));
+    }
+    return started;
+  });
+
+  safeCall(label + '.startCapture.tonemapAndScale', () => {
+    const started = bridge.startCapture({
+      sourceId: 'coverage-smoke-source',
+      displayId: 'coverage-display',
+      displayHint: {
+        bounds: { x: 0, y: 0, width: 800, height: 450 },
+        scaleFactor: 1.5,
+        isHdrLikely: true
+      },
+      maxOutputPixels: -123,
+      toneMap: {
+        profile: 'coverage-smoke-tonemap',
+        rolloff: 1.5,
+        saturation: -0.5
+      }
+    });
+    const sid = Number(started && started.nativeSessionId ? started.nativeSessionId : 0);
+    if (sid > 0) {
+      safeCall(label + '.startCapture.tonemapAndScale.read', () => bridge.readFrame({
+        nativeSessionId: sid,
+        timeoutMs: 10
+      }));
+      safeCall(label + '.startCapture.tonemapAndScale.stop', () => bridge.stopCapture({ nativeSessionId: sid }));
+    }
+    return started;
+  });
+
+  safeCall(label + '.startCapture.tonemapNoScale', () => {
+    const started = bridge.startCapture({
+      sourceId: 'coverage-smoke-source',
+      displayId: 'coverage-display',
+      maxOutputPixels: 3840 * 2160,
+      displayHint: {
+        isHdrLikely: true
+      },
+      toneMap: {
+        profile: 'coverage-smoke-tonemap-noscale',
+        rolloff: 0.6,
+        saturation: 1.4
+      }
+    });
+    const sid = Number(started && started.nativeSessionId ? started.nativeSessionId : 0);
+    if (sid > 0) {
+      safeCall(label + '.startCapture.tonemapNoScale.read', () => bridge.readFrame({
+        nativeSessionId: sid,
+        timeoutMs: 10
+      }));
+      safeCall(label + '.startCapture.tonemapNoScale.stop', () => bridge.stopCapture({ nativeSessionId: sid }));
+    }
+    return started;
+  });
+
+  safeCall(label + '.startCapture.offscreenReadFail', () => {
+    const started = bridge.startCapture({
+      sourceId: 'coverage-smoke-source',
+      displayId: 'coverage-display',
+      displayHint: {
+        bounds: { x: 2000000000, y: 2000000000, width: 64, height: 64 },
+        scaleFactor: 1
+      },
+      maxOutputPixels: 64 * 64
+    });
+    const sid = Number(started && started.nativeSessionId ? started.nativeSessionId : 0);
+    if (sid > 0) {
+      safeCall(label + '.startCapture.offscreenReadFail.read', () => bridge.readFrame({
+        nativeSessionId: sid,
+        timeoutMs: 10
+      }));
+      safeCall(label + '.startCapture.offscreenReadFail.stop', () => bridge.stopCapture({ nativeSessionId: sid }));
+    }
+    return started;
+  });
+}
+
 function runBridge(label, bridge) {
   if (!bridge) {
     log(label + ':missing', {});
@@ -56,11 +249,14 @@ function runBridge(label, bridge) {
   }));
 
   const nativeSessionId = Number(start && start.nativeSessionId ? start.nativeSessionId : 0);
-  safeCall(label + '.readFrame', () => bridge.readFrame({
-    nativeSessionId,
-    timeoutMs: 10
-  }));
-  safeCall(label + '.stopCapture', () => bridge.stopCapture({ nativeSessionId }));
+  if (nativeSessionId > 0) {
+    exerciseSessionPaths(label, bridge, nativeSessionId);
+  } else {
+    log(label + '.startCapture:skipSessionPaths', { reason: 'NO_SESSION' });
+  }
+
+  exerciseStartVariants(label, bridge);
+  exerciseInjectedFailures(label, bridge);
 }
 
 async function main() {

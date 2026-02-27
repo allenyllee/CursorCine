@@ -15,16 +15,33 @@ const modules = [
   },
 ];
 
+const quietBuild = String(process.env.CURSORCINE_NATIVE_BUILD_QUIET || "") === "1";
+
 function runNodeGyp(args) {
-  const cmd = process.platform === "win32" ? "node-gyp.cmd" : "node-gyp";
-  const result = spawnSync(cmd, args, {
+  const nodeGypScript = path.join(__dirname, "..", "node_modules", "node-gyp", "bin", "node-gyp.js");
+  const result = spawnSync(process.execPath, [nodeGypScript, ...args], {
     cwd: path.join(__dirname, ".."),
-    stdio: "inherit",
-    shell: process.platform === "win32",
+    stdio: quietBuild ? ["ignore", "pipe", "pipe"] : "inherit",
+    encoding: quietBuild ? "utf8" : undefined,
     env: process.env,
   });
   if (result.status !== 0) {
+    if (quietBuild) {
+      if (result.stdout) {
+        process.stdout.write(result.stdout);
+      }
+      if (result.stderr) {
+        process.stderr.write(result.stderr);
+      }
+    }
     process.exit(result.status || 1);
+  }
+}
+
+function cleanBuildDir(moduleDir) {
+  const buildDir = path.join(moduleDir, "build");
+  if (fs.existsSync(buildDir)) {
+    fs.rmSync(buildDir, { recursive: true, force: true });
   }
 }
 
@@ -48,6 +65,7 @@ for (const moduleItem of modules) {
   }
 
   const absDir = path.join(__dirname, "..", moduleItem.dir);
+  cleanBuildDir(absDir);
   runNodeGyp(["configure", "--directory", moduleItem.dir]);
   patchPlatformToolset(absDir, moduleItem.vcxproj);
   runNodeGyp(["build", "--directory", moduleItem.dir]);

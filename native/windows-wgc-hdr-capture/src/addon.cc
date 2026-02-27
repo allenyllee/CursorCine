@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -22,6 +23,14 @@ constexpr const char* kBackendName = "windows-wgc-hdr-mvp";
 constexpr int64_t kMaxCapturePixels = 3840LL * 2160LL;
 constexpr size_t kMaxFrameBytes = static_cast<size_t>(kMaxCapturePixels * 4LL);
 constexpr int64_t kDefaultMaxOutputPixels = 640LL * 360LL;
+
+bool IsCoverageTestFlagEnabled(const char* name) {
+  const char* value = std::getenv(name);
+  if (!value) {
+    return false;
+  }
+  return value[0] == '1';
+}
 
 napi_value MakeObject(napi_env env) {
   napi_value out;
@@ -360,6 +369,9 @@ void ScaleBgraNearest(const uint8_t* src,
 }
 
 bool CaptureFrame(CaptureSession* session) {
+  if (IsCoverageTestFlagEnabled("CURSORCINE_NATIVE_TEST_FORCE_READ_FAIL")) {
+    return false;
+  }
   if (!session || !session->desktopDc || !session->captureDc || !session->bitmapBits) {
     return false;
   }
@@ -461,10 +473,24 @@ std::unique_ptr<CaptureSession> CreateSession(napi_env env, napi_value payload, 
       static_cast<size_t>(std::max(1, session->outputWidth)) * static_cast<size_t>(std::max(1, session->outputHeight)) * 4;
   session->frameBytes.reserve(initialOutputBytes);
 
+  if (IsCoverageTestFlagEnabled("CURSORCINE_NATIVE_TEST_FAIL_GETDC")) {
+    if (errorMessage) {
+      *errorMessage = "GetDC failed.";
+    }
+    return nullptr;
+  }
+
   session->desktopDc = GetDC(nullptr);
   if (!session->desktopDc) {
     if (errorMessage) {
       *errorMessage = "GetDC failed.";
+    }
+    return nullptr;
+  }
+
+  if (IsCoverageTestFlagEnabled("CURSORCINE_NATIVE_TEST_FAIL_CREATE_COMPATIBLE_DC")) {
+    if (errorMessage) {
+      *errorMessage = "CreateCompatibleDC failed.";
     }
     return nullptr;
   }
@@ -486,11 +512,25 @@ std::unique_ptr<CaptureSession> CreateSession(napi_env env, napi_value payload, 
   bmi.bmiHeader.biBitCount = 32;
   bmi.bmiHeader.biCompression = BI_RGB;
 
+  if (IsCoverageTestFlagEnabled("CURSORCINE_NATIVE_TEST_FAIL_CREATE_DIB_SECTION")) {
+    if (errorMessage) {
+      *errorMessage = "CreateDIBSection failed.";
+    }
+    return nullptr;
+  }
+
   session->bitmap =
       CreateDIBSection(session->desktopDc, &bmi, DIB_RGB_COLORS, &session->bitmapBits, nullptr, 0);
   if (!session->bitmap || !session->bitmapBits) {
     if (errorMessage) {
       *errorMessage = "CreateDIBSection failed.";
+    }
+    return nullptr;
+  }
+
+  if (IsCoverageTestFlagEnabled("CURSORCINE_NATIVE_TEST_FAIL_SELECT_OBJECT")) {
+    if (errorMessage) {
+      *errorMessage = "SelectObject failed.";
     }
     return nullptr;
   }
@@ -560,6 +600,9 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     startedId = g_nextSessionId++;
     session->sessionId = startedId;
     g_sessions[startedId] = std::move(session);
+    if (IsCoverageTestFlagEnabled("CURSORCINE_NATIVE_TEST_FORCE_SESSION_REGISTRATION_FAIL")) {
+      g_sessions.erase(startedId);
+    }
   }
 
   std::lock_guard<std::mutex> lock(g_sessionsMutex);
