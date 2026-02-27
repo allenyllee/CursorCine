@@ -57,10 +57,15 @@ function collectNativeCoverage() {
     throw new Error('OpenCppCoverage executable not found. Please install `opencppcoverage` first.');
   }
 
-  fs.mkdirSync(path.join('coverage-native'), { recursive: true });
+  const outputRoot = path.join('coverage-native');
+  const outputHtml = path.join(outputRoot, 'html');
+  fs.mkdirSync(outputRoot, { recursive: true });
+  fs.rmSync(outputHtml, { recursive: true, force: true });
+
   const args = [
     '--quiet',
     '--export_type', 'cobertura:coverage-native\\native-windows-cobertura.xml',
+    '--export_type', 'html:coverage-native\\html',
     '--sources', 'native\\windows-hdr-capture\\src',
     '--sources', 'native\\windows-wgc-hdr-capture\\src',
     '--',
@@ -90,9 +95,14 @@ function collectNativeCoverage() {
 }
 
 function main() {
-  runStep("build native addons", ["scripts/build-native-hdr-win.js"], {
-    env: { CURSORCINE_NATIVE_BUILD_QUIET: "1" }
-  });
+  const skipBuild = String(process.env.CURSORCINE_NATIVE_SKIP_BUILD || "") === "1";
+  if (!skipBuild) {
+    runStep("build native addons", ["scripts/build-native-hdr-win.js"], {
+      env: { CURSORCINE_NATIVE_BUILD_QUIET: "1" }
+    });
+  } else {
+    process.stdout.write("[native-coverage] build native addons skipped\n");
+  }
   collectNativeCoverage();
   runStep('render html report', ['scripts/render-native-coverage-report.js']);
   runStep('print summary', ['scripts/print-native-coverage-summary.js'], { echoStdout: true });
