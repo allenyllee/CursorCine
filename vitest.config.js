@@ -9,7 +9,18 @@ module.exports = {
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
-      reportsDirectory: 'coverage'
+      reportsDirectory: 'coverage',
+      include: [
+        'src/core/**/*.js',
+        'src/ipc-handlers.js',
+        'src/preload-api.js',
+        'src/recording-controller.js'
+      ],
+      exclude: [
+        'coverage/**',
+        'coverage-native/**',
+        'tests/**'
+      ]
     }
   }
 };

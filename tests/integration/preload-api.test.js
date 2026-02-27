@@ -46,6 +46,15 @@ describe('preload api contract', () => {
     expect(ipcRenderer.removeListener).toHaveBeenCalledWith('video:export-phase', expect.any(Function));
   });
 
+  it('returns noop unbind when export-phase listener is invalid', () => {
+    const ipcRenderer = createMockIpcRenderer();
+    const api = createPreloadApi(ipcRenderer);
+    const unbind = api.onExportPhase(null);
+    expect(typeof unbind).toBe('function');
+    unbind();
+    expect(ipcRenderer.on).not.toHaveBeenCalled();
+  });
+
   it('exposes export fallback decision helper', () => {
     const ipcRenderer = createMockIpcRenderer();
     const api = createPreloadApi(ipcRenderer);
@@ -56,5 +65,82 @@ describe('preload api contract', () => {
     });
     expect(decision.useBuiltin).toBe(true);
     expect(decision.reuseOutputPath).toBe('/tmp/demo.webm');
+  });
+
+  it('resolves hdrSharedBindAsync on matching result event', async () => {
+    const listeners = {};
+    const ipcRenderer = {
+      invoke: vi.fn(async () => ({ ok: true })),
+      on: vi.fn((channel, cb) => {
+        listeners[channel] = cb;
+      }),
+      send: vi.fn(),
+      removeListener: vi.fn()
+    };
+
+    const api = createPreloadApi(ipcRenderer);
+    const bindPromise = api.hdrSharedBindAsync({ displayId: '1' });
+    const sendPayload = ipcRenderer.send.mock.calls[0][1];
+    listeners['hdr:shared-bind-async:result']({}, {
+      requestId: sendPayload.requestId,
+      result: { ok: true, bound: true, reason: 'OK' }
+    });
+
+    await expect(bindPromise).resolves.toEqual({ ok: true, bound: true, reason: 'OK' });
+  });
+
+  it('resolves hdrSharedBindAsync with timeout result', async () => {
+    vi.useFakeTimers();
+    const ipcRenderer = createMockIpcRenderer();
+    const api = createPreloadApi(ipcRenderer);
+
+    const bindPromise = api.hdrSharedBindAsync({ displayId: '1' });
+    await vi.advanceTimersByTimeAsync(2600);
+    await expect(bindPromise).resolves.toMatchObject({ ok: false, reason: 'BIND_TIMEOUT' });
+    vi.useRealTimers();
+  });
+
+  it('ignores async bind result when requestId does not match', async () => {
+    vi.useFakeTimers();
+    const listeners = {};
+    const ipcRenderer = {
+      invoke: vi.fn(async () => ({ ok: true })),
+      on: vi.fn((channel, cb) => {
+        listeners[channel] = cb;
+      }),
+      send: vi.fn(),
+      removeListener: vi.fn()
+    };
+
+    const api = createPreloadApi(ipcRenderer);
+    const bindPromise = api.hdrSharedBindAsync({ displayId: '1' });
+
+    listeners['hdr:shared-bind-async:result']({}, {
+      requestId: 'not-the-same',
+      result: { ok: true, bound: true }
+    });
+
+    await vi.advanceTimersByTimeAsync(2600);
+    await expect(bindPromise).resolves.toMatchObject({ ok: false, reason: 'BIND_TIMEOUT' });
+    vi.useRealTimers();
+  });
+
+  it('maps matching async bind event without result to BIND_EMPTY_RESULT', async () => {
+    const listeners = {};
+    const ipcRenderer = {
+      invoke: vi.fn(async () => ({ ok: true })),
+      on: vi.fn((channel, cb) => {
+        listeners[channel] = cb;
+      }),
+      send: vi.fn(),
+      removeListener: vi.fn()
+    };
+
+    const api = createPreloadApi(ipcRenderer);
+    const bindPromise = api.hdrSharedBindAsync({ displayId: '1' });
+    const sendPayload = ipcRenderer.send.mock.calls[0][1];
+    listeners['hdr:shared-bind-async:result']({}, { requestId: sendPayload.requestId });
+
+    await expect(bindPromise).resolves.toMatchObject({ ok: false, reason: 'BIND_EMPTY_RESULT' });
   });
 });

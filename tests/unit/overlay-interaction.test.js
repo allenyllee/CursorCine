@@ -23,4 +23,11 @@ describe('overlay interaction core', () => {
     expect(profile.wheelPauseMs).toBe(450);
     expect(profile.safeReleaseMs).toBe(540);
   });
+
+  it('clamps stable safeReleaseMs to min and max bounds', () => {
+    const tooLow = getOverlayInteractionProfile('stable', { safeReleaseBase: 20 });
+    const tooHigh = getOverlayInteractionProfile('stable', { safeReleaseBase: 5000 });
+    expect(tooLow.safeReleaseMs).toBe(120);
+    expect(tooHigh.safeReleaseMs).toBe(1200);
+  });
 });

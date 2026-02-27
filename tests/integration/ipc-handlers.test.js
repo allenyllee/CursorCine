@@ -27,4 +27,23 @@ describe('ipc handlers', () => {
     expect(ipc.handle).toHaveBeenNthCalledWith(1, 'alpha', expect.any(Function));
     expect(ipc.handle).toHaveBeenNthCalledWith(2, 'beta', expect.any(Function));
   });
+
+  it('delegates desktop source query when not using mock capture', async () => {
+    const desktopCapturer = {
+      getSources: vi.fn(async () => [{ id: 'screen:0' }])
+    };
+    const handlers = createIpcHandlers({
+      desktopCapturer,
+      testMode: false,
+      testCaptureMode: 'real'
+    });
+
+    const sources = await handlers['desktop-sources:get']();
+    expect(desktopCapturer.getSources).toHaveBeenCalledWith({
+      types: ['screen'],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false
+    });
+    expect(sources).toEqual([{ id: 'screen:0' }]);
+  });
 });

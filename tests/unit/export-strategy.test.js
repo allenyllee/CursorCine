@@ -31,4 +31,29 @@ describe('export-strategy core', () => {
     expect(action.done).toBe(true);
     expect(action.error).toBe(true);
   });
+
+  it('builtin mode directly chooses builtin route', () => {
+    const action = decideNextExportAction({ mode: 'builtin' });
+    expect(action.useBuiltin).toBe(true);
+    expect(action.reason).toBe('MODE_BUILTIN');
+  });
+
+  it('returns done when ffmpeg succeeds', () => {
+    const action = decideNextExportAction({
+      mode: 'auto',
+      ffmpegResult: { ok: true }
+    });
+    expect(action.done).toBe(true);
+    expect(action.route).toBe('ffmpeg');
+  });
+
+  it('treats cancel-like ffmpeg reasons as terminal without fallback', () => {
+    const action = decideNextExportAction({
+      mode: 'auto',
+      ffmpegResult: { ok: false, reason: 'CANCELED' }
+    });
+    expect(action.done).toBe(true);
+    expect(action.route).toBe('ffmpeg');
+    expect(action.reason).toBe('CANCELED');
+  });
 });
