@@ -9,6 +9,11 @@ const http = require('http');
 const crypto = require('crypto');
 const { normalizeOverlayInteractionMode, getOverlayInteractionProfile: getOverlayProfile } = require('./core/overlay-interaction');
 const { normalizeHdrRoutePreference, selectHdrBridge: selectHdrBridgeCore } = require('./core/hdr-route');
+const {
+  getDisplayBounds,
+  resolveOverlayTargetDisplayId: resolveOverlayTargetDisplayIdCore,
+  buildOverlayViewport
+} = require('./core/overlay-display');
 const { createIpcHandlers, registerIpcHandlers } = require('./ipc-handlers');
 
 const CURSOR_POLL_MS = 16;
@@ -1113,19 +1118,6 @@ function getTargetDisplay(displayId) {
   return screen.getPrimaryDisplay();
 }
 
-function getDisplayBounds(display) {
-  const bounds = display && display.bounds
-    ? display.bounds
-    : { x: 0, y: 0, width: 0, height: 0 };
-
-  return {
-    x: Number(bounds.x || 0),
-    y: Number(bounds.y || 0),
-    width: Math.max(1, Number(bounds.width || 1)),
-    height: Math.max(1, Number(bounds.height || 1))
-  };
-}
-
 function applyOverlayWindowBounds(win, bounds) {
   if (!win || win.isDestroyed() || !bounds) {
     return;
@@ -1146,15 +1138,6 @@ function applyOverlayWindowBounds(win, bounds) {
   }
 }
 
-function extractDisplayIdFromSourceId(sourceId) {
-  const raw = String(sourceId || '');
-  const match = /^screen:([^:]+):/i.exec(raw);
-  if (!match || !match[1]) {
-    return '';
-  }
-  return String(match[1]);
-}
-
 async function resolveOverlayTargetDisplayId(payload) {
   const inputDisplayId = payload && typeof payload === 'object'
     ? String(payload.displayId || '')
@@ -1164,56 +1147,25 @@ async function resolveOverlayTargetDisplayId(payload) {
     : '';
 
   const allDisplays = screen.getAllDisplays();
-  const hasDisplayIdMatch = inputDisplayId &&
-    allDisplays.some((d) => String(d.id) === inputDisplayId);
-  if (hasDisplayIdMatch) {
-    return {
-      displayId: inputDisplayId,
-      sourceId: inputSourceId,
-      resolveMethod: 'input-display-id'
-    };
-  }
-
-  const parsedFromSourceId = extractDisplayIdFromSourceId(inputSourceId);
-  const hasParsedMatch = parsedFromSourceId &&
-    allDisplays.some((d) => String(d.id) === parsedFromSourceId);
-  if (hasParsedMatch) {
-    return {
-      displayId: parsedFromSourceId,
-      sourceId: inputSourceId,
-      resolveMethod: 'source-id-prefix'
-    };
-  }
+  let allSources = [];
 
   if (inputSourceId) {
     try {
-      const sources = await desktopCapturer.getSources({
+      allSources = await desktopCapturer.getSources({
         types: ['screen'],
         thumbnailSize: { width: 0, height: 0 },
         fetchWindowIcons: false
       });
-      const matched = Array.isArray(sources)
-        ? sources.find((item) => String(item && item.id ? item.id : '') === inputSourceId)
-        : null;
-      const mappedDisplayId = String(matched && matched.display_id ? matched.display_id : '');
-      const hasMappedMatch = mappedDisplayId &&
-        allDisplays.some((d) => String(d.id) === mappedDisplayId);
-      if (hasMappedMatch) {
-        return {
-          displayId: mappedDisplayId,
-          sourceId: inputSourceId,
-          resolveMethod: 'desktop-capturer-map'
-        };
-      }
     } catch (_error) {
     }
   }
 
-  return {
-    displayId: '',
-    sourceId: inputSourceId,
-    resolveMethod: 'fallback-primary'
-  };
+  return resolveOverlayTargetDisplayIdCore({
+    inputDisplayId,
+    inputSourceId,
+    displays: allDisplays,
+    sources: allSources
+  });
 }
 
 function destroyOverlayWindow() {
@@ -1236,9 +1188,10 @@ function createOverlayWindow(displayId) {
   destroyOverlayWindow();
 
   const targetDisplay = getTargetDisplay(displayId);
-  const b = getDisplayBounds(targetDisplay);
+  const viewport = buildOverlayViewport(targetDisplay);
+  const b = viewport.bounds;
   overlayTargetDisplayId = String(targetDisplay && targetDisplay.id ? targetDisplay.id : '');
-  overlayBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+  overlayBounds = { ...viewport.penBounds };
   overlayLastPointerInside = null;
   overlayReentryGraceUntil = 0;
   overlaySafeArmUntil = 0;
@@ -1282,8 +1235,8 @@ function createOverlayWindow(displayId) {
     }
     applyOverlayWindowBounds(overlayBorderWindow, b);
     overlayBorderWindow.webContents.send('overlay:init', {
-      width: b.width,
-      height: b.height
+      width: viewport.canvasLogicalSize.width,
+      height: viewport.canvasLogicalSize.height
     });
     overlayBorderWindow.webContents.send('overlay:set-enabled', false);
     overlayBorderWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
@@ -1340,8 +1293,8 @@ function createOverlayWindow(displayId) {
     }
     applyOverlayWindowBounds(overlayWindow, b);
     overlayWindow.webContents.send('overlay:init', {
-      width: b.width,
-      height: b.height
+      width: viewport.canvasLogicalSize.width,
+      height: viewport.canvasLogicalSize.height
     });
     overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
     overlayWindow.webContents.send('overlay:set-recording-indicator', false);
