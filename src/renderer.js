@@ -41,6 +41,7 @@ const exportEngineSelect = document.getElementById('exportEngineSelect');
 const qualitySelect = document.getElementById('qualitySelect');
 const outputQualitySelect = document.getElementById('outputQualitySelect');
 const hdrMappingModeSelect = document.getElementById('hdrMappingModeSelect');
+const overlayWindowBehaviorSelect = document.getElementById('overlayWindowBehaviorSelect');
 const hdrMappingRuntimeEl = document.getElementById('hdrMappingRuntime');
 const hdrMappingProbeEl = document.getElementById('hdrMappingProbe');
 const hdrMappingDiagEl = document.getElementById('hdrMappingDiag');
@@ -221,6 +222,7 @@ const glowState = {
 const annotationState = {
   enabled: true,
   interactionMode: 'stable',
+  windowBehavior: 'safe',
   autoNoBlock: false,
   autoNoBlockReason: '',
   wheelPauseMs: 0,
@@ -384,6 +386,10 @@ function getPenInteractionModeLabel(mode) {
   return String(mode || '').trim().toLowerCase() === 'smooth' ? '流暢優先' : '穩定優先';
 }
 
+function normalizeOverlayWindowBehavior(value) {
+  return String(value || '').trim().toLowerCase() === 'always' ? 'always' : 'safe';
+}
+
 function refreshPenToggleLabel() {
   if (!annotationState.enabled) {
     penToggleBtn.textContent = '畫筆模式: 關';
@@ -409,16 +415,22 @@ async function syncOverlayRuntimeState() {
   const nextAuto = Boolean(state.autoNoBlock);
   const nextReason = String(state.autoNoBlockReason || '');
   const nextMode = String(state.interactionMode || annotationState.interactionMode || 'stable').toLowerCase() === 'smooth' ? 'smooth' : 'stable';
+  const nextWindowBehavior = normalizeOverlayWindowBehavior(state.windowBehavior || annotationState.windowBehavior || 'safe');
   const nextWheelPauseMs = Number(state.wheelPauseMs || annotationState.wheelPauseMs || 0);
   const changed =
     annotationState.autoNoBlock !== nextAuto ||
     annotationState.autoNoBlockReason !== nextReason ||
     annotationState.interactionMode !== nextMode ||
+    annotationState.windowBehavior !== nextWindowBehavior ||
     annotationState.wheelPauseMs !== nextWheelPauseMs;
   annotationState.autoNoBlock = nextAuto;
   annotationState.autoNoBlockReason = nextReason;
   annotationState.interactionMode = nextMode;
+  annotationState.windowBehavior = nextWindowBehavior;
   annotationState.wheelPauseMs = nextWheelPauseMs;
+  if (overlayWindowBehaviorSelect) {
+    overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+  }
   if (!changed) {
     return;
   }
@@ -3732,6 +3744,11 @@ async function startRecording() {
   updateRecordingTimeLabel(0);
   startRecordingTimer();
 
+  await electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior).catch(() => {});
+
+  // Ensure main window is minimized before creating overlay windows.
+  await electronAPI.minimizeMainWindow().catch(() => {});
+
   const overlayCreateResult = await electronAPI.overlayCreate({
     sourceId,
     displayId: selectedSource.display_id
@@ -3773,12 +3790,6 @@ async function startRecording() {
   lastDrawnGlowX = 0;
   lastDrawnGlowY = 0;
   drawLoop();
-
-  const minimizeDecision = await electronAPI.shouldAutoMinimizeMainWindow(selectedSource.display_id).catch(() => ({ ok: false, shouldMinimize: true }));
-
-  if (!minimizeDecision || minimizeDecision.shouldMinimize !== false) {
-    await electronAPI.minimizeMainWindow().catch(() => {});
-  }
 
   recordBtn.disabled = true;
   stopBtn.disabled = false;
@@ -4124,6 +4135,18 @@ if (penInteractionModeSelect) {
   });
 }
 
+if (overlayWindowBehaviorSelect) {
+  overlayWindowBehaviorSelect.addEventListener('change', async () => {
+    const selected = normalizeOverlayWindowBehavior(overlayWindowBehaviorSelect.value);
+    annotationState.windowBehavior = selected;
+    const result = await electronAPI.overlaySetWindowBehavior(selected).catch(() => null);
+    if (result && result.ok) {
+      annotationState.windowBehavior = normalizeOverlayWindowBehavior(result.windowBehavior || selected);
+    }
+    overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+  });
+}
+
 penColorInput.addEventListener('input', () => {
   annotationState.color = penColorInput.value;
   syncPenStyleToOverlay();
@@ -4160,7 +4183,18 @@ setExportDebug('待命', 'MODE_AUTO', '目前模式: 自動（ffmpeg 優先）')
 if (penInteractionModeSelect) {
   penInteractionModeSelect.value = annotationState.interactionMode;
 }
+if (overlayWindowBehaviorSelect) {
+  overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+}
 setPenMode(true).catch(() => {});
+electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior)
+  .then((result) => {
+    if (result && result.ok && overlayWindowBehaviorSelect) {
+      annotationState.windowBehavior = normalizeOverlayWindowBehavior(result.windowBehavior || annotationState.windowBehavior);
+      overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+    }
+  })
+  .catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
 hdrMappingState.mode = normalizeHdrMappingMode((hdrMappingModeSelect && hdrMappingModeSelect.value) || hdrMappingState.mode);

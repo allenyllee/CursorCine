@@ -73,7 +73,6 @@ let clickHookError = '';
 let lastGlobalClick = null;
 let mouseDown = false;
 let overlayWindow = null;
-let overlayBorderWindow = null;
 let mainWindow = null;
 let overlayPenEnabled = false;
 let overlayDrawToggle = false;
@@ -92,6 +91,8 @@ let overlaySafeReleaseUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
 let overlayTargetDisplayId = '';
+let overlayRecordingDisplayId = '';
+let overlayWindowBehavior = 'safe';
 let overlayAutoNoBlock = false;
 let overlayAutoNoBlockReason = '';
 let overlayRiskWindowStartMs = 0;
@@ -686,6 +687,10 @@ function isOverlayToggleKey(event) {
   return code === 29 || code === 3613;
 }
 
+function normalizeOverlayWindowBehavior(mode) {
+  return String(mode || '').trim().toLowerCase() === 'always' ? 'always' : 'safe';
+}
+
 function scheduleOverlayWheelResume() {
   if (overlayWheelResumeTimer) {
     clearTimeout(overlayWheelResumeTimer);
@@ -702,6 +707,28 @@ function scheduleOverlayWheelResume() {
     applyOverlayMouseMode();
     emitOverlayPointer();
   }, Math.max(20, overlayWheelLockUntil - Date.now() + 20));
+}
+
+function ensureOverlayWindowVisible() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+  if (overlayWindow.isVisible()) {
+    return;
+  }
+  if (typeof overlayWindow.showInactive === "function") {
+    try {
+      overlayWindow.showInactive();
+    } catch (_error) {
+    }
+  }
+  if (!overlayWindow.isVisible()) {
+    overlayWindow.show();
+  }
+  try {
+    overlayWindow.moveTop();
+  } catch (_error) {
+  }
 }
 
 function pauseOverlayByWheel() {
@@ -721,25 +748,11 @@ function pauseOverlayByWheel() {
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("overlay:clear");
-    if (profile.wheelHideOverlay) {
-      overlayWindow.setIgnoreMouseEvents(true);
-      if (overlayWindow.isVisible()) {
-        overlayWindow.hide();
-      }
-      overlayWindow.blur();
-    } else {
-      // Smooth mode: keep overlay visible during wheel pause to reduce
-      // hide/show flicker and perceived wheel stutter.
-      if (!overlayWindow.isVisible()) {
-        if (typeof overlayWindow.showInactive === "function") {
-          overlayWindow.showInactive();
-        } else {
-          overlayWindow.show();
-        }
-      }
-      overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
-      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-    }
+    // Keep overlay window alive across displays; avoid hide/show transitions
+    // that can trigger Windows non-client bar flashes on some setups.
+    ensureOverlayWindowVisible();
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   }
 
   scheduleOverlayWheelResume();
@@ -876,6 +889,9 @@ function applyOverlayMouseMode() {
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     return;
   }
+  if (overlayRecordingActive) {
+    ensureOverlayWindowVisible();
+  }
   const profile = getOverlayInteractionProfile();
 
   const now = Date.now();
@@ -893,19 +909,9 @@ function applyOverlayMouseMode() {
     (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease || reentryBlock) : true);
 
   if (shouldKeepVisible) {
-    if (!overlayWindow.isVisible()) {
-      if (typeof overlayWindow.showInactive === "function") {
-        overlayWindow.showInactive();
-      } else {
-        overlayWindow.show();
-      }
-
-      overlayWindow.webContents.send("overlay:clear");
-    }
-
     // In draw-active mode, default behavior blocks background interactions.
     // Safe mode only blocks while actively drawing (mouse down).
-    overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     if (!shouldBlockBackground) {
       overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     } else {
@@ -915,34 +921,15 @@ function applyOverlayMouseMode() {
     // In safe mode, keep intercepting while wheel-lock is active so the
     // first stroke right after wheel input does not click-through.
     if (OVERLAY_SAFE_MODE && pointerInside && profile.keepWheelLockIntercept) {
-      if (!overlayWindow.isVisible()) {
-        if (typeof overlayWindow.showInactive === "function") {
-          overlayWindow.showInactive();
-        } else {
-          overlayWindow.show();
-        }
-      }
-      overlayWindow.setAlwaysOnTop(true, 'pop-up-menu');
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
       overlayWindow.setIgnoreMouseEvents(false);
     } else {
       overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-      overlayWindow.setIgnoreMouseEvents(true);
-
-      if (overlayWindow.isVisible()) {
-        overlayWindow.hide();
-      }
-
-      overlayWindow.blur();
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
     }
   } else if (pausedByOutside) {
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-    overlayWindow.setIgnoreMouseEvents(true);
-
-    if (overlayWindow.isVisible()) {
-      overlayWindow.hide();
-    }
-
-    overlayWindow.blur();
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   } else {
     if (overlayLastDrawActive) {
       overlayWindow.webContents.send("overlay:clear");
@@ -950,16 +937,11 @@ function applyOverlayMouseMode() {
 
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-
-    if (overlayWindow.isVisible()) {
-      overlayWindow.hide();
-    }
-
-    overlayWindow.blur();
   }
 
   overlayLastDrawActive = drawEnabled;
 
+  overlayWindow.webContents.send("overlay:set-recording-indicator", overlayRecordingActive);
   overlayWindow.webContents.send("overlay:set-draw-active", {
     active: capturePointer,
     mouseDown,
@@ -1101,6 +1083,22 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
+  mainWindow.on('restore', () => {
+    applyOverlayWindowBehaviorForMainWindowState();
+  });
+
+  mainWindow.on('show', () => {
+    applyOverlayWindowBehaviorForMainWindowState();
+  });
+
+  mainWindow.on('minimize', () => {
+    applyOverlayWindowBehaviorForMainWindowState();
+  });
+
+  mainWindow.on('blur', () => {
+    applyOverlayWindowBehaviorForMainWindowState();
+  });
+
   mainWindow.on('close', () => {
     if (process.platform === 'darwin' || quitCleanupStarted) {
       return;
@@ -1145,10 +1143,6 @@ function applyOverlayWindowBounds(win, bounds) {
     win.setBounds(normalized);
   } catch (_error) {
   }
-  try {
-    win.setContentBounds(normalized);
-  } catch (_error) {
-  }
 }
 
 async function resolveOverlayTargetDisplayId(payload) {
@@ -1182,8 +1176,7 @@ async function resolveOverlayTargetDisplayId(payload) {
 }
 
 function destroyOverlayWindow() {
-
-  const windows = [overlayWindow, overlayBorderWindow];
+  const windows = [overlayWindow];
   for (const win of windows) {
     if (!win || win.isDestroyed()) {
       continue;
@@ -1192,7 +1185,6 @@ function destroyOverlayWindow() {
   }
 
   overlayWindow = null;
-  overlayBorderWindow = null;
   overlayBounds = null;
   overlayTargetDisplayId = '';
 }
@@ -1209,67 +1201,8 @@ function createOverlayWindow(displayId) {
   overlayReentryGraceUntil = 0;
   overlaySafeArmUntil = 0;
   overlaySafeReleaseUntil = 0;
-
-  overlayBorderWindow = new BrowserWindow({
-    x: b.x,
-    y: b.y,
-    width: b.width,
-    height: b.height,
-    enableLargerThanScreen: true,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    alwaysOnTop: true,
-    focusable: false,
-    show: false,
-    webPreferences: {
-      contextIsolation: false,
-      nodeIntegration: true,
-      backgroundThrottling: false
-    }
-  });
-
-  overlayBorderWindow.setAlwaysOnTop(true, 'screen-saver');
-  overlayBorderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayBorderWindow.setFocusable(false);
-  overlayBorderWindow.setTitle('CursorCine Overlay Border');
-  overlayBorderWindow.blur();
-  applyOverlayWindowBounds(overlayBorderWindow, b);
-  overlayBorderWindow.loadFile(path.join(__dirname, 'overlay.html'));
-
-  overlayBorderWindow.webContents.once('did-finish-load', () => {
-    if (!overlayBorderWindow || overlayBorderWindow.isDestroyed()) {
-      return;
-    }
-    applyOverlayWindowBounds(overlayBorderWindow, b);
-    overlayBorderWindow.webContents.send('overlay:init', {
-      width: viewport.canvasLogicalSize.width,
-      height: viewport.canvasLogicalSize.height
-    });
-    overlayBorderWindow.webContents.send('overlay:set-enabled', false);
-    overlayBorderWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
-
-    if (!overlayBorderWindow.isVisible()) {
-      if (typeof overlayBorderWindow.showInactive === 'function') {
-        overlayBorderWindow.showInactive();
-      } else {
-        overlayBorderWindow.show();
-      }
-    }
-    overlayBorderWindow.setIgnoreMouseEvents(true);
-  });
-
-  overlayBorderWindow.on('closed', () => {
-    overlayBorderWindow = null;
-  });
-
   overlayWindow = new BrowserWindow({
+    title: '',
     x: b.x,
     y: b.y,
     width: b.width,
@@ -1284,6 +1217,8 @@ function createOverlayWindow(displayId) {
     fullscreenable: false,
     skipTaskbar: true,
     hasShadow: false,
+    thickFrame: false,
+    backgroundColor: '#00000000',
     alwaysOnTop: true,
     focusable: false,
     show: false,
@@ -1297,8 +1232,12 @@ function createOverlayWindow(displayId) {
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setFocusable(false);
-  overlayWindow.setTitle('CursorCine Overlay Draw');
+  overlayWindow.setSkipTaskbar(true);
+  overlayWindow.setTitle('');
   overlayWindow.blur();
+  overlayWindow.webContents.on('page-title-updated', (event) => {
+    event.preventDefault();
+  });
   applyOverlayWindowBounds(overlayWindow, b);
   overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
 
@@ -1306,19 +1245,73 @@ function createOverlayWindow(displayId) {
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return;
     }
+    if (typeof overlayWindow.showInactive === 'function') {
+      try {
+        overlayWindow.showInactive();
+      } catch (_error) {
+      }
+    }
+    if (!overlayWindow.isVisible()) {
+      overlayWindow.show();
+    }
+    try {
+      overlayWindow.moveTop();
+    } catch (_error) {
+    }
     applyOverlayWindowBounds(overlayWindow, b);
     overlayWindow.webContents.send('overlay:init', {
       width: viewport.canvasLogicalSize.width,
       height: viewport.canvasLogicalSize.height
     });
     overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
-    overlayWindow.webContents.send('overlay:set-recording-indicator', false);
+    overlayWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
     applyOverlayMouseMode();
   });
 
   overlayWindow.on('closed', () => {
     overlayWindow = null;
   });
+}
+
+function ensureOverlayWindowForRecording() {
+  if (!overlayRecordingActive) {
+    return;
+  }
+  const targetDisplayId = String(overlayRecordingDisplayId || overlayTargetDisplayId || '');
+  if (!targetDisplayId) {
+    return;
+  }
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    createOverlayWindow(targetDisplayId);
+  }
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+  setTimeout(() => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return;
+    }
+    overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
+    overlayWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
+    applyOverlayMouseMode();
+    emitOverlayPointer();
+  }, 80);
+}
+
+function applyOverlayWindowBehaviorForMainWindowState() {
+  if (!overlayRecordingActive) {
+    return;
+  }
+  const mainVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized());
+  if (overlayWindowBehavior === 'always') {
+    ensureOverlayWindowForRecording();
+    return;
+  }
+  if (mainVisible) {
+    destroyOverlayWindow();
+    return;
+  }
+  ensureOverlayWindowForRecording();
 }
 
 function hasFfmpeg() {
@@ -2020,8 +2013,9 @@ app.whenReady().then(() => {
     const sourceId = String(resolved.sourceId || '');
 
     overlayRecordingActive = true;
+    overlayRecordingDisplayId = targetDisplayId;
     resetOverlayRiskState();
-    createOverlayWindow(targetDisplayId);
+    applyOverlayWindowBehaviorForMainWindowState();
 
     const targetDisplay = getTargetDisplay(targetDisplayId);
     return {
@@ -2062,6 +2056,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:destroy', () => {
     overlayRecordingActive = false;
+    overlayRecordingDisplayId = '';
     resetOverlayRiskState();
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
@@ -2099,10 +2094,15 @@ app.whenReady().then(() => {
     }
 
     if (!overlayWindow || overlayWindow.isDestroyed()) {
-      return { ok: false, reason: 'NO_OVERLAY' };
+      return {
+        ok: true,
+        reason: 'OVERLAY_HIDDEN',
+        enabled: overlayPenEnabled
+      };
     }
 
     overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
+    overlayWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
     applyOverlayMouseMode();
 
     return {
@@ -2115,6 +2115,15 @@ app.whenReady().then(() => {
       interactionMode: profile.mode,
       autoNoBlock: overlayAutoNoBlock,
       autoNoBlockReason: overlayAutoNoBlockReason
+    };
+  });
+
+  ipcMain.handle('overlay:set-window-behavior', (_event, mode) => {
+    overlayWindowBehavior = normalizeOverlayWindowBehavior(mode);
+    applyOverlayWindowBehaviorForMainWindowState();
+    return {
+      ok: true,
+      windowBehavior: overlayWindowBehavior
     };
   });
 
@@ -2147,11 +2156,12 @@ app.whenReady().then(() => {
       autoNoBlockReason: overlayAutoNoBlockReason,
       interactionMode: profile.mode,
       wheelPauseMs: profile.wheelPauseMs,
+      windowBehavior: overlayWindowBehavior,
       overlayBounds: overlayBounds ? { ...overlayBounds } : null,
       targetDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : '',
       targetDisplayBounds: targetBounds,
       overlayWindowBounds: overlayWindow && !overlayWindow.isDestroyed() ? overlayWindow.getBounds() : null,
-      overlayBorderWindowBounds: overlayBorderWindow && !overlayBorderWindow.isDestroyed() ? overlayBorderWindow.getBounds() : null
+      overlayBorderWindowBounds: null
     };
   });
 
@@ -2225,11 +2235,11 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:double-click-marker', (_event, payload) => {
-    if (!overlayBorderWindow || overlayBorderWindow.isDestroyed()) {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
     }
 
-    overlayBorderWindow.webContents.send('overlay:double-click-marker', payload || {});
+    overlayWindow.webContents.send('overlay:double-click-marker', payload || {});
     return { ok: true };
   });
 

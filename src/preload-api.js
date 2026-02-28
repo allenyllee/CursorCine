@@ -43,6 +43,7 @@ function createPreloadApi(ipcRenderer) {
     overlaySetEnabled: (enabled) => ipcRenderer.invoke('overlay:set-enabled', enabled),
     overlayGetState: () => ipcRenderer.invoke('overlay:get-state'),
     overlaySetInteractionMode: (mode) => ipcRenderer.invoke('overlay:set-interaction-mode', mode),
+    overlaySetWindowBehavior: (mode) => ipcRenderer.invoke('overlay:set-window-behavior', mode),
     overlaySetPenStyle: (style) => ipcRenderer.invoke('overlay:set-pen-style', style),
     overlayUndo: () => ipcRenderer.invoke('overlay:undo'),
     overlayClear: () => ipcRenderer.invoke('overlay:clear'),
