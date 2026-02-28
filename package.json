@@ -54,6 +54,7 @@
       "src/**/*",
       "native/windows-hdr-capture/**/*",
       "native/windows-wgc-hdr-capture/**/*",
+      "native/windows-overlay-host/**/*",
       "package.json"
     ],
     "win": {

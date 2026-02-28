@@ -93,6 +93,10 @@ let overlayBounds = null;
 let overlayTargetDisplayId = '';
 let overlayRecordingDisplayId = '';
 let overlayWindowBehavior = 'safe';
+let overlayBackend = 'electron';
+let overlayPassiveMainVisibleApplied = false;
+let overlayNativeActive = false;
+let overlayNativeLastError = '';
 let overlayAutoNoBlock = false;
 let overlayAutoNoBlockReason = '';
 let overlayRiskWindowStartMs = 0;
@@ -107,6 +111,8 @@ let windowsHdrNativeBridge = null;
 let windowsHdrNativeLoadError = '';
 let windowsHdrWgcBridge = null;
 let windowsHdrWgcLoadError = '';
+let windowsOverlayNativeBridge = null;
+let windowsOverlayNativeLoadError = '';
 let hdrCaptureSessionSeq = 1;
 const hdrCaptureSessions = new Map();
 let hdrSharedSessionSeq = 1;
@@ -691,6 +697,122 @@ function normalizeOverlayWindowBehavior(mode) {
   return String(mode || '').trim().toLowerCase() === 'always' ? 'always' : 'safe';
 }
 
+function normalizeOverlayBackend(mode) {
+  return String(mode || '').trim().toLowerCase() === 'native' ? 'native' : 'electron';
+}
+
+function loadWindowsOverlayNativeBridge() {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  if (windowsOverlayNativeBridge) {
+    return windowsOverlayNativeBridge;
+  }
+  if (windowsOverlayNativeLoadError) {
+    return null;
+  }
+
+  try {
+    const mod = require(path.join(__dirname, '..', 'native', 'windows-overlay-host'));
+    windowsOverlayNativeBridge = mod;
+    return windowsOverlayNativeBridge;
+  } catch (error) {
+    windowsOverlayNativeLoadError = error && error.message ? error.message : 'load failed';
+    return null;
+  }
+}
+
+function getOverlayBackendState() {
+  const requested = normalizeOverlayBackend(overlayBackend);
+  if (requested !== 'native') {
+    return {
+      requested,
+      effective: 'electron',
+      nativeAvailable: false,
+      nativeReason: ''
+    };
+  }
+
+  const bridge = loadWindowsOverlayNativeBridge();
+  const hasApi = Boolean(
+    bridge &&
+    typeof bridge.startOverlay === 'function' &&
+    typeof bridge.stopOverlay === 'function'
+  );
+  const supported = hasApi && (
+    typeof bridge.isSupported !== 'function'
+      ? true
+      : Boolean(bridge.isSupported())
+  );
+  const canUseNative = hasApi && supported;
+
+  return {
+    requested: 'native',
+    effective: canUseNative ? 'native' : 'electron',
+    nativeAvailable: canUseNative,
+    nativeReason: canUseNative
+      ? ''
+      : (windowsOverlayNativeLoadError || 'Native overlay bridge unavailable')
+  };
+}
+
+function stopNativeOverlayWindow() {
+  const bridge = loadWindowsOverlayNativeBridge();
+  if (!bridge || typeof bridge.stopOverlay !== 'function') {
+    overlayNativeActive = false;
+    return;
+  }
+  try {
+    const result = bridge.stopOverlay({});
+    if (result && result.ok === false) {
+      overlayNativeLastError = String(result.message || result.reason || 'STOP_FAILED');
+    }
+  } catch (error) {
+    overlayNativeLastError = error && error.message ? error.message : 'STOP_EXCEPTION';
+  } finally {
+    overlayNativeActive = false;
+  }
+}
+
+function startNativeOverlayWindowForRecording() {
+  if (!overlayRecordingActive) {
+    stopNativeOverlayWindow();
+    return;
+  }
+  const backendState = getOverlayBackendState();
+  if (backendState.effective !== 'native') {
+    stopNativeOverlayWindow();
+    return;
+  }
+
+  const bridge = loadWindowsOverlayNativeBridge();
+  if (!bridge || typeof bridge.startOverlay !== 'function') {
+    overlayNativeActive = false;
+    overlayNativeLastError = backendState.nativeReason || 'NATIVE_BRIDGE_UNAVAILABLE';
+    return;
+  }
+
+  const targetDisplay = getTargetDisplay(overlayRecordingDisplayId || overlayTargetDisplayId);
+  const bounds = resolveNativeOverlayBounds(targetDisplay);
+  try {
+    const result = bridge.startOverlay({
+      bounds,
+      borderPx: 4,
+      recording: overlayRecordingActive
+    });
+    if (result && result.ok) {
+      overlayNativeActive = true;
+      overlayNativeLastError = '';
+    } else {
+      overlayNativeActive = false;
+      overlayNativeLastError = String((result && (result.message || result.reason)) || 'START_FAILED');
+    }
+  } catch (error) {
+    overlayNativeActive = false;
+    overlayNativeLastError = error && error.message ? error.message : 'START_EXCEPTION';
+  }
+}
+
 function scheduleOverlayWheelResume() {
   if (overlayWheelResumeTimer) {
     clearTimeout(overlayWheelResumeTimer);
@@ -725,10 +847,6 @@ function ensureOverlayWindowVisible() {
   if (!overlayWindow.isVisible()) {
     overlayWindow.show();
   }
-  try {
-    overlayWindow.moveTop();
-  } catch (_error) {
-  }
 }
 
 function pauseOverlayByWheel() {
@@ -751,8 +869,13 @@ function pauseOverlayByWheel() {
     // Keep overlay window alive across displays; avoid hide/show transitions
     // that can trigger Windows non-client bar flashes on some setups.
     ensureOverlayWindowVisible();
-    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    if (overlayWindowBehavior === 'always') {
+      overlayWindow.setAlwaysOnTop(true, 'floating');
+      overlayWindow.setIgnoreMouseEvents(true);
+    } else {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    }
   }
 
   scheduleOverlayWheelResume();
@@ -892,6 +1015,7 @@ function applyOverlayMouseMode() {
   if (overlayRecordingActive) {
     ensureOverlayWindowVisible();
   }
+  const alwaysModePassive = overlayWindowBehavior === 'always';
   const profile = getOverlayInteractionProfile();
 
   const now = Date.now();
@@ -907,6 +1031,35 @@ function applyOverlayMouseMode() {
   const reentryBlock = inReentryGrace && !profile.reentryClickThrough;
   const shouldBlockBackground = !overlayAutoNoBlock && shouldKeepVisible &&
     (OVERLAY_SAFE_MODE ? (Boolean(mouseDown) || inSafeArm || inSafeRelease || reentryBlock) : true);
+
+  // In `always` mode, keep overlay visible and fully click-through to
+  // reduce white-bar risk while preserving live brush dynamics via
+  // global-pointer stream.
+  if (alwaysModePassive) {
+    if (!overlayPassiveMainVisibleApplied) {
+      if (overlayLastDrawActive) {
+        overlayWindow.webContents.send("overlay:clear");
+      }
+      // Keep overlay visible on source display but avoid forwarding mode,
+      // which is a common white-bar trigger on some Windows setups.
+      overlayWindow.setAlwaysOnTop(true, 'floating');
+      overlayWindow.setIgnoreMouseEvents(true);
+      overlayWindow.webContents.send("overlay:set-recording-indicator", overlayRecordingActive);
+      overlayPassiveMainVisibleApplied = true;
+    }
+    overlayLastDrawActive = drawEnabled;
+    overlayWindow.webContents.send("overlay:set-draw-active", {
+      active: capturePointer,
+      mouseDown,
+      toggleEnabled: clickHookEnabled,
+      toggled: overlayDrawToggle,
+      wheelPaused: wheelLocked,
+      autoNoBlock: overlayAutoNoBlock
+    });
+    emitOverlayPointer();
+    return;
+  }
+  overlayPassiveMainVisibleApplied = false;
 
   if (shouldKeepVisible) {
     // In draw-active mode, default behavior blocks background interactions.
@@ -1095,10 +1248,6 @@ function createWindow() {
     applyOverlayWindowBehaviorForMainWindowState();
   });
 
-  mainWindow.on('blur', () => {
-    applyOverlayWindowBehaviorForMainWindowState();
-  });
-
   mainWindow.on('close', () => {
     if (process.platform === 'darwin' || quitCleanupStarted) {
       return;
@@ -1110,6 +1259,7 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     overlayRecordingActive = false;
+    stopNativeOverlayWindow();
     destroyOverlayWindow();
     if (process.platform !== 'darwin') {
       app.quit();
@@ -1127,6 +1277,55 @@ function getTargetDisplay(displayId) {
     }
   }
   return screen.getPrimaryDisplay();
+}
+
+function normalizeOverlayRect(bounds) {
+  return {
+    x: Math.round(Number(bounds && bounds.x ? bounds.x : 0)),
+    y: Math.round(Number(bounds && bounds.y ? bounds.y : 0)),
+    width: Math.max(1, Math.round(Number(bounds && bounds.width ? bounds.width : 1))),
+    height: Math.max(1, Math.round(Number(bounds && bounds.height ? bounds.height : 1)))
+  };
+}
+
+function resolveNativeOverlayBounds(display) {
+  const dipBounds = normalizeOverlayRect(getDisplayBounds(display));
+
+  try {
+    // Do not use mainWindow as reference for conversion. When mainWindow and
+    // target display have different DPI, it can introduce a shifted overlay.
+    if (screen && typeof screen.dipToScreenPoint === 'function') {
+      const p1 = screen.dipToScreenPoint({ x: dipBounds.x, y: dipBounds.y });
+      const p2 = screen.dipToScreenPoint({
+        x: dipBounds.x + dipBounds.width,
+        y: dipBounds.y + dipBounds.height
+      });
+      if (p1 && p2 && Number.isFinite(p1.x) && Number.isFinite(p1.y) && Number.isFinite(p2.x) && Number.isFinite(p2.y)) {
+        return normalizeOverlayRect({
+          x: p1.x,
+          y: p1.y,
+          width: Math.max(1, p2.x - p1.x),
+          height: Math.max(1, p2.y - p1.y)
+        });
+      }
+    }
+
+    if (screen && typeof screen.dipToScreenRect === 'function') {
+      const converted = screen.dipToScreenRect(null, dipBounds);
+      if (converted && Number.isFinite(converted.width) && Number.isFinite(converted.height)) {
+        return normalizeOverlayRect(converted);
+      }
+    }
+  } catch (_error) {
+  }
+
+  const scaleFactor = Math.max(1, Number(display && display.scaleFactor ? display.scaleFactor : 1));
+  return normalizeOverlayRect({
+    x: dipBounds.x * scaleFactor,
+    y: dipBounds.y * scaleFactor,
+    width: dipBounds.width * scaleFactor,
+    height: dipBounds.height * scaleFactor
+  });
 }
 
 function applyOverlayWindowBounds(win, bounds) {
@@ -1185,6 +1384,7 @@ function destroyOverlayWindow() {
   }
 
   overlayWindow = null;
+  overlayPassiveMainVisibleApplied = false;
   overlayBounds = null;
   overlayTargetDisplayId = '';
 }
@@ -1229,7 +1429,8 @@ function createOverlayWindow(displayId) {
     }
   });
 
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  const topLevel = overlayWindowBehavior === 'always' ? 'floating' : 'screen-saver';
+  overlayWindow.setAlwaysOnTop(true, topLevel);
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setFocusable(false);
   overlayWindow.setSkipTaskbar(true);
@@ -1254,10 +1455,6 @@ function createOverlayWindow(displayId) {
     if (!overlayWindow.isVisible()) {
       overlayWindow.show();
     }
-    try {
-      overlayWindow.moveTop();
-    } catch (_error) {
-    }
     applyOverlayWindowBounds(overlayWindow, b);
     overlayWindow.webContents.send('overlay:init', {
       width: viewport.canvasLogicalSize.width,
@@ -1281,10 +1478,21 @@ function ensureOverlayWindowForRecording() {
   if (!targetDisplayId) {
     return;
   }
-  if (!overlayWindow || overlayWindow.isDestroyed()) {
+  const needCreate = !overlayWindow || overlayWindow.isDestroyed();
+  if (needCreate) {
     createOverlayWindow(targetDisplayId);
   }
   if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+  if (!needCreate) {
+    if (!overlayWindow.isVisible()) {
+      ensureOverlayWindowVisible();
+    }
+    overlayWindow.webContents.send('overlay:set-enabled', overlayPenEnabled);
+    overlayWindow.webContents.send('overlay:set-recording-indicator', overlayRecordingActive);
+    applyOverlayMouseMode();
+    emitOverlayPointer();
     return;
   }
   setTimeout(() => {
@@ -1300,13 +1508,23 @@ function ensureOverlayWindowForRecording() {
 
 function applyOverlayWindowBehaviorForMainWindowState() {
   if (!overlayRecordingActive) {
+    stopNativeOverlayWindow();
     return;
   }
-  const mainVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized());
+  const backendState = getOverlayBackendState();
+  if (backendState.effective === 'native') {
+    destroyOverlayWindow();
+    startNativeOverlayWindowForRecording();
+    return;
+  }
+  stopNativeOverlayWindow();
   if (overlayWindowBehavior === 'always') {
+    // `always` mode keeps source-display overlay visible so annotations are
+    // visible both on the original screen and in recording output.
     ensureOverlayWindowForRecording();
     return;
   }
+  const mainVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized());
   if (mainVisible) {
     destroyOverlayWindow();
     return;
@@ -1931,6 +2149,7 @@ async function safeShowSaveDialog(options) {
 app.whenReady().then(() => {
   installCrossOriginIsolationHeaders();
   initGlobalClickHook();
+  overlayBackend = normalizeOverlayBackend(process.env.CURSORCINE_OVERLAY_BACKEND || overlayBackend);
   registerIpcHandlers(ipcMain, createIpcHandlers({
     desktopCapturer,
     testMode: CURSORCINE_TEST_MODE,
@@ -2016,12 +2235,19 @@ app.whenReady().then(() => {
     overlayRecordingDisplayId = targetDisplayId;
     resetOverlayRiskState();
     applyOverlayWindowBehaviorForMainWindowState();
+    const backendState = getOverlayBackendState();
 
     const targetDisplay = getTargetDisplay(targetDisplayId);
     return {
       ok: true,
       requestedDisplayId: displayId,
       requestedSourceId: sourceId,
+      backendRequested: backendState.requested,
+      backendEffective: backendState.effective,
+      nativeAvailable: backendState.nativeAvailable,
+      nativeReason: backendState.nativeReason,
+      nativeOverlayActive: overlayNativeActive,
+      nativeOverlayError: overlayNativeLastError,
       resolveMethod: resolved.resolveMethod,
       resolvedDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : '',
       resolvedDisplayBounds: getDisplayBounds(targetDisplay)
@@ -2066,12 +2292,14 @@ app.whenReady().then(() => {
       clearTimeout(overlayReentryGraceTimer);
       overlayReentryGraceTimer = null;
     }
+    stopNativeOverlayWindow();
     destroyOverlayWindow();
     return { ok: true };
   });
 
   ipcMain.handle('overlay:set-enabled', (_event, enabled) => {
     const profile = getOverlayInteractionProfile();
+    const backendState = getOverlayBackendState();
     overlayPenEnabled = Boolean(enabled);
     resetOverlayRiskState();
     overlayLastDrawActive = false;
@@ -2092,12 +2320,48 @@ app.whenReady().then(() => {
       clearTimeout(overlayWheelResumeTimer);
       overlayWheelResumeTimer = null;
     }
+    if (backendState.effective === 'native') {
+      startNativeOverlayWindowForRecording();
+      return {
+        ok: true,
+        reason: 'NATIVE_OVERLAY',
+        enabled: overlayPenEnabled,
+        toggleMode: clickHookEnabled,
+        drawToggled: overlayDrawToggle,
+        safeMode: OVERLAY_SAFE_MODE,
+        safeReleaseMs: profile.safeReleaseMs,
+        wheelPauseMs: profile.wheelPauseMs,
+        interactionMode: profile.mode,
+        autoNoBlock: overlayAutoNoBlock,
+        autoNoBlockReason: overlayAutoNoBlockReason,
+        backendRequested: backendState.requested,
+        backendEffective: backendState.effective,
+        nativeAvailable: backendState.nativeAvailable,
+        nativeReason: backendState.nativeReason,
+        nativeOverlayActive: overlayNativeActive,
+        nativeOverlayError: overlayNativeLastError
+      };
+    }
 
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return {
         ok: true,
         reason: 'OVERLAY_HIDDEN',
-        enabled: overlayPenEnabled
+        enabled: overlayPenEnabled,
+        toggleMode: clickHookEnabled,
+        drawToggled: overlayDrawToggle,
+        safeMode: OVERLAY_SAFE_MODE,
+        safeReleaseMs: profile.safeReleaseMs,
+        wheelPauseMs: profile.wheelPauseMs,
+        interactionMode: profile.mode,
+        autoNoBlock: overlayAutoNoBlock,
+        autoNoBlockReason: overlayAutoNoBlockReason,
+        backendRequested: backendState.requested,
+        backendEffective: backendState.effective,
+        nativeAvailable: backendState.nativeAvailable,
+        nativeReason: backendState.nativeReason,
+        nativeOverlayActive: overlayNativeActive,
+        nativeOverlayError: overlayNativeLastError
       };
     }
 
@@ -2114,16 +2378,44 @@ app.whenReady().then(() => {
       wheelPauseMs: profile.wheelPauseMs,
       interactionMode: profile.mode,
       autoNoBlock: overlayAutoNoBlock,
-      autoNoBlockReason: overlayAutoNoBlockReason
+      autoNoBlockReason: overlayAutoNoBlockReason,
+      backendRequested: backendState.requested,
+      backendEffective: backendState.effective,
+      nativeAvailable: backendState.nativeAvailable,
+      nativeReason: backendState.nativeReason,
+      nativeOverlayActive: overlayNativeActive,
+      nativeOverlayError: overlayNativeLastError
     };
   });
 
   ipcMain.handle('overlay:set-window-behavior', (_event, mode) => {
     overlayWindowBehavior = normalizeOverlayWindowBehavior(mode);
     applyOverlayWindowBehaviorForMainWindowState();
+    const backendState = getOverlayBackendState();
     return {
       ok: true,
-      windowBehavior: overlayWindowBehavior
+      windowBehavior: overlayWindowBehavior,
+      backendRequested: backendState.requested,
+      backendEffective: backendState.effective,
+      nativeAvailable: backendState.nativeAvailable,
+      nativeReason: backendState.nativeReason,
+      nativeOverlayActive: overlayNativeActive,
+      nativeOverlayError: overlayNativeLastError
+    };
+  });
+
+  ipcMain.handle('overlay:set-backend', (_event, backend) => {
+    overlayBackend = normalizeOverlayBackend(backend);
+    applyOverlayWindowBehaviorForMainWindowState();
+    const backendState = getOverlayBackendState();
+    return {
+      ok: true,
+      backendRequested: backendState.requested,
+      backendEffective: backendState.effective,
+      nativeAvailable: backendState.nativeAvailable,
+      nativeReason: backendState.nativeReason,
+      nativeOverlayActive: overlayNativeActive,
+      nativeOverlayError: overlayNativeLastError
     };
   });
 
@@ -2145,18 +2437,26 @@ app.whenReady().then(() => {
 
   ipcMain.handle('overlay:get-state', () => {
     const profile = getOverlayInteractionProfile();
+    const backendState = getOverlayBackendState();
     const targetDisplay = getTargetDisplay(overlayTargetDisplayId);
     const targetBounds = getDisplayBounds(targetDisplay);
     return {
       ok: true,
       recordingActive: overlayRecordingActive,
       penEnabled: overlayPenEnabled,
+      toggleMode: clickHookEnabled,
       drawToggled: overlayDrawToggle,
       autoNoBlock: overlayAutoNoBlock,
       autoNoBlockReason: overlayAutoNoBlockReason,
       interactionMode: profile.mode,
       wheelPauseMs: profile.wheelPauseMs,
       windowBehavior: overlayWindowBehavior,
+      backendRequested: backendState.requested,
+      backendEffective: backendState.effective,
+      nativeAvailable: backendState.nativeAvailable,
+      nativeReason: backendState.nativeReason,
+      nativeOverlayActive: overlayNativeActive,
+      nativeOverlayError: overlayNativeLastError,
       overlayBounds: overlayBounds ? { ...overlayBounds } : null,
       targetDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : '',
       targetDisplayBounds: targetBounds,
@@ -2166,6 +2466,9 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:set-pen-style', (_event, style) => {
+    if (getOverlayBackendState().effective === 'native') {
+      return { ok: true, skipped: true, reason: 'NATIVE_OVERLAY' };
+    }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
     }
@@ -2174,6 +2477,9 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:undo', () => {
+    if (getOverlayBackendState().effective === 'native') {
+      return { ok: true, skipped: true, reason: 'NATIVE_OVERLAY' };
+    }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
     }
@@ -2182,6 +2488,9 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:clear', () => {
+    if (getOverlayBackendState().effective === 'native') {
+      return { ok: true, skipped: true, reason: 'NATIVE_OVERLAY' };
+    }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
     }

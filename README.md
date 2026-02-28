@@ -32,6 +32,7 @@
 - 內建輸出 Debug 面板，顯示路徑、錯誤碼與 trace
 - 錄製資料採用暫存檔串流寫入，長時間錄製可降低記憶體暴增風險
 - Windows 實驗性 Native HDR->SDR 路由（Auto / Off / Force Native），含 Probe、Smoke 與自動回退
+- Overlay 後端可切換 `Electron` / `Native Windows（實驗）`，Native 目前為早期實作
 - HDR 診斷資訊可一鍵複製（包含 runtime route、probe、session/frame counters、fallback 原因）
 - `auto` 匯出模式在 `ffmpeg` 失敗時，會改用內建輸出，並沿用第一次選擇的儲存路徑（不重複跳出存檔視窗）
 
@@ -160,9 +161,21 @@ UI 提供：
 - 可指定預設路由偏好：
   - `CURSORCINE_HDR_ROUTE_PREFERENCE=auto|wgc|legacy`
 
+## Windows Native Overlay（實驗）
+
+目前可在 UI 的 `Overlay 後端` 切換：
+
+- `Electron`：現行預設
+- `Native Windows（實驗）`：嘗試使用 Node-API 原生 overlay host
+
+注意：
+
+- Native overlay 目前是早期實作版本（先支援紅框），畫筆完整行為仍以 Electron overlay 為主。
+- 若 Native overlay 不可用，會自動回退 Electron，並在狀態列顯示原因。
+
 ## Windows 編譯 Native 模組需求
 
-若要編譯 `native/windows-hdr-capture` 與 `native/windows-wgc-hdr-capture`，請先安裝：
+若要編譯 `native/windows-hdr-capture`、`native/windows-wgc-hdr-capture` 與 `native/windows-overlay-host`，請先安裝：
 
 1. Node.js（建議 LTS 或目前專案可用版本）
 2. Python 3.11（建議 3.11.x；`node-gyp@9` 在 3.12 可能遇到 `distutils` 問題）
@@ -182,7 +195,7 @@ npm.cmd run build:native-hdr-win
 若看到 `MSB8020: 找不到 ClangCL 的建置工具 (平台工具集='ClangCL')`：
 
 - `build:native-hdr-win` 會在 `node-gyp configure` 後自動把產生的 vcxproj toolset 固定為 `v143`，通常不需要安裝 ClangCL。
-- 若仍出現 ClangCL 相關錯誤，先刪除 `native/windows-hdr-capture/build` 與 `native/windows-wgc-hdr-capture/build` 後重跑 `npm.cmd run build:native-hdr-win`。
+- 若仍出現 ClangCL 相關錯誤，先刪除 `native/windows-hdr-capture/build`、`native/windows-wgc-hdr-capture/build` 與 `native/windows-overlay-host/build` 後重跑 `npm.cmd run build:native-hdr-win`。
 
 啟動：
 
@@ -278,6 +291,7 @@ GitHub Actions workflow（`.github/workflows/build.yml`）目前包含供應鏈�
 - `native/windows-hdr-capture/`: Windows 原生 HDR 擷取 Node-API 模組
 - `native/windows-hdr-capture/src/addon.cc`: 原生擷取與 tone mapping MVP 實作
 - `native/windows-wgc-hdr-capture/`: Windows WGC 路由 Native 模組骨架（目前與既有 bridge 相容，逐步替換）
+- `native/windows-overlay-host/`: Windows 原生 overlay host（實驗）
 - `.github/workflows/build.yml`: CI 供應鏈檢查與 Windows/Linux 打包發佈流程
 
 ## 注意事項

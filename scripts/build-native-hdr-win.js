@@ -13,6 +13,10 @@ const modules = [
     dir: "native/windows-wgc-hdr-capture",
     vcxproj: "windows_wgc_hdr_capture.vcxproj",
   },
+  {
+    dir: "native/windows-overlay-host",
+    vcxproj: "windows_overlay_host.vcxproj",
+  },
 ];
 
 const quietBuild = String(process.env.CURSORCINE_NATIVE_BUILD_QUIET || "") === "1";

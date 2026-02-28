@@ -42,6 +42,7 @@ const qualitySelect = document.getElementById('qualitySelect');
 const outputQualitySelect = document.getElementById('outputQualitySelect');
 const hdrMappingModeSelect = document.getElementById('hdrMappingModeSelect');
 const overlayWindowBehaviorSelect = document.getElementById('overlayWindowBehaviorSelect');
+const overlayBackendSelect = document.getElementById('overlayBackendSelect');
 const hdrMappingRuntimeEl = document.getElementById('hdrMappingRuntime');
 const hdrMappingProbeEl = document.getElementById('hdrMappingProbe');
 const hdrMappingDiagEl = document.getElementById('hdrMappingDiag');
@@ -97,6 +98,9 @@ const DEFAULT_CURSOR_GLOW_OPACITY = 0.9;
 const CURSOR_GLOW_LAG = 0.18;
 const DEFAULT_PEN_COLOR = '#ff4f70';
 const DEFAULT_PEN_SIZE = 4;
+const LOCAL_PEN_STROKE_FADE_MS = 1200;
+const LOCAL_PEN_POINT_MIN_DISTANCE = 0.8;
+const LOCAL_RECORD_BORDER_BLINK_MS = 2200;
 const DEFAULT_HDR_COMP_STRENGTH = -0.7;
 const DEFAULT_HDR_COMP_HUE = -9;
 const DEFAULT_HDR_COMP_ROLLOFF = 0.7;
@@ -223,9 +227,17 @@ const annotationState = {
   enabled: true,
   interactionMode: 'stable',
   windowBehavior: 'safe',
+  backendRequested: 'electron',
+  backendEffective: 'electron',
+  nativeAvailable: false,
+  nativeReason: '',
+  nativeOverlayActive: false,
+  nativeOverlayError: '',
   autoNoBlock: false,
   autoNoBlockReason: '',
   wheelPauseMs: 0,
+  toggleMode: false,
+  drawToggled: false,
   color: penColorInput?.value || DEFAULT_PEN_COLOR,
   size: Number(penSizeInput?.value || DEFAULT_PEN_SIZE)
 };
@@ -334,6 +346,17 @@ const viewState = {
   outputH: 1
 };
 
+const localPenState = {
+  strokes: [],
+  activeStroke: null,
+  pointer: {
+    inside: false,
+    x: 0,
+    y: 0,
+    mouseDown: false
+  }
+};
+
 const editorState = {
   active: false,
   exportBusy: false,
@@ -390,6 +413,10 @@ function normalizeOverlayWindowBehavior(value) {
   return String(value || '').trim().toLowerCase() === 'always' ? 'always' : 'safe';
 }
 
+function normalizeOverlayBackend(value) {
+  return String(value || '').trim().toLowerCase() === 'native' ? 'native' : 'electron';
+}
+
 function refreshPenToggleLabel() {
   if (!annotationState.enabled) {
     penToggleBtn.textContent = '畫筆模式: 關';
@@ -416,20 +443,52 @@ async function syncOverlayRuntimeState() {
   const nextReason = String(state.autoNoBlockReason || '');
   const nextMode = String(state.interactionMode || annotationState.interactionMode || 'stable').toLowerCase() === 'smooth' ? 'smooth' : 'stable';
   const nextWindowBehavior = normalizeOverlayWindowBehavior(state.windowBehavior || annotationState.windowBehavior || 'safe');
+  const nextBackendRequested = normalizeOverlayBackend(state.backendRequested || annotationState.backendRequested || 'electron');
+  const nextBackendEffective = normalizeOverlayBackend(state.backendEffective || annotationState.backendEffective || 'electron');
+  const nextNativeAvailable = Boolean(state.nativeAvailable);
+  const nextNativeReason = String(state.nativeReason || '');
+  const nextNativeOverlayActive = Boolean(state.nativeOverlayActive);
+  const nextNativeOverlayError = String(state.nativeOverlayError || '');
   const nextWheelPauseMs = Number(state.wheelPauseMs || annotationState.wheelPauseMs || 0);
+  const nextToggleMode = Boolean(state.toggleMode);
+  const nextDrawToggled = Boolean(state.drawToggled);
   const changed =
     annotationState.autoNoBlock !== nextAuto ||
     annotationState.autoNoBlockReason !== nextReason ||
     annotationState.interactionMode !== nextMode ||
     annotationState.windowBehavior !== nextWindowBehavior ||
-    annotationState.wheelPauseMs !== nextWheelPauseMs;
+    annotationState.backendRequested !== nextBackendRequested ||
+    annotationState.backendEffective !== nextBackendEffective ||
+    annotationState.nativeAvailable !== nextNativeAvailable ||
+    annotationState.nativeReason !== nextNativeReason ||
+    annotationState.nativeOverlayActive !== nextNativeOverlayActive ||
+    annotationState.nativeOverlayError !== nextNativeOverlayError ||
+    annotationState.wheelPauseMs !== nextWheelPauseMs ||
+    annotationState.toggleMode !== nextToggleMode ||
+    annotationState.drawToggled !== nextDrawToggled;
   annotationState.autoNoBlock = nextAuto;
   annotationState.autoNoBlockReason = nextReason;
   annotationState.interactionMode = nextMode;
   annotationState.windowBehavior = nextWindowBehavior;
+  annotationState.backendRequested = nextBackendRequested;
+  annotationState.backendEffective = nextBackendEffective;
+  annotationState.nativeAvailable = nextNativeAvailable;
+  annotationState.nativeReason = nextNativeReason;
+  annotationState.nativeOverlayActive = nextNativeOverlayActive;
+  annotationState.nativeOverlayError = nextNativeOverlayError;
   annotationState.wheelPauseMs = nextWheelPauseMs;
+  annotationState.toggleMode = nextToggleMode;
+  annotationState.drawToggled = nextDrawToggled;
+  if (!isLocalOverlayRenderMode()) {
+    resetLocalPenState();
+  } else if (!isLocalPenDrawEnabled()) {
+    localPenState.activeStroke = null;
+  }
   if (overlayWindowBehaviorSelect) {
     overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+  }
+  if (overlayBackendSelect) {
+    overlayBackendSelect.value = annotationState.backendRequested;
   }
   if (!changed) {
     return;
@@ -448,7 +507,14 @@ function refreshRecordingStatusLine() {
   const audioMode = getRecordingAudioModeLabel();
   const penModeLabel = getPenInteractionModeLabel(annotationState.interactionMode);
   const guardLabel = annotationState.autoNoBlock ? ' | 畫筆降級: 防黑屏（非攔截）' : '';
-  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫筆互動: ' + penModeLabel + guardLabel + ' | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
+  const backendLabel = annotationState.backendEffective === 'native' ? 'Native' : 'Electron';
+  const backendFallbackLabel = annotationState.backendRequested === 'native' && annotationState.backendEffective !== 'native'
+    ? (' | Overlay: Native 不可用，已回退 Electron（' + (annotationState.nativeReason || 'UNKNOWN') + '）')
+    : (' | Overlay: ' + backendLabel);
+  const nativeHealthLabel = annotationState.backendEffective === 'native' && annotationState.nativeOverlayError
+    ? ('（' + annotationState.nativeOverlayError + '）')
+    : '';
+  setStatus('錄影中: 可在原始畫面畫筆標註（Ctrl 開啟；滾輪暫停後自動恢復；雙按 Ctrl 關閉） | 畫筆互動: ' + penModeLabel + guardLabel + backendFallbackLabel + nativeHealthLabel + ' | 畫質: ' + qualityLabel + ' | HDR 路徑: ' + routeLabel + ' (' + audioMode + ')');
 }
 
 async function withTimeout(promise, ms, message) {
@@ -1152,6 +1218,172 @@ function drawDoubleClickMarker(now) {
   ctx.restore();
 }
 
+function isLocalOverlayRenderMode() {
+  return annotationState.windowBehavior === 'always';
+}
+
+function isLocalPenDrawEnabled() {
+  if (!annotationState.enabled || !isLocalOverlayRenderMode()) {
+    return false;
+  }
+  return annotationState.toggleMode ? annotationState.drawToggled : true;
+}
+
+function resetLocalPenState() {
+  localPenState.strokes = [];
+  localPenState.activeStroke = null;
+  localPenState.pointer.inside = false;
+  localPenState.pointer.mouseDown = false;
+}
+
+function clearLocalPenStrokes() {
+  localPenState.strokes = [];
+  localPenState.activeStroke = null;
+}
+
+function undoLocalPenStroke() {
+  if (localPenState.activeStroke) {
+    const idx = localPenState.strokes.indexOf(localPenState.activeStroke);
+    if (idx >= 0) {
+      localPenState.strokes.splice(idx, 1);
+    }
+    localPenState.activeStroke = null;
+    return;
+  }
+  localPenState.strokes.pop();
+}
+
+function pushLocalPenPoint(point, now) {
+  if (!point) {
+    return;
+  }
+  if (!localPenState.activeStroke) {
+    const stroke = {
+      color: annotationState.color,
+      size: Math.max(1, Number(annotationState.size || DEFAULT_PEN_SIZE)),
+      points: [point],
+      lastUpdatedAt: now
+    };
+    localPenState.strokes.push(stroke);
+    localPenState.activeStroke = stroke;
+    return;
+  }
+
+  const stroke = localPenState.activeStroke;
+  const lastPoint = stroke.points[stroke.points.length - 1];
+  if (!lastPoint || Math.hypot(point.x - lastPoint.x, point.y - lastPoint.y) >= LOCAL_PEN_POINT_MIN_DISTANCE) {
+    stroke.points.push(point);
+  }
+  stroke.lastUpdatedAt = now;
+}
+
+function updateLocalPenPointer(point, inside, mouseDown, now = performance.now()) {
+  localPenState.pointer.inside = Boolean(inside);
+  localPenState.pointer.mouseDown = Boolean(mouseDown);
+  if (point) {
+    localPenState.pointer.x = Number(point.x || 0);
+    localPenState.pointer.y = Number(point.y || 0);
+  }
+
+  if (!isLocalPenDrawEnabled() || !inside) {
+    localPenState.activeStroke = null;
+    return;
+  }
+
+  if (!mouseDown) {
+    localPenState.activeStroke = null;
+    return;
+  }
+
+  pushLocalPenPoint({
+    x: Number(point && point.x ? point.x : 0),
+    y: Number(point && point.y ? point.y : 0)
+  }, now);
+}
+
+function hasLocalOverlayVisual(now) {
+  if (!isLocalOverlayRenderMode()) {
+    return false;
+  }
+  if (isLocalPenDrawEnabled() && localPenState.pointer.inside) {
+    return true;
+  }
+  for (const stroke of localPenState.strokes) {
+    if ((now - stroke.lastUpdatedAt) < LOCAL_PEN_STROKE_FADE_MS) {
+      return true;
+    }
+  }
+  return true;
+}
+
+function drawLocalRecordingBorder(now) {
+  if (!isLocalOverlayRenderMode()) {
+    return;
+  }
+  const phase = ((now % LOCAL_RECORD_BORDER_BLINK_MS) / LOCAL_RECORD_BORDER_BLINK_MS) * Math.PI * 2;
+  const alpha = 0.35 + ((Math.sin(phase) + 1) / 2) * 0.45;
+  const lineWidth = 3;
+  const inset = Math.ceil(lineWidth / 2) + 1;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 42, 42, ' + alpha.toFixed(3) + ')';
+  ctx.lineWidth = lineWidth;
+  ctx.strokeRect(inset, inset, previewCanvas.width - inset * 2, previewCanvas.height - inset * 2);
+  ctx.restore();
+}
+
+function drawLocalPenStrokes(now) {
+  if (!isLocalOverlayRenderMode()) {
+    return;
+  }
+
+  const { sx, sy, cropW, cropH, outputW, outputH } = viewState;
+  const scaleX = outputW / cropW;
+  const scaleY = outputH / cropH;
+  const remaining = [];
+
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  for (const stroke of localPenState.strokes) {
+    if (!stroke || !Array.isArray(stroke.points) || stroke.points.length <= 0) {
+      continue;
+    }
+    const age = now - Number(stroke.lastUpdatedAt || 0);
+    const alpha = Math.max(0, 1 - age / LOCAL_PEN_STROKE_FADE_MS);
+    if (alpha <= 0) {
+      continue;
+    }
+
+    remaining.push(stroke);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = String(stroke.color || DEFAULT_PEN_COLOR);
+    ctx.lineWidth = Math.max(1, Number(stroke.size || DEFAULT_PEN_SIZE));
+    ctx.beginPath();
+    for (let i = 0; i < stroke.points.length; i += 1) {
+      const pt = stroke.points[i];
+      const x = (pt.x - sx) * scaleX;
+      const y = (pt.y - sy) * scaleY;
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  localPenState.strokes = remaining;
+  ctx.restore();
+
+  if (isLocalPenDrawEnabled() && localPenState.pointer.inside) {
+    drawCursorGlow(localPenState.pointer.x, localPenState.pointer.y);
+  }
+}
+
 function resizeCanvasToSource() {
   const dims = getCaptureVideoDimensions();
   const w = dims.width;
@@ -1204,6 +1436,7 @@ async function updateCursorFromMain() {
     const p = await electronAPI.getCursorPoint(selectedSource.display_id);
     if (!p.inside) {
       cameraState.targetZoom = 1;
+      updateLocalPenPointer(null, false, false, performance.now());
       return;
     }
 
@@ -1269,7 +1502,10 @@ async function updateCursorFromMain() {
       clickState.holdDelayUntil = 0;
       clickState.forceMaxUntil = 0;
     }
+
+    updateLocalPenPointer(cursorPoint, true, Boolean(clickInfo && clickInfo.mouseDown), performance.now());
   } catch (_error) {
+    updateLocalPenPointer(null, false, false, performance.now());
   } finally {
     cursorUpdateInFlight = false;
   }
@@ -1410,7 +1646,8 @@ function drawLoop() {
     Math.abs(glowState.x - lastDrawnGlowX) > DRAW_EPSILON ||
     Math.abs(glowState.y - lastDrawnGlowY) > DRAW_EPSILON;
   const markerActive = now < doubleClickMarkerState.activeUntil;
-  const shouldDraw = !nativeActive || hasNewNativeFrame || cameraMoved || glowMoved || markerActive;
+  const localOverlayVisual = hasLocalOverlayVisual(now);
+  const shouldDraw = !nativeActive || hasNewNativeFrame || cameraMoved || glowMoved || markerActive || localOverlayVisual;
 
   if (!shouldDraw) {
     drawTimer = requestAnimationFrame(drawLoop);
@@ -1437,6 +1674,8 @@ function drawLoop() {
   }
 
   drawDoubleClickMarker(now);
+  drawLocalPenStrokes(now);
+  drawLocalRecordingBorder(now);
   if (!annotationState.enabled) {
     drawCursorGlow(glowState.x, glowState.y);
   }
@@ -3626,6 +3865,7 @@ async function startRecording() {
     lockedX: 0,
     lockedY: 0
   };
+  resetLocalPenState();
 
   doubleClickMarkerState.activeUntil = 0;
   for (const stream of extraCaptureStreams.splice(0)) {
@@ -3745,15 +3985,27 @@ async function startRecording() {
   startRecordingTimer();
 
   await electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior).catch(() => {});
+  await electronAPI.overlaySetBackend(annotationState.backendRequested).catch(() => {});
 
-  // Ensure main window is minimized before creating overlay windows.
-  await electronAPI.minimizeMainWindow().catch(() => {});
+  if (annotationState.windowBehavior === 'safe') {
+    // Safe mode keeps the historical behavior: minimize main window first.
+    await electronAPI.minimizeMainWindow().catch(() => {});
+  }
 
   const overlayCreateResult = await electronAPI.overlayCreate({
     sourceId,
     displayId: selectedSource.display_id
   });
   if (overlayCreateResult && overlayCreateResult.ok) {
+    annotationState.backendRequested = normalizeOverlayBackend(overlayCreateResult.backendRequested || annotationState.backendRequested);
+    annotationState.backendEffective = normalizeOverlayBackend(overlayCreateResult.backendEffective || annotationState.backendEffective);
+    annotationState.nativeAvailable = Boolean(overlayCreateResult.nativeAvailable);
+    annotationState.nativeReason = String(overlayCreateResult.nativeReason || '');
+    annotationState.nativeOverlayActive = Boolean(overlayCreateResult.nativeOverlayActive);
+    annotationState.nativeOverlayError = String(overlayCreateResult.nativeOverlayError || '');
+    if (overlayBackendSelect) {
+      overlayBackendSelect.value = annotationState.backendRequested;
+    }
     const requestedDisplayId = String(overlayCreateResult.requestedDisplayId || '');
     const resolvedDisplayId = String(overlayCreateResult.resolvedDisplayId || '');
     if (requestedDisplayId && resolvedDisplayId && requestedDisplayId !== resolvedDisplayId) {
@@ -3860,6 +4112,7 @@ function stopRecording() {
   lastDrawnZoom = 1;
   lastDrawnGlowX = 0;
   lastDrawnGlowY = 0;
+  resetLocalPenState();
   electronAPI.overlayDestroy().catch(() => {});
 
   recordBtn.disabled = false;
@@ -3878,11 +4131,15 @@ async function setPenMode(enabled) {
   annotationState.enabled = enabled;
   if (!enabled) {
     clickState.doubleClickLocked = false;
+    annotationState.drawToggled = false;
+    resetLocalPenState();
   }
   penToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
 
   try {
     const mode = await electronAPI.overlaySetEnabled(enabled);
+    annotationState.toggleMode = Boolean(mode && mode.toggleMode);
+    annotationState.drawToggled = Boolean(mode && mode.drawToggled);
     if (enabled && mode && mode.toggleMode) {
       annotationState.autoNoBlock = Boolean(mode.autoNoBlock);
       annotationState.autoNoBlockReason = String(mode.autoNoBlockReason || '');
@@ -3902,6 +4159,9 @@ async function setPenMode(enabled) {
   annotationState.autoNoBlock = false;
   annotationState.autoNoBlockReason = '';
   annotationState.wheelPauseMs = 0;
+  if (!enabled) {
+    annotationState.toggleMode = false;
+  }
   refreshPenToggleLabel();
   refreshRecordingStatusLine();
 }
@@ -4139,11 +4399,32 @@ if (overlayWindowBehaviorSelect) {
   overlayWindowBehaviorSelect.addEventListener('change', async () => {
     const selected = normalizeOverlayWindowBehavior(overlayWindowBehaviorSelect.value);
     annotationState.windowBehavior = selected;
+    if (!isLocalOverlayRenderMode()) {
+      resetLocalPenState();
+    }
     const result = await electronAPI.overlaySetWindowBehavior(selected).catch(() => null);
     if (result && result.ok) {
       annotationState.windowBehavior = normalizeOverlayWindowBehavior(result.windowBehavior || selected);
     }
     overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+  });
+}
+
+if (overlayBackendSelect) {
+  overlayBackendSelect.addEventListener('change', async () => {
+    const selected = normalizeOverlayBackend(overlayBackendSelect.value);
+    annotationState.backendRequested = selected;
+    const result = await electronAPI.overlaySetBackend(selected).catch(() => null);
+    if (result && result.ok) {
+      annotationState.backendRequested = normalizeOverlayBackend(result.backendRequested || selected);
+      annotationState.backendEffective = normalizeOverlayBackend(result.backendEffective || 'electron');
+      annotationState.nativeAvailable = Boolean(result.nativeAvailable);
+      annotationState.nativeReason = String(result.nativeReason || '');
+      annotationState.nativeOverlayActive = Boolean(result.nativeOverlayActive);
+      annotationState.nativeOverlayError = String(result.nativeOverlayError || '');
+    }
+    overlayBackendSelect.value = annotationState.backendRequested;
+    refreshRecordingStatusLine();
   });
 }
 
@@ -4159,10 +4440,18 @@ penSizeInput.addEventListener('input', () => {
 });
 
 penUndoBtn.addEventListener('click', () => {
+  if (isLocalOverlayRenderMode()) {
+    undoLocalPenStroke();
+    return;
+  }
   electronAPI.overlayUndo().catch(() => {});
 });
 
 penClearBtn.addEventListener('click', () => {
+  if (isLocalOverlayRenderMode()) {
+    clearLocalPenStrokes();
+    return;
+  }
   electronAPI.overlayClear().catch(() => {});
 });
 
@@ -4186,12 +4475,31 @@ if (penInteractionModeSelect) {
 if (overlayWindowBehaviorSelect) {
   overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
 }
+if (overlayBackendSelect) {
+  overlayBackendSelect.value = annotationState.backendRequested;
+}
 setPenMode(true).catch(() => {});
 electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior)
   .then((result) => {
     if (result && result.ok && overlayWindowBehaviorSelect) {
       annotationState.windowBehavior = normalizeOverlayWindowBehavior(result.windowBehavior || annotationState.windowBehavior);
       overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+    }
+  })
+  .catch(() => {});
+electronAPI.overlaySetBackend(annotationState.backendRequested)
+  .then((result) => {
+    if (!result || !result.ok) {
+      return;
+    }
+    annotationState.backendRequested = normalizeOverlayBackend(result.backendRequested || annotationState.backendRequested);
+    annotationState.backendEffective = normalizeOverlayBackend(result.backendEffective || 'electron');
+    annotationState.nativeAvailable = Boolean(result.nativeAvailable);
+    annotationState.nativeReason = String(result.nativeReason || '');
+    annotationState.nativeOverlayActive = Boolean(result.nativeOverlayActive);
+    annotationState.nativeOverlayError = String(result.nativeOverlayError || '');
+    if (overlayBackendSelect) {
+      overlayBackendSelect.value = annotationState.backendRequested;
     }
   })
   .catch(() => {});

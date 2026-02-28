@@ -6,6 +6,7 @@ Thumbs.db
 dist/
 native/windows-hdr-capture/build/
 native/windows-wgc-hdr-capture/build/
+native/windows-overlay-host/build/
 playwright-report/
 test-results/
 coverage/

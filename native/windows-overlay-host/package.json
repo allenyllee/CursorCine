@@ -1,0 +1,7 @@
+{
+  "name": "windows-overlay-host",
+  "version": "0.1.0",
+  "description": "Windows native overlay host addon for CursorCine",
+  "main": "index.js",
+  "gypfile": true
+}

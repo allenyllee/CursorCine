@@ -80,7 +80,15 @@
               Overlay 行為
               <select id="overlayWindowBehaviorSelect">
                 <option value="safe" selected>1 Safe（主視窗顯示時關閉紅框）</option>
-                <option value="always">2 Always（主視窗顯示時也顯示紅框）</option>
+                <option value="always">2 Always（同步顯示原畫面與錄影畫面）</option>
+              </select>
+            </label>
+
+            <label>
+              Overlay 後端
+              <select id="overlayBackendSelect">
+                <option value="electron" selected>Electron（目前穩定）</option>
+                <option value="native">Native Windows（實驗）</option>
               </select>
             </label>
             <p class="hdr-mapping-meta">
