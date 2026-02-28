@@ -449,5 +449,85 @@ window.addEventListener('resize', () => {
   state.logicalHeight = Math.max(1, Number(window.innerHeight || state.logicalHeight || 1));
   resizeCanvas();
 });
+
+// E2E helper: allow tests to inspect overlay runtime state and inject
+// a deterministic horizontal stroke when OS-level pointer routing is flaky.
+window.__cursorcineOverlayTest = {
+  getState() {
+    return {
+      enabled: Boolean(state.enabled),
+      drawActive: Boolean(state.drawActive),
+      recordingIndicator: Boolean(state.recordingIndicator),
+      canvasWidth: Number(canvas.width || 0),
+      canvasHeight: Number(canvas.height || 0)
+    };
+  },
+  drawHorizontalStroke(startRatio = 0.02, endRatio = 0.98, yRatio = 0.5, steps = 30) {
+    if (!state.enabled || !state.drawActive) {
+      return { ok: false, reason: 'DRAW_INACTIVE' };
+    }
+    const width = Math.max(1, Number(canvas.width || 1));
+    const height = Math.max(1, Number(canvas.height || 1));
+    const x1 = Math.max(0, Math.min(width - 1, Math.floor(width * Number(startRatio || 0))));
+    const x2 = Math.max(0, Math.min(width - 1, Math.floor(width * Number(endRatio || 1))));
+    const y = Math.max(0, Math.min(height - 1, Math.floor(height * Number(yRatio || 0.5))));
+    const n = Math.max(2, Math.floor(Number(steps || 30)));
+
+    beginStroke({ x: x1, y });
+    for (let i = 1; i <= n; i += 1) {
+      const x = x1 + ((x2 - x1) * i / n);
+      extendStroke({ x, y });
+    }
+    endStroke();
+    return {
+      ok: true,
+      x1,
+      x2,
+      y,
+      width
+    };
+  },
+  getMetrics() {
+    drawAll(performance.now());
+    const width = Math.max(1, Number(canvas.width || 1));
+    const height = Math.max(1, Number(canvas.height || 1));
+    const ctx2d = canvas.getContext('2d');
+    if (!ctx2d) {
+      return {
+        alphaCount: 0,
+        drawnWidth: 0,
+        canvasWidth: width,
+        canvasHeight: height,
+        pngBase64: ''
+      };
+    }
+    const data = ctx2d.getImageData(0, 0, width, height).data;
+    let alphaCount = 0;
+    let minX = width;
+    let maxX = -1;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] > 0) {
+        alphaCount += 1;
+        const pixelIndex = Math.floor(i / 4);
+        const x = pixelIndex % width;
+        if (x < minX) {
+          minX = x;
+        }
+        if (x > maxX) {
+          maxX = x;
+        }
+      }
+    }
+    const dataUrl = canvas.toDataURL('image/png');
+    const idx = dataUrl.indexOf(',');
+    return {
+      alphaCount,
+      drawnWidth: maxX >= minX ? (maxX - minX + 1) : 0,
+      canvasWidth: width,
+      canvasHeight: height,
+      pngBase64: idx >= 0 ? dataUrl.slice(idx + 1) : ''
+    };
+  }
+};
 resizeCanvas();
 renderLoop();

@@ -168,6 +168,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   overlaySetPenStyle: (style) => ipcRenderer.invoke('overlay:set-pen-style', style),
   overlayUndo: () => ipcRenderer.invoke('overlay:undo'),
   overlayClear: () => ipcRenderer.invoke('overlay:clear'),
+  overlayTestDrawHorizontal: (payload) => ipcRenderer.invoke('overlay:test-draw-horizontal', payload),
   overlayDoubleClickMarker: (payload) => ipcRenderer.invoke('overlay:double-click-marker', payload),
   hdrWorkerStatus: () => ipcRenderer.invoke('hdr:worker-status'),
   hdrWorkerStart: (payload) => ipcRenderer.invoke('hdr:worker-start', payload),

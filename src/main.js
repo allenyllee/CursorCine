@@ -2179,6 +2179,46 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
+  ipcMain.handle('overlay:test-draw-horizontal', async (_event, payload) => {
+    if (!CURSORCINE_TEST_MODE) {
+      return { ok: false, reason: 'TEST_MODE_ONLY' };
+    }
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return { ok: false, reason: 'NO_OVERLAY' };
+    }
+    const startRatio = Number(payload && payload.startRatio);
+    const endRatio = Number(payload && payload.endRatio);
+    const yRatio = Number(payload && payload.yRatio);
+    const steps = Number(payload && payload.steps);
+    const script = `(function () {
+      const helper = window.__cursorcineOverlayTest;
+      if (!helper || typeof helper.getMetrics !== 'function' || typeof helper.drawHorizontalStroke !== 'function') {
+        return { ok: false, reason: 'NO_TEST_HELPER' };
+      }
+      const before = helper.getMetrics();
+      const draw = helper.drawHorizontalStroke(${Number.isFinite(startRatio) ? startRatio : 0.02}, ${Number.isFinite(endRatio) ? endRatio : 0.98}, ${Number.isFinite(yRatio) ? yRatio : 0.5}, ${Number.isFinite(steps) ? steps : 40});
+      const after = helper.getMetrics();
+      return {
+        ok: Boolean(draw && draw.ok),
+        draw: draw || null,
+        before: before || null,
+        after: after || null
+      };
+    })();`;
+    try {
+      const result = await overlayWindow.webContents.executeJavaScript(script, true);
+      return result && typeof result === 'object'
+        ? { ok: Boolean(result.ok), ...result }
+        : { ok: false, reason: 'INVALID_RESULT' };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'EXEC_FAILED',
+        message: error && error.message ? error.message : 'overlay test draw failed'
+      };
+    }
+  });
+
   ipcMain.handle('overlay:wheel', () => {
     pauseOverlayByWheel();
     return { ok: true };
