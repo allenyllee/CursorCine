@@ -57,6 +57,8 @@ const HDR_SHARED_CONTROL = {
 const CURSORCINE_TEST_MODE = String(process.env.CURSORCINE_TEST_MODE || '0') === '1';
 const CURSORCINE_TEST_CAPTURE_MODE = String(process.env.CURSORCINE_TEST_CAPTURE_MODE || 'mock').trim().toLowerCase();
 const CURSORCINE_TEST_EXPORT_MODE = String(process.env.CURSORCINE_TEST_EXPORT_MODE || 'mock').trim().toLowerCase();
+const CURSORCINE_DISABLE_CLICK_HOOK = String(process.env.CURSORCINE_DISABLE_CLICK_HOOK || '0') === '1';
+const CURSORCINE_E2E_FORCE_POINTER_INSIDE = String(process.env.CURSORCINE_E2E_FORCE_POINTER_INSIDE || '0') === '1';
 
 function encodeHdrPixelFormat(value) {
   const fmt = String(value || '').trim().toUpperCase();
@@ -813,6 +815,9 @@ function isPointerInsideOverlayBounds() {
   if (!overlayBounds) {
     return false;
   }
+  if (CURSORCINE_E2E_FORCE_POINTER_INSIDE) {
+    return true;
+  }
   const p = screen.getCursorScreenPoint();
   return (
     p.x >= overlayBounds.x &&
@@ -828,11 +833,14 @@ function emitOverlayPointer() {
   }
 
   const p = screen.getCursorScreenPoint();
-  const inside =
-    p.x >= overlayBounds.x &&
-    p.x < overlayBounds.x + overlayBounds.width &&
-    p.y >= overlayBounds.y &&
-    p.y < overlayBounds.y + overlayBounds.height;
+  const inside = CURSORCINE_E2E_FORCE_POINTER_INSIDE
+    ? true
+    : (
+      p.x >= overlayBounds.x &&
+      p.x < overlayBounds.x + overlayBounds.width &&
+      p.y >= overlayBounds.y &&
+      p.y < overlayBounds.y + overlayBounds.height
+    );
 
   overlayWindow.webContents.send("overlay:global-pointer", {
     x: p.x - overlayBounds.x,
@@ -965,6 +973,11 @@ function applyOverlayMouseMode() {
 
 
 function initGlobalClickHook() {
+  if (CURSORCINE_DISABLE_CLICK_HOOK) {
+    clickHookEnabled = false;
+    clickHookError = 'uiohook disabled by CURSORCINE_DISABLE_CLICK_HOOK';
+    return;
+  }
   try {
     const { uIOhook } = require('uiohook-napi');
     uIOhook.on('mousedown', () => {
@@ -1225,6 +1238,7 @@ function createOverlayWindow(displayId) {
   overlayBorderWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayBorderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayBorderWindow.setFocusable(false);
+  overlayBorderWindow.setTitle('CursorCine Overlay Border');
   overlayBorderWindow.blur();
   applyOverlayWindowBounds(overlayBorderWindow, b);
   overlayBorderWindow.loadFile(path.join(__dirname, 'overlay.html'));
@@ -1283,6 +1297,7 @@ function createOverlayWindow(displayId) {
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setFocusable(false);
+  overlayWindow.setTitle('CursorCine Overlay Draw');
   overlayWindow.blur();
   applyOverlayWindowBounds(overlayWindow, b);
   overlayWindow.loadFile(path.join(__dirname, 'overlay.html'));
