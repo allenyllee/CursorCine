@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog, utilityProcess, session, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, desktopCapturer, dialog, utilityProcess, session, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fsNative = require('fs');
 const fs = require('fs/promises');
@@ -38,11 +38,28 @@ const HDR_RUNTIME_MAX_FRAME_BYTES = 1536 * 1024;
 const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_IPC || '1') !== '0';
 const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '1') !== '0';
 const HDR_WGC_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_WGC || '1') !== '0';
+const HDR_NATIVE_PREVIEW_STREAM_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM || '1') !== '0';
 const HDR_ROUTE_PREFERENCE = String(process.env.CURSORCINE_HDR_ROUTE_PREFERENCE || 'auto').trim().toLowerCase();
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
 const HDR_WGC_PIPELINE_STAGE = HDR_WGC_ROUTE_ENABLED ? 'wgc-worker-latest-frame-v1' : 'wgc-disabled';
 const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 16;
+const HDR_PREVIEW_DEFAULT_MAX_FPS = Math.max(
+  8,
+  Math.min(60, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_FPS || 20) || 20)
+);
+const HDR_PREVIEW_DEFAULT_QUALITY = Math.max(
+  40,
+  Math.min(95, Number(process.env.CURSORCINE_HDR_PREVIEW_QUALITY || 58) || 58)
+);
+const HDR_PREVIEW_DEFAULT_MAX_WIDTH = Math.max(
+  320,
+  Math.min(2560, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_WIDTH || 1280) || 1280)
+);
+const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = Math.max(
+  180,
+  Math.min(1440, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_HEIGHT || 800) || 800)
+);
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
   FRAME_SEQ: 1,
@@ -135,6 +152,8 @@ let hdrCaptureSessionSeq = 1;
 const hdrCaptureSessions = new Map();
 let hdrSharedSessionSeq = 1;
 const hdrSharedSessions = new Map();
+let hdrPreviewStreamSeq = 1;
+const hdrPreviewStreams = new Map();
 let hdrWorkerProcess = null;
 let hdrWorkerState = 'stopped';
 let hdrWorkerLastError = '';
@@ -195,6 +214,159 @@ function ewma(prev, sample, alpha = 0.2) {
     return p;
   }
   return p > 0 ? (p * (1 - alpha) + s * alpha) : s;
+}
+
+function normalizePreviewCodec(value) {
+  const codec = String(value || '').trim().toLowerCase();
+  if (codec === 'webp') {
+    return 'webp';
+  }
+  return 'jpeg';
+}
+
+function rgbaToBgraBuffer(input) {
+  const src = Buffer.isBuffer(input) ? input : Buffer.from(input || []);
+  const out = Buffer.allocUnsafe(src.length);
+  for (let i = 0; i + 3 < src.length; i += 4) {
+    out[i] = src[i + 2];
+    out[i + 1] = src[i + 1];
+    out[i + 2] = src[i];
+    out[i + 3] = src[i + 3];
+  }
+  return out;
+}
+
+function encodeSessionPreviewFrame(session, stream) {
+  if (!session || !stream || !session.latestFrameBytes || !Buffer.isBuffer(session.latestFrameBytes)) {
+    return { ok: false, reason: 'NO_FRAME' };
+  }
+  const now = Date.now();
+  const minIntervalMs = Math.max(1, Math.round(1000 / Math.max(1, Number(stream.maxFps || HDR_PREVIEW_DEFAULT_MAX_FPS))));
+  if (stream.lastEncodedAt > 0 && (now - stream.lastEncodedAt) < minIntervalMs) {
+    return { ok: false, reason: 'THROTTLED' };
+  }
+
+  const nextSeq = Number(session.latestFrameSeq || 0);
+  if (nextSeq <= Number(stream.lastEncodedSeq || 0)) {
+    return { ok: false, reason: 'NO_NEW_FRAME' };
+  }
+
+  const width = Math.max(1, Number(session.latestWidth || session.width || 1));
+  const height = Math.max(1, Number(session.latestHeight || session.height || 1));
+  const stride = Math.max(width * 4, Number(session.latestStride || session.stride || width * 4));
+  const rowBytes = width * 4;
+  const expectedBytes = Math.max(1, stride * height);
+  const sourceBytes = session.latestFrameBytes.length >= expectedBytes
+    ? session.latestFrameBytes.subarray(0, expectedBytes)
+    : session.latestFrameBytes;
+  let packedRgba = null;
+  if (stride === rowBytes) {
+    packedRgba = sourceBytes.length >= (rowBytes * height)
+      ? sourceBytes.subarray(0, rowBytes * height)
+      : sourceBytes;
+  } else {
+    packedRgba = Buffer.allocUnsafe(rowBytes * height);
+    for (let row = 0; row < height; row += 1) {
+      const srcOffset = row * stride;
+      const dstOffset = row * rowBytes;
+      const copyBytes = Math.max(0, Math.min(rowBytes, sourceBytes.length - srcOffset));
+      if (copyBytes > 0) {
+        sourceBytes.copy(packedRgba, dstOffset, srcOffset, srcOffset + copyBytes);
+      }
+      if (copyBytes < rowBytes) {
+        packedRgba.fill(0, dstOffset + copyBytes, dstOffset + rowBytes);
+      }
+    }
+  }
+  const pixelFormat = String(session.latestPixelFormat || 'RGBA8').toUpperCase();
+  const encodeStartMs = Number(process.hrtime.bigint()) / 1e6;
+  const bgra = pixelFormat === 'BGRA8' ? packedRgba : rgbaToBgraBuffer(packedRgba);
+  let image = nativeImage.createFromBitmap(bgra, {
+    width,
+    height,
+    scaleFactor: 1
+  });
+  const maxWidth = Math.max(320, Math.min(2560, Number(stream.maxWidth || HDR_PREVIEW_DEFAULT_MAX_WIDTH) || HDR_PREVIEW_DEFAULT_MAX_WIDTH));
+  const maxHeight = Math.max(180, Math.min(1440, Number(stream.maxHeight || HDR_PREVIEW_DEFAULT_MAX_HEIGHT) || HDR_PREVIEW_DEFAULT_MAX_HEIGHT));
+  let targetWidth = width;
+  let targetHeight = height;
+  if (width > maxWidth || height > maxHeight) {
+    const ratio = Math.min(maxWidth / width, maxHeight / height);
+    targetWidth = Math.max(2, Math.floor(width * ratio));
+    targetHeight = Math.max(2, Math.floor(height * ratio));
+    image = image.resize({
+      width: targetWidth,
+      height: targetHeight,
+      quality: 'good'
+    });
+  }
+
+  const requestedCodec = normalizePreviewCodec(stream.codec);
+  const quality = Math.max(40, Math.min(95, Number(stream.quality || HDR_PREVIEW_DEFAULT_QUALITY) || HDR_PREVIEW_DEFAULT_QUALITY));
+  let mime = 'image/jpeg';
+  let bytes = image.toJPEG(quality);
+  // Electron nativeImage currently does not expose WebP encoding in main API.
+  if (requestedCodec === 'webp') {
+    mime = 'image/jpeg';
+  }
+  if (!Buffer.isBuffer(bytes) || bytes.length <= 0) {
+    return { ok: false, reason: 'ENCODE_FAILED' };
+  }
+
+  const encodeEndMs = Number(process.hrtime.bigint()) / 1e6;
+  if (nextSeq > Number(stream.lastEncodedSeq || 0) + 1) {
+    stream.droppedByBackpressure += nextSeq - Number(stream.lastEncodedSeq || 0) - 1;
+  }
+  if (stream.lastFrameTimestampMs > 0 && session.latestTimestampMs > 0) {
+    const delta = Math.max(1, Number(session.latestTimestampMs) - Number(stream.lastFrameTimestampMs));
+    stream.jitterMsAvg = ewma(stream.jitterMsAvg, Math.abs(delta - minIntervalMs));
+  }
+  stream.lastFrameTimestampMs = Number(session.latestTimestampMs || now);
+  stream.lastEncodedSeq = nextSeq;
+  stream.lastEncodedAt = now;
+  stream.latestSeq = nextSeq;
+  stream.latestTimestampMs = Number(session.latestTimestampMs || now);
+  stream.latestWidth = targetWidth;
+  stream.latestHeight = targetHeight;
+  stream.latestMime = mime;
+  stream.latestBytes = bytes;
+  stream.encodeMsAvg = ewma(stream.encodeMsAvg, encodeEndMs - encodeStartMs);
+  stream.bytesPerFrameAvg = ewma(stream.bytesPerFrameAvg, Number(bytes.length || 0));
+  if (session.perf) {
+    session.perf.previewEncodeMsAvg = Number(stream.encodeMsAvg || 0);
+    session.perf.previewBytesPerFrameAvg = Number(stream.bytesPerFrameAvg || 0);
+    session.perf.previewDroppedByBackpressure = Number(stream.droppedByBackpressure || 0);
+    session.perf.previewJitterMsAvg = Number(stream.jitterMsAvg || 0);
+  }
+  return { ok: true };
+}
+
+function notifyPreviewStreamWaiters(stream) {
+  if (!stream || !Array.isArray(stream.waiters) || stream.waiters.length <= 0) {
+    return;
+  }
+  const waiters = stream.waiters.splice(0, stream.waiters.length);
+  for (const waiter of waiters) {
+    clearTimeout(waiter.timer);
+    waiter.resolve(true);
+  }
+}
+
+function tryUpdatePreviewStreamForSession(session) {
+  if (!session || !session.previewStreamId) {
+    return;
+  }
+  if (session.workerMode && session.workerPreviewActive) {
+    return;
+  }
+  const stream = hdrPreviewStreams.get(Number(session.previewStreamId || 0));
+  if (!stream) {
+    return;
+  }
+  const encodeResult = encodeSessionPreviewFrame(session, stream);
+  if (encodeResult && encodeResult.ok) {
+    notifyPreviewStreamWaiters(stream);
+  }
 }
 
 function ensureHdrFrameServer() {
@@ -1972,6 +2144,14 @@ function runQuitCleanupSync() {
   clearOverlayPointerEmitSchedule();
   overlayNativeLastPointerKey = '';
   overlayNativeLastPointerMeta = null;
+  for (const [streamId, stream] of hdrPreviewStreams) {
+    hdrPreviewStreams.delete(streamId);
+    if (stream && Array.isArray(stream.waiters)) {
+      for (const waiter of stream.waiters) {
+        clearTimeout(waiter.timer);
+      }
+    }
+  }
   for (const sessionId of Array.from(hdrSharedSessions.keys())) {
     stopHdrSharedSession(sessionId);
   }
@@ -2006,6 +2186,21 @@ function stopHdrSharedSession(sessionId) {
     return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
   }
   hdrSharedSessions.delete(sessionId);
+  if (session.previewStreamId) {
+    const previewStreamId = Number(session.previewStreamId || 0);
+    const stream = hdrPreviewStreams.get(previewStreamId);
+    if (stream) {
+      if (Array.isArray(stream.waiters)) {
+        for (const waiter of stream.waiters) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(false);
+        }
+      }
+      hdrPreviewStreams.delete(previewStreamId);
+    }
+    session.previewStreamId = 0;
+  }
+  session.workerPreviewActive = false;
   clearTimeout(session.pumpTimer);
   if (session.frameToken) {
     hdrFrameTokens.delete(String(session.frameToken));
@@ -2117,6 +2312,7 @@ function pumpHdrSharedSession(sessionId) {
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
       session.latestFrameBytes = src;
+      tryUpdatePreviewStreamForSession(session);
       const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
       if (session.perf) {
         session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
@@ -2196,7 +2392,7 @@ async function pumpHdrWorkerSession(sessionId) {
   if (!session || !session.workerMode) {
     return;
   }
-  if (session.workerDirectShared) {
+  if (session.workerDirectShared || session.workerPreviewActive) {
     clearTimeout(session.pumpTimer);
     session.pumpTimer = 0;
     return;
@@ -2236,6 +2432,7 @@ async function pumpHdrWorkerSession(sessionId) {
       session.latestStride = stride;
       session.latestPixelFormat = String(frameResult.pixelFormat || 'RGBA8');
       session.latestFrameBytes = src;
+      tryUpdatePreviewStreamForSession(session);
       const copyEndMs = Number(process.hrtime.bigint()) / 1e6;
       if (session.perf) {
         session.perf.copyMsAvg = ewma(session.perf.copyMsAvg, copyEndMs - copyStartMs);
@@ -3129,6 +3326,7 @@ app.whenReady().then(() => {
         sender: _event.sender,
         workerMode,
         workerDirectShared: false,
+        workerPreviewActive: false,
         runtimeRoute: activeSelection.route,
         fallbackLevel: activeSelection.fallbackLevel,
         pipelineStage: activeSelection.route === 'wgc-v1' ? HDR_WGC_PIPELINE_STAGE : HDR_NATIVE_PIPELINE_STAGE,
@@ -3162,6 +3360,7 @@ app.whenReady().then(() => {
         latestStride: stride,
         latestPixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         latestFrameBytes: null,
+        previewStreamId: 0,
         pumpTimer: 0,
         perf: {
           readMsAvg: 0,
@@ -3171,6 +3370,10 @@ app.whenReady().then(() => {
           bytesPerSec: 0,
           pumpJitterMsAvg: 0,
           frameIntervalMsAvg: 0,
+          previewEncodeMsAvg: 0,
+          previewBytesPerFrameAvg: 0,
+          previewDroppedByBackpressure: 0,
+          previewJitterMsAvg: 0,
           lastPumpAt: 0,
           lastFrameAt: 0
         }
@@ -3290,8 +3493,60 @@ app.whenReady().then(() => {
     return { ok: true, bound: true };
   }
 
+  function buildPreviewReadPayload(stream) {
+    return {
+      ok: true,
+      seq: Number(stream.latestSeq || 0),
+      tsMs: Number(stream.latestTimestampMs || Date.now()),
+      width: Number(stream.latestWidth || 0),
+      height: Number(stream.latestHeight || 0),
+      mime: String(stream.latestMime || 'image/jpeg'),
+      bytes: stream.latestBytes
+        ? stream.latestBytes.buffer.slice(
+          stream.latestBytes.byteOffset,
+          stream.latestBytes.byteOffset + stream.latestBytes.byteLength
+        )
+        : null
+    };
+  }
+
   ipcMain.handle('hdr:shared-bind', async (_event, payload) => {
     return bindHdrSharedBuffers(payload);
+  });
+
+  ipcMain.handle('hdr:shared-preflight', (_event, payload) => {
+    const sharedFrameBuffer = payload && payload.sharedFrameBuffer;
+    const sharedControlBuffer = payload && payload.sharedControlBuffer;
+    if (!(sharedFrameBuffer instanceof SharedArrayBuffer) || !(sharedControlBuffer instanceof SharedArrayBuffer)) {
+      return {
+        ok: false,
+        reason: 'INVALID_SHARED_BUFFER',
+        message: 'SharedArrayBuffer payload is invalid.'
+      };
+    }
+    try {
+      const frameView = new Uint8Array(sharedFrameBuffer);
+      const controlView = new Int32Array(sharedControlBuffer);
+      if (!frameView || frameView.length <= 0 || !controlView || controlView.length <= 0) {
+        return {
+          ok: false,
+          reason: 'INVALID_SHARED_BUFFER',
+          message: 'SharedArrayBuffer views are empty.'
+        };
+      }
+      return {
+        ok: true,
+        reason: 'OK',
+        frameBytes: Number(sharedFrameBuffer.byteLength || 0),
+        controlBytes: Number(sharedControlBuffer.byteLength || 0)
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'BIND_EXCEPTION',
+        message: error && error.message ? error.message : 'Shared preflight failed'
+      };
+    }
   });
 
   ipcMain.on('hdr:shared-bind-async', async (event, payload) => {
@@ -3311,6 +3566,257 @@ app.whenReady().then(() => {
       return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
     }
     return stopHdrSharedSession(sessionId);
+  });
+
+  ipcMain.handle('hdr:preview-start', (_event, payload) => {
+    if (!HDR_NATIVE_PREVIEW_STREAM_ENABLED) {
+      return { ok: false, reason: 'PREVIEW_STREAM_DISABLED', message: 'Native preview stream disabled.' };
+    }
+    const sessionId = Number(payload && payload.sessionId);
+    if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '工作階段識別碼無效。' };
+    }
+    const sessionObj = hdrSharedSessions.get(sessionId);
+    if (!sessionObj) {
+      return { ok: false, reason: 'INVALID_SESSION', message: '找不到 HDR 共享工作階段。' };
+    }
+    if (sessionObj.previewStreamId) {
+      const existing = hdrPreviewStreams.get(Number(sessionObj.previewStreamId || 0));
+      if (existing) {
+        return {
+          ok: true,
+          streamId: Number(existing.streamId || 0),
+          width: Number(sessionObj.latestWidth || sessionObj.width || 0),
+          height: Number(sessionObj.latestHeight || sessionObj.height || 0),
+          transportMode: 'native-preview-stream',
+          codec: String(existing.codec || 'jpeg')
+        };
+      }
+      sessionObj.previewStreamId = 0;
+    }
+
+    const streamId = hdrPreviewStreamSeq++;
+    const codec = normalizePreviewCodec(payload && payload.codec ? payload.codec : 'jpeg');
+    const quality = Math.max(40, Math.min(95, Number(payload && payload.quality ? payload.quality : HDR_PREVIEW_DEFAULT_QUALITY) || HDR_PREVIEW_DEFAULT_QUALITY));
+    const maxFps = Math.max(8, Math.min(60, Number(payload && payload.maxFps ? payload.maxFps : HDR_PREVIEW_DEFAULT_MAX_FPS) || HDR_PREVIEW_DEFAULT_MAX_FPS));
+    const maxWidth = Math.max(320, Math.min(2560, Number(payload && payload.maxWidth ? payload.maxWidth : HDR_PREVIEW_DEFAULT_MAX_WIDTH) || HDR_PREVIEW_DEFAULT_MAX_WIDTH));
+    const maxHeight = Math.max(180, Math.min(1440, Number(payload && payload.maxHeight ? payload.maxHeight : HDR_PREVIEW_DEFAULT_MAX_HEIGHT) || HDR_PREVIEW_DEFAULT_MAX_HEIGHT));
+    const stream = {
+      streamId,
+      sessionId,
+      workerMode: Boolean(sessionObj.workerMode),
+      codec,
+      quality,
+      maxFps,
+      maxWidth,
+      maxHeight,
+      latestSeq: 0,
+      latestTimestampMs: 0,
+      latestWidth: Number(sessionObj.latestWidth || sessionObj.width || 0),
+      latestHeight: Number(sessionObj.latestHeight || sessionObj.height || 0),
+      latestMime: 'image/jpeg',
+      latestBytes: null,
+      lastEncodedSeq: 0,
+      lastEncodedAt: 0,
+      lastFrameTimestampMs: 0,
+      encodeMsAvg: 0,
+      bytesPerFrameAvg: 0,
+      droppedByBackpressure: 0,
+      jitterMsAvg: 0,
+      waiters: []
+    };
+    hdrPreviewStreams.set(streamId, stream);
+    sessionObj.previewStreamId = streamId;
+    if (sessionObj.workerMode) {
+      sessionObj.workerPreviewActive = true;
+      clearTimeout(sessionObj.pumpTimer);
+      sessionObj.pumpTimer = 0;
+      return hdrWorkerRequest('preview-config', {
+        codec: stream.codec,
+        quality: stream.quality,
+        maxFps: stream.maxFps,
+        maxWidth: stream.maxWidth,
+        maxHeight: stream.maxHeight
+      }, 2000).then((cfgResult) => {
+        if (!cfgResult || cfgResult.ok === false) {
+          sessionObj.workerPreviewActive = false;
+          // Keep stream alive and fallback to main-process preview encoder.
+          stream.workerMode = false;
+          pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
+          tryUpdatePreviewStreamForSession(sessionObj);
+          return {
+            ok: true,
+            streamId,
+            width: Number(sessionObj.latestWidth || sessionObj.width || 0),
+            height: Number(sessionObj.latestHeight || sessionObj.height || 0),
+            transportMode: 'native-preview-stream',
+            codec: stream.codec,
+            workerPreviewNativeImage: false,
+            workerPreviewFallback: 'main-preview-encoder'
+          };
+        }
+        if (!cfgResult.nativeImageAvailable) {
+          sessionObj.workerPreviewActive = false;
+          // Worker runtime cannot encode JPEG; fallback to main-process encoder.
+          stream.workerMode = false;
+          pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
+          tryUpdatePreviewStreamForSession(sessionObj);
+          return {
+            ok: true,
+            streamId,
+            width: Number(sessionObj.latestWidth || sessionObj.width || 0),
+            height: Number(sessionObj.latestHeight || sessionObj.height || 0),
+            transportMode: 'native-preview-stream',
+            codec: stream.codec,
+            workerPreviewNativeImage: false,
+            workerPreviewFallback: 'main-preview-encoder'
+          };
+        }
+        return {
+          ok: true,
+          streamId,
+          width: Number(sessionObj.latestWidth || sessionObj.width || 0),
+          height: Number(sessionObj.latestHeight || sessionObj.height || 0),
+          transportMode: 'native-preview-stream',
+          codec: stream.codec,
+          workerPreviewNativeImage: true
+        };
+      }).catch((error) => {
+        sessionObj.workerPreviewActive = false;
+        // Worker preview config exception: fallback to main preview encoder.
+        stream.workerMode = false;
+        pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
+        tryUpdatePreviewStreamForSession(sessionObj);
+        return {
+          ok: true,
+          streamId,
+          width: Number(sessionObj.latestWidth || sessionObj.width || 0),
+          height: Number(sessionObj.latestHeight || sessionObj.height || 0),
+          transportMode: 'native-preview-stream',
+          codec: stream.codec,
+          workerPreviewNativeImage: false,
+          workerPreviewFallback: 'main-preview-encoder',
+          workerPreviewFallbackError: error && error.message ? error.message : 'worker preview config failed'
+        };
+      });
+    }
+    tryUpdatePreviewStreamForSession(sessionObj);
+    return {
+      ok: true,
+      streamId,
+      width: Number(sessionObj.latestWidth || sessionObj.width || 0),
+      height: Number(sessionObj.latestHeight || sessionObj.height || 0),
+      transportMode: 'native-preview-stream',
+      codec: stream.codec
+    };
+  });
+
+  ipcMain.handle('hdr:preview-read', async (_event, payload) => {
+    const streamId = Number(payload && payload.streamId);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream id invalid.' };
+    }
+    const stream = hdrPreviewStreams.get(streamId);
+    if (!stream) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream not found.' };
+    }
+    const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
+    if (!sessionObj) {
+      return { ok: false, reason: 'INVALID_SESSION', message: 'HDR 共享工作階段已結束。' };
+    }
+    const minSeq = Math.max(0, Number(payload && payload.minSeq ? payload.minSeq : 0));
+
+    if (stream.workerMode) {
+      const workerPreview = await hdrWorkerRequest('frame-read-preview', {}, 1200).catch((error) => ({
+        ok: false,
+        reason: 'WORKER_PREVIEW_READ_FAILED',
+        message: error && error.message ? error.message : 'worker preview read failed'
+      }));
+      if (!workerPreview || workerPreview.ok === false) {
+        return {
+          ok: false,
+          reason: String((workerPreview && workerPreview.reason) || 'WORKER_PREVIEW_READ_FAILED'),
+          message: String((workerPreview && workerPreview.message) || 'worker preview read failed')
+        };
+      }
+      if (!workerPreview.hasFrame || Number(workerPreview.frameSeq || 0) <= minSeq || !workerPreview.bytes) {
+        return { ok: true, noFrame: true };
+      }
+      stream.latestSeq = Number(workerPreview.frameSeq || 0);
+      stream.latestTimestampMs = Number(workerPreview.lastFrameAt || Date.now());
+      stream.latestWidth = Number(workerPreview.width || sessionObj.latestWidth || sessionObj.width || 0);
+      stream.latestHeight = Number(workerPreview.height || sessionObj.latestHeight || sessionObj.height || 0);
+      stream.latestMime = String(workerPreview.mime || 'image/jpeg');
+      stream.latestBytes = Buffer.isBuffer(workerPreview.bytes) ? workerPreview.bytes : Buffer.from(workerPreview.bytes);
+      if (workerPreview.perf && typeof workerPreview.perf === 'object') {
+        stream.encodeMsAvg = Number(workerPreview.perf.previewEncodeMsAvg || 0);
+        stream.bytesPerFrameAvg = Number(workerPreview.perf.previewBytesPerFrameAvg || 0);
+        stream.droppedByBackpressure = Number(workerPreview.perf.previewDroppedByBackpressure || 0);
+        stream.jitterMsAvg = Number(workerPreview.perf.previewJitterMsAvg || 0);
+        if (sessionObj.perf) {
+          sessionObj.perf.previewEncodeMsAvg = stream.encodeMsAvg;
+          sessionObj.perf.previewBytesPerFrameAvg = stream.bytesPerFrameAvg;
+          sessionObj.perf.previewDroppedByBackpressure = stream.droppedByBackpressure;
+          sessionObj.perf.previewJitterMsAvg = stream.jitterMsAvg;
+        }
+      }
+      return buildPreviewReadPayload(stream);
+    }
+
+    tryUpdatePreviewStreamForSession(sessionObj);
+    if (stream.latestBytes && Number(stream.latestSeq || 0) > minSeq) {
+      return buildPreviewReadPayload(stream);
+    }
+
+    const timeoutMs = Math.max(20, Math.min(400, Number(payload && payload.timeoutMs ? payload.timeoutMs : 120) || 120));
+    const hasFrame = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const idx = stream.waiters.indexOf(waiter);
+        if (idx >= 0) {
+          stream.waiters.splice(idx, 1);
+        }
+        resolve(false);
+      }, timeoutMs);
+      const waiter = {
+        timer,
+        resolve
+      };
+      stream.waiters.push(waiter);
+    });
+    if (!hasFrame) {
+      return { ok: true, noFrame: true };
+    }
+    if (!stream.latestBytes || Number(stream.latestSeq || 0) <= minSeq) {
+      return { ok: true, noFrame: true };
+    }
+    return buildPreviewReadPayload(stream);
+  });
+
+  ipcMain.handle('hdr:preview-stop', (_event, payload) => {
+    const streamId = Number(payload && payload.streamId);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream id invalid.' };
+    }
+    const stream = hdrPreviewStreams.get(streamId);
+    if (!stream) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream not found.' };
+    }
+    hdrPreviewStreams.delete(streamId);
+    if (Array.isArray(stream.waiters)) {
+      for (const waiter of stream.waiters) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(false);
+      }
+    }
+    const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
+    if (sessionObj && Number(sessionObj.previewStreamId || 0) === streamId) {
+      sessionObj.previewStreamId = 0;
+      if (sessionObj.workerMode && sessionObj.workerPreviewActive) {
+        sessionObj.workerPreviewActive = false;
+        pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
+      }
+    }
+    return { ok: true };
   });
 
   ipcMain.handle('hdr:experimental-state', async (_event, payload) => {
@@ -3347,7 +3853,10 @@ app.whenReady().then(() => {
         fallbackLevel: Number(session.fallbackLevel || 2),
         pipelineStage: String(session.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
         supportsSharedFrameRead: Boolean(session.frameView && session.controlView),
-        transportMode: session.frameView && session.controlView ? 'shared-buffer' : 'http-fallback',
+        transportMode: session.previewStreamId
+          ? 'native-preview-stream'
+          : (session.frameView && session.controlView ? 'shared-buffer' : 'http-fallback'),
+        previewStreamId: Number(session.previewStreamId || 0),
         requestedRoute: String(session.requestedRoute || 'auto'),
         nativeBackend: String(session.nativeBackend || ''),
         frameSeq: Number(session.frameSeq || 0),
@@ -3372,7 +3881,11 @@ app.whenReady().then(() => {
           bytesPerFrameAvg: Number(session.perf && session.perf.bytesPerFrameAvg ? session.perf.bytesPerFrameAvg : 0),
           bytesPerSec: Number(session.perf && session.perf.bytesPerSec ? session.perf.bytesPerSec : 0),
           pumpJitterMsAvg: Number(session.perf && session.perf.pumpJitterMsAvg ? session.perf.pumpJitterMsAvg : 0),
-          frameIntervalMsAvg: Number(session.perf && session.perf.frameIntervalMsAvg ? session.perf.frameIntervalMsAvg : 0)
+          frameIntervalMsAvg: Number(session.perf && session.perf.frameIntervalMsAvg ? session.perf.frameIntervalMsAvg : 0),
+          previewEncodeMsAvg: Number(session.perf && session.perf.previewEncodeMsAvg ? session.perf.previewEncodeMsAvg : 0),
+          previewBytesPerFrameAvg: Number(session.perf && session.perf.previewBytesPerFrameAvg ? session.perf.previewBytesPerFrameAvg : 0),
+          previewDroppedByBackpressure: Number(session.perf && session.perf.previewDroppedByBackpressure ? session.perf.previewDroppedByBackpressure : 0),
+          previewJitterMsAvg: Number(session.perf && session.perf.previewJitterMsAvg ? session.perf.previewJitterMsAvg : 0)
         }
       });
     }
@@ -3388,6 +3901,8 @@ app.whenReady().then(() => {
       envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
       liveEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_LIVE',
       liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
+      previewEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM',
+      previewEnvFlagEnabled: HDR_NATIVE_PREVIEW_STREAM_ENABLED,
       wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
       wgcEnvFlagEnabled: HDR_WGC_ROUTE_ENABLED,
       requestedSourceId,
@@ -3410,10 +3925,13 @@ app.whenReady().then(() => {
           sessionId,
           runtimeRoute: String(sessionObj.runtimeRoute || 'native-legacy'),
           fallbackLevel: Number(sessionObj.fallbackLevel || 2),
-          pipelineStage: String(sessionObj.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
-          supportsSharedFrameRead: Boolean(sessionObj.frameView && sessionObj.controlView),
-          transportMode: sessionObj.frameView && sessionObj.controlView ? 'shared-buffer' : 'http-fallback',
-          requestedRoute: String(sessionObj.requestedRoute || 'auto'),
+        pipelineStage: String(sessionObj.pipelineStage || HDR_NATIVE_PIPELINE_STAGE),
+        supportsSharedFrameRead: Boolean(sessionObj.frameView && sessionObj.controlView),
+        transportMode: sessionObj.previewStreamId
+          ? 'native-preview-stream'
+          : (sessionObj.frameView && sessionObj.controlView ? 'shared-buffer' : 'http-fallback'),
+        previewStreamId: Number(sessionObj.previewStreamId || 0),
+        requestedRoute: String(sessionObj.requestedRoute || 'auto'),
           nativeBackend: String(sessionObj.nativeBackend || ''),
           frameSeq: Number(sessionObj.frameSeq || 0),
           readFailures: Number(sessionObj.readFailures || 0),
@@ -3437,7 +3955,11 @@ app.whenReady().then(() => {
             bytesPerFrameAvg: Number(sessionObj.perf && sessionObj.perf.bytesPerFrameAvg ? sessionObj.perf.bytesPerFrameAvg : 0),
             bytesPerSec: Number(sessionObj.perf && sessionObj.perf.bytesPerSec ? sessionObj.perf.bytesPerSec : 0),
             pumpJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.pumpJitterMsAvg ? sessionObj.perf.pumpJitterMsAvg : 0),
-            frameIntervalMsAvg: Number(sessionObj.perf && sessionObj.perf.frameIntervalMsAvg ? sessionObj.perf.frameIntervalMsAvg : 0)
+            frameIntervalMsAvg: Number(sessionObj.perf && sessionObj.perf.frameIntervalMsAvg ? sessionObj.perf.frameIntervalMsAvg : 0),
+            previewEncodeMsAvg: Number(sessionObj.perf && sessionObj.perf.previewEncodeMsAvg ? sessionObj.perf.previewEncodeMsAvg : 0),
+            previewBytesPerFrameAvg: Number(sessionObj.perf && sessionObj.perf.previewBytesPerFrameAvg ? sessionObj.perf.previewBytesPerFrameAvg : 0),
+            previewDroppedByBackpressure: Number(sessionObj.perf && sessionObj.perf.previewDroppedByBackpressure ? sessionObj.perf.previewDroppedByBackpressure : 0),
+            previewJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.previewJitterMsAvg ? sessionObj.perf.previewJitterMsAvg : 0)
           }
         });
       }
@@ -3450,6 +3972,8 @@ app.whenReady().then(() => {
         reason: HDR_NATIVE_PUSH_IPC_ENABLED ? '' : 'NATIVE_IPC_GUARD_BAD_MESSAGE_263',
         envFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_IPC',
         envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
+        previewEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM',
+        previewEnvFlagEnabled: HDR_NATIVE_PREVIEW_STREAM_ENABLED,
         wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
         wgcEnvFlagEnabled: HDR_WGC_ROUTE_ENABLED,
         diagnostics: {

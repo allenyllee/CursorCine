@@ -1,4 +1,15 @@
 const path = require("path");
+let workerNativeImage = null;
+try {
+  // Electron utility process may expose nativeImage for fast JPEG encoding.
+  // eslint-disable-next-line global-require
+  const electronMod = require("electron");
+  if (electronMod && electronMod.nativeImage) {
+    workerNativeImage = electronMod.nativeImage;
+  }
+} catch (_error) {
+  workerNativeImage = null;
+}
 
 const state = {
   initialized: false,
@@ -34,8 +45,34 @@ const state = {
     bytesPerSec: 0,
     pumpJitterMsAvg: 0,
     frameIntervalMsAvg: 0,
+    previewEncodeMsAvg: 0,
+    previewBytesPerFrameAvg: 0,
+    previewDroppedByBackpressure: 0,
+    previewJitterMsAvg: 0,
     lastPumpAt: 0,
     lastFrameAt: 0,
+  },
+  preview: {
+    enabled: false,
+    codec: "jpeg",
+    quality: 58,
+    configuredQuality: 58,
+    maxFps: 20,
+    maxWidth: 1280,
+    maxHeight: 800,
+    configuredMaxWidth: 1280,
+    configuredMaxHeight: 800,
+    frameStep: 1,
+    maxFrameStep: 4,
+    latestSeq: 0,
+    latestTimestampMs: 0,
+    latestWidth: 0,
+    latestHeight: 0,
+    latestMime: "image/jpeg",
+    latestBytes: null,
+    lastEncodedSeq: 0,
+    lastEncodedAt: 0,
+    lastFrameTimestampMs: 0,
   },
 };
 
@@ -154,6 +191,152 @@ function toStableBuffer(bytes) {
   return state.reusableFrameBuffer.subarray(0, state.reusableFrameLength);
 }
 
+function rgbaToBgraBuffer(input) {
+  const src = Buffer.isBuffer(input) ? input : Buffer.from(input || []);
+  const out = Buffer.allocUnsafe(src.length);
+  for (let i = 0; i + 3 < src.length; i += 4) {
+    out[i] = src[i + 2];
+    out[i + 1] = src[i + 1];
+    out[i + 2] = src[i];
+    out[i + 3] = src[i + 3];
+  }
+  return out;
+}
+
+function tunePreviewQualityAndScale() {
+  const encodeMs = Number(state.perf.previewEncodeMsAvg || 0);
+  if (!Number.isFinite(encodeMs) || encodeMs <= 0) {
+    return;
+  }
+  const minQuality = 40;
+  const minWidth = 640;
+  const minHeight = 360;
+  const slowThresholdMs = 24;
+  const fastThresholdMs = 12;
+
+  if (encodeMs > slowThresholdMs) {
+    state.preview.frameStep = Math.min(state.preview.maxFrameStep, Number(state.preview.frameStep || 1) + 1);
+    state.preview.quality = Math.max(minQuality, Number(state.preview.quality || minQuality) - 4);
+    state.preview.maxWidth = Math.max(minWidth, Math.floor(Number(state.preview.maxWidth || minWidth) * 0.9));
+    state.preview.maxHeight = Math.max(minHeight, Math.floor(Number(state.preview.maxHeight || minHeight) * 0.9));
+    return;
+  }
+  if (encodeMs < fastThresholdMs) {
+    state.preview.frameStep = Math.max(1, Number(state.preview.frameStep || 1) - 1);
+    state.preview.quality = Math.min(
+      Number(state.preview.configuredQuality || 58),
+      Number(state.preview.quality || minQuality) + 2
+    );
+    state.preview.maxWidth = Math.min(
+      Number(state.preview.configuredMaxWidth || 1280),
+      Math.ceil(Number(state.preview.maxWidth || minWidth) * 1.05)
+    );
+    state.preview.maxHeight = Math.min(
+      Number(state.preview.configuredMaxHeight || 800),
+      Math.ceil(Number(state.preview.maxHeight || minHeight) * 1.05)
+    );
+  }
+}
+
+function encodePreviewFrame(result, rawBytes) {
+  if (!state.preview.enabled || !workerNativeImage || typeof workerNativeImage.createFromBitmap !== "function") {
+    return;
+  }
+  if (!rawBytes || !rawBytes.length) {
+    return;
+  }
+  const minIntervalMs = Math.max(1, Math.round(1000 / Math.max(1, Number(state.preview.maxFps || 20))));
+  const now = Date.now();
+  if (state.preview.lastEncodedAt > 0 && (now - state.preview.lastEncodedAt) < minIntervalMs) {
+    return;
+  }
+  const nextSeq = Number(state.frameSeq || 0);
+  if (nextSeq <= Number(state.preview.lastEncodedSeq || 0)) {
+    return;
+  }
+  const frameStep = Math.max(1, Number(state.preview.frameStep || 1));
+  if ((nextSeq - Number(state.preview.lastEncodedSeq || 0)) < frameStep) {
+    return;
+  }
+
+  const width = Math.max(1, Number(result && result.width ? result.width : state.lastFrameMeta.width || 1));
+  const height = Math.max(1, Number(result && result.height ? result.height : state.lastFrameMeta.height || 1));
+  const stride = Math.max(width * 4, Number(result && result.stride ? result.stride : state.lastFrameMeta.stride || width * 4));
+  const rowBytes = width * 4;
+  const expectedBytes = Math.max(1, stride * height);
+  const sourceBytes = rawBytes.length >= expectedBytes
+    ? rawBytes.subarray(0, expectedBytes)
+    : rawBytes;
+  let packedRgba = null;
+  if (stride === rowBytes) {
+    packedRgba = sourceBytes.length >= (rowBytes * height)
+      ? sourceBytes.subarray(0, rowBytes * height)
+      : sourceBytes;
+  } else {
+    packedRgba = Buffer.allocUnsafe(rowBytes * height);
+    for (let row = 0; row < height; row += 1) {
+      const srcOffset = row * stride;
+      const dstOffset = row * rowBytes;
+      const copyBytes = Math.max(0, Math.min(rowBytes, sourceBytes.length - srcOffset));
+      if (copyBytes > 0) {
+        sourceBytes.copy(packedRgba, dstOffset, srcOffset, srcOffset + copyBytes);
+      }
+      if (copyBytes < rowBytes) {
+        packedRgba.fill(0, dstOffset + copyBytes, dstOffset + rowBytes);
+      }
+    }
+  }
+  const pixelFormat = String(result && result.pixelFormat ? result.pixelFormat : state.lastFrameMeta.pixelFormat || "BGRA8").toUpperCase();
+  const encodeStartMs = Number(process.hrtime.bigint()) / 1e6;
+  const bgra = pixelFormat === "BGRA8" ? packedRgba : rgbaToBgraBuffer(packedRgba);
+  let image = workerNativeImage.createFromBitmap(bgra, {
+    width,
+    height,
+    scaleFactor: 1,
+  });
+
+  const maxWidth = Math.max(320, Math.min(2560, Number(state.preview.maxWidth || 1280) || 1280));
+  const maxHeight = Math.max(180, Math.min(1440, Number(state.preview.maxHeight || 800) || 800));
+  let targetWidth = width;
+  let targetHeight = height;
+  if (width > maxWidth || height > maxHeight) {
+    const ratio = Math.min(maxWidth / width, maxHeight / height);
+    targetWidth = Math.max(2, Math.floor(width * ratio));
+    targetHeight = Math.max(2, Math.floor(height * ratio));
+    image = image.resize({
+      width: targetWidth,
+      height: targetHeight,
+      quality: "good",
+    });
+  }
+  const quality = Math.max(40, Math.min(95, Number(state.preview.quality || 58) || 58));
+  const jpegBytes = image.toJPEG(quality);
+  if (!Buffer.isBuffer(jpegBytes) || jpegBytes.length <= 0) {
+    return;
+  }
+  const encodeEndMs = Number(process.hrtime.bigint()) / 1e6;
+  if (nextSeq > Number(state.preview.lastEncodedSeq || 0) + 1) {
+    state.perf.previewDroppedByBackpressure += nextSeq - Number(state.preview.lastEncodedSeq || 0) - 1;
+  }
+  const frameTs = Number(result && result.timestampMs ? result.timestampMs : now);
+  if (state.preview.lastFrameTimestampMs > 0) {
+    const delta = Math.max(1, frameTs - state.preview.lastFrameTimestampMs);
+    state.perf.previewJitterMsAvg = ewma(state.perf.previewJitterMsAvg, Math.abs(delta - minIntervalMs));
+  }
+  state.preview.lastFrameTimestampMs = frameTs;
+  state.preview.lastEncodedSeq = nextSeq;
+  state.preview.lastEncodedAt = now;
+  state.preview.latestSeq = nextSeq;
+  state.preview.latestTimestampMs = frameTs;
+  state.preview.latestWidth = targetWidth;
+  state.preview.latestHeight = targetHeight;
+  state.preview.latestMime = "image/jpeg";
+  state.preview.latestBytes = jpegBytes;
+  state.perf.previewEncodeMsAvg = ewma(state.perf.previewEncodeMsAvg, encodeEndMs - encodeStartMs);
+  state.perf.previewBytesPerFrameAvg = ewma(state.perf.previewBytesPerFrameAvg, Number(jpegBytes.length || 0));
+  tunePreviewQualityAndScale();
+}
+
 function ensureSharedBuffers(frameByteLength) {
   const safeLength = Math.max(1024 * 1024, Number(frameByteLength || 0));
   if (!state.sharedFrameBuffer || !state.sharedFrameView || state.sharedFrameView.length < safeLength) {
@@ -207,6 +390,11 @@ async function stopCaptureInternal() {
   const nativeSessionId = Number(state.session.nativeSessionId || 0);
   state.session = null;
   state.latestFrameBytes = null;
+  state.preview.latestBytes = null;
+  state.preview.latestSeq = 0;
+  state.preview.lastEncodedSeq = 0;
+  state.preview.lastEncodedAt = 0;
+  state.preview.lastFrameTimestampMs = 0;
   state.noFrameStreak = 0;
   state.perf.lastPumpAt = 0;
   state.perf.lastFrameAt = 0;
@@ -267,6 +455,7 @@ async function pumpFrameLoop() {
           pixelFormat: String(result.pixelFormat || "BGRA8"),
         };
         writeFrameToSharedBuffer(result, state.latestFrameBytes);
+        encodePreviewFrame(result, state.latestFrameBytes);
         const bytesLen = Number(state.latestFrameBytes.length || 0);
         state.perf.bytesPerFrameAvg = ewma(state.perf.bytesPerFrameAvg, bytesLen);
         if (state.perf.lastFrameAt > 0) {
@@ -313,6 +502,10 @@ async function handleRequest(requestId, command, payload) {
         bytesPerSec: Number(state.perf.bytesPerSec || 0),
         pumpJitterMsAvg: Number(state.perf.pumpJitterMsAvg || 0),
         frameIntervalMsAvg: Number(state.perf.frameIntervalMsAvg || 0),
+        previewEncodeMsAvg: Number(state.perf.previewEncodeMsAvg || 0),
+        previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
+        previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
+        previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
       },
       bridgeError: state.bridgeError || "",
     });
@@ -351,6 +544,26 @@ async function handleRequest(requestId, command, payload) {
     state.lastFrameAt = 0;
     state.noFrameStreak = 0;
     state.latestFrameBytes = null;
+    state.preview.enabled = false;
+    state.preview.codec = "jpeg";
+    state.preview.quality = 58;
+    state.preview.configuredQuality = 58;
+    state.preview.maxFps = 20;
+    state.preview.maxWidth = 1280;
+    state.preview.maxHeight = 800;
+    state.preview.configuredMaxWidth = 1280;
+    state.preview.configuredMaxHeight = 800;
+    state.preview.frameStep = 1;
+    state.preview.maxFrameStep = 4;
+    state.preview.latestBytes = null;
+    state.preview.latestSeq = 0;
+    state.preview.lastEncodedSeq = 0;
+    state.preview.lastEncodedAt = 0;
+    state.preview.lastFrameTimestampMs = 0;
+    state.perf.previewEncodeMsAvg = 0;
+    state.perf.previewBytesPerFrameAvg = 0;
+    state.perf.previewDroppedByBackpressure = 0;
+    state.perf.previewJitterMsAvg = 0;
     state.lastFrameMeta = {
       width: Number(result.width || 0),
       height: Number(result.height || 0),
@@ -429,6 +642,60 @@ async function handleRequest(requestId, command, payload) {
       stride: state.lastFrameMeta.stride,
       pixelFormat: state.lastFrameMeta.pixelFormat,
       bytes: state.latestFrameBytes,
+    });
+    return;
+  }
+
+  if (command === "preview-config") {
+    state.preview.enabled = true;
+    state.preview.codec = "jpeg";
+    state.preview.quality = Math.max(40, Math.min(95, Number(payload && payload.quality ? payload.quality : 58) || 58));
+    state.preview.configuredQuality = state.preview.quality;
+    state.preview.maxFps = Math.max(8, Math.min(60, Number(payload && payload.maxFps ? payload.maxFps : 20) || 20));
+    state.preview.maxWidth = Math.max(320, Math.min(2560, Number(payload && payload.maxWidth ? payload.maxWidth : 1280) || 1280));
+    state.preview.maxHeight = Math.max(180, Math.min(1440, Number(payload && payload.maxHeight ? payload.maxHeight : 800) || 800));
+    state.preview.configuredMaxWidth = state.preview.maxWidth;
+    state.preview.configuredMaxHeight = state.preview.maxHeight;
+    state.preview.frameStep = 1;
+    state.preview.maxFrameStep = Math.max(2, Math.min(6, Number(payload && payload.maxFrameStep ? payload.maxFrameStep : 4) || 4));
+    response(requestId, true, {
+      enabled: true,
+      codec: state.preview.codec,
+      quality: state.preview.quality,
+      maxFps: state.preview.maxFps,
+      maxWidth: state.preview.maxWidth,
+      maxHeight: state.preview.maxHeight,
+      frameStep: state.preview.frameStep,
+      maxFrameStep: state.preview.maxFrameStep,
+      nativeImageAvailable: Boolean(workerNativeImage),
+    });
+    return;
+  }
+
+  if (command === "frame-read-preview") {
+    if (!state.preview.enabled || !state.preview.latestBytes || state.preview.latestBytes.length <= 0) {
+      response(requestId, true, {
+        hasFrame: false,
+        frameSeq: Number(state.preview.latestSeq || 0),
+        lastFrameAt: Number(state.preview.latestTimestampMs || 0),
+      });
+      return;
+    }
+    response(requestId, true, {
+      hasFrame: true,
+      frameSeq: Number(state.preview.latestSeq || 0),
+      lastFrameAt: Number(state.preview.latestTimestampMs || 0),
+      width: Number(state.preview.latestWidth || 0),
+      height: Number(state.preview.latestHeight || 0),
+      mime: String(state.preview.latestMime || "image/jpeg"),
+      bytes: state.preview.latestBytes,
+      perf: {
+        previewEncodeMsAvg: Number(state.perf.previewEncodeMsAvg || 0),
+        previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
+        previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
+        previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+        previewFrameStep: Number(state.preview.frameStep || 1),
+      },
     });
     return;
   }

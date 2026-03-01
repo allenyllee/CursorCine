@@ -118,6 +118,7 @@ const IPC_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const RECORDING_TIMESLICE_MS = 1000;
 const CURSOR_POLL_INTERVAL_MS = 24;
 const CLICK_INFO_POLL_MIN_INTERVAL_MS = 34;
+const HDR_SHARED_BIND_ASYNC_TIMEOUT_MS = 3500;
 const BUILTIN_RECORDER_TIMESLICE_MS = 200;
 const BUILTIN_FIRST_CHUNK_TIMEOUT_MS = 2500;
 const BUILTIN_OUTPUT_VIDEO_BITRATE_MULTIPLIERS = {
@@ -133,6 +134,11 @@ const HDR_NATIVE_MAX_IDLE_MS = 2000;
 const HDR_NATIVE_POLL_INTERVAL_MS = 16;
 const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
 const HDR_SHARED_CONTROL_SLOTS = 16;
+const HDR_PREVIEW_READ_TIMEOUT_MS = 120;
+const HDR_PREVIEW_DEFAULT_MAX_FPS = 20;
+const HDR_PREVIEW_DEFAULT_QUALITY = 58;
+const HDR_PREVIEW_DEFAULT_MAX_WIDTH = 1280;
+const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = 800;
 
 let sources = [];
 let sourceStream;
@@ -262,6 +268,7 @@ const hdrMappingState = {
   runtimeBackend: '',
   runtimeStage: '',
   runtimeTransportMode: '',
+  runtimeTransportReason: '',
   routePreference: 'auto',
   fallbackLevel: 3,
   probeSupported: false,
@@ -284,8 +291,11 @@ const hdrMappingState = {
   mainTopLastBindError: '',
   uiBindAttempts: 0,
   uiBindFailures: 0,
+  uiBindConsecutiveFailures: 0,
   uiBindLastReason: '',
   uiBindLastError: '',
+  sharedPreflightOk: null,
+  sharedPreflightReason: '',
   mainTopLastReason: '',
   mainTopLastError: '',
   mainTopReadMsAvg: 0,
@@ -295,10 +305,16 @@ const hdrMappingState = {
   mainTopBytesPerSec: 0,
   mainTopPumpJitterMsAvg: 0,
   mainTopFrameIntervalMsAvg: 0,
+  mainTopPreviewEncodeMsAvg: 0,
+  mainTopPreviewBytesPerFrameAvg: 0,
+  mainTopPreviewDroppedByBackpressure: 0,
+  mainTopPreviewJitterMsAvg: 0,
   nativeEnvFlag: '',
   nativeEnvFlagEnabled: false,
   nativeLiveEnvFlag: '',
   nativeLiveEnvFlagEnabled: false,
+  nativePreviewEnvFlag: '',
+  nativePreviewEnvFlagEnabled: false,
   wgcEnvFlag: '',
   wgcEnvFlagEnabled: false,
   nativeSmokeRan: false,
@@ -336,11 +352,17 @@ const nativeHdrState = {
   startupDeadlineMs: 0,
   frameEndpoint: '',
   lastHttpFrameSeq: 0,
+  previewStreamId: 0,
+  previewSeq: 0,
+  previewMime: '',
+  previewMaxFps: HDR_PREVIEW_DEFAULT_MAX_FPS,
+  previewQuality: HDR_PREVIEW_DEFAULT_QUALITY,
   captureFps: 0,
   renderFps: 0,
   queueDepth: 0,
   runtimeLegacyRetryAttempted: false,
-  rendererBlitMsAvg: 0
+  rendererBlitMsAvg: 0,
+  previewDecodeMsAvg: 0
 };
 
 const viewState = {
@@ -679,10 +701,57 @@ function normalizeHdrRoutePreference(value) {
 
 function normalizeHdrTransportMode(value) {
   const mode = String(value || '').trim().toLowerCase();
-  if (mode === 'shared-buffer' || mode === 'http-fallback') {
+  if (mode === 'shared-buffer' || mode === 'http-fallback' || mode === 'native-preview-stream') {
     return mode;
   }
   return '';
+}
+
+function isCloneLikeMessage(message) {
+  return /could not be cloned|clone/i.test(String(message || ''));
+}
+
+function normalizeSharedBindReason(rawReason, rawMessage = '') {
+  const reason = String(rawReason || '').trim().toUpperCase();
+  if (isCloneLikeMessage(rawMessage)) {
+    return 'BIND_CLONE_BLOCKED';
+  }
+  if (
+    reason === 'NO_ISOLATION' ||
+    reason === 'CLONE_BLOCKED_PREFLIGHT' ||
+    reason === 'BIND_TIMEOUT' ||
+    reason === 'BIND_CLONE_BLOCKED' ||
+    reason === 'BIND_REJECTED' ||
+    reason === 'INVALID_SHARED_BUFFER' ||
+    reason === 'BIND_EXCEPTION'
+  ) {
+    return reason;
+  }
+  if (isCloneLikeMessage(rawMessage) || reason === 'BIND_INVOKE_CLONE_ERROR') {
+    return 'BIND_CLONE_BLOCKED';
+  }
+  if (reason === 'WORKER_BIND_SHARED_FAILED' || reason === 'BIND_FAILED') {
+    return 'BIND_REJECTED';
+  }
+  return reason ? 'BIND_REJECTED' : 'BIND_EXCEPTION';
+}
+
+function toBindErrorResult(error, fallbackReason = 'BIND_EXCEPTION', fallbackMessage = '') {
+  const message = error && error.message ? String(error.message) : String(fallbackMessage || 'bind exception');
+  return {
+    ok: false,
+    bound: false,
+    reason: normalizeSharedBindReason(fallbackReason, message),
+    message
+  };
+}
+
+function callElectronApiSafely(fn, fallbackReason, fallbackMessage) {
+  try {
+    return Promise.resolve(fn()).catch((error) => toBindErrorResult(error, fallbackReason, fallbackMessage));
+  } catch (error) {
+    return Promise.resolve(toBindErrorResult(error, fallbackReason, fallbackMessage));
+  }
 }
 
 function decodeSharedPixelFormat(code) {
@@ -709,6 +778,9 @@ function getEffectiveHdrTransportMode() {
   }
   if (nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView) {
     return 'shared-buffer';
+  }
+  if (nativeHdrState.previewStreamId > 0) {
+    return 'native-preview-stream';
   }
   if (nativeHdrState.frameEndpoint) {
     return 'http-fallback';
@@ -780,15 +852,28 @@ function updateHdrDiagStatus(message) {
     ', mainJitMs=' + String(Number(hdrMappingState.mainTopPumpJitterMsAvg || 0).toFixed(2)) +
     ', mainBpf=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerFrameAvg || 0))) +
     ', mainBps=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerSec || 0))) +
+    ', pEncMs=' + String(Number(hdrMappingState.mainTopPreviewEncodeMsAvg || 0).toFixed(2)) +
+    ', pBpf=' + String(Math.round(Number(hdrMappingState.mainTopPreviewBytesPerFrameAvg || 0))) +
+    ', pDrop=' + String(Math.round(Number(hdrMappingState.mainTopPreviewDroppedByBackpressure || 0))) +
+    ', pJit=' + String(Number(hdrMappingState.mainTopPreviewJitterMsAvg || 0).toFixed(2)) +
+    ', pDecMs=' + String(Number(nativeHdrState.previewDecodeMsAvg || 0).toFixed(2)) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
     ', mainBindReason=' + String(hdrMappingState.mainTopLastBindReason || '-') +
     ', mainBindErr=' + String(hdrMappingState.mainTopLastBindError || '-') +
+    ', transportReason=' + String(hdrMappingState.runtimeTransportReason || '-') +
+    ', preflight=' + (
+      hdrMappingState.sharedPreflightOk === null
+        ? '-'
+        : (hdrMappingState.sharedPreflightOk ? 'ok' : String(hdrMappingState.sharedPreflightReason || 'fail'))
+    ) +
     ', uiBindReason=' + String(hdrMappingState.uiBindLastReason || '-') +
     ', uiBindErr=' + String(hdrMappingState.uiBindLastError || '-') +
+    ', uiBindStreak=' + String(hdrMappingState.uiBindConsecutiveFailures || 0) +
     ', mainErr=' + String(hdrMappingState.mainTopLastError || '-') +
     ', guard=' + (hdrMappingState.nativeRouteEnabled ? 'off' : 'on') +
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
     ', live=' + (hdrMappingState.nativeLiveEnvFlag || '-') + ':' + (hdrMappingState.nativeLiveEnvFlagEnabled ? '1' : '0') +
+    ', preview=' + (hdrMappingState.nativePreviewEnvFlag || '-') + ':' + (hdrMappingState.nativePreviewEnvFlagEnabled ? '1' : '0') +
     ', wgc=' + (hdrMappingState.wgcEnvFlag || '-') + ':' + (hdrMappingState.wgcEnvFlagEnabled ? '1' : '0') +
     ', smoke=' + (
       !hdrMappingState.nativeSmokeRan
@@ -902,6 +987,7 @@ async function copyHdrDiagnosticsSnapshot() {
       hdrRuntimeBackend: hdrMappingState.runtimeBackend,
       hdrRuntimeStage: hdrMappingState.runtimeStage,
       hdrRuntimeTransportMode: hdrMappingState.runtimeTransportMode,
+      hdrRuntimeTransportReason: hdrMappingState.runtimeTransportReason,
       hdrRoutePreference: hdrMappingState.routePreference,
       hdrFallbackLevel: hdrMappingState.fallbackLevel,
       hdrRuntimeStatusMessage,
@@ -925,14 +1011,21 @@ async function copyHdrDiagnosticsSnapshot() {
       mainTopLastBindError: hdrMappingState.mainTopLastBindError,
       uiBindAttempts: hdrMappingState.uiBindAttempts,
       uiBindFailures: hdrMappingState.uiBindFailures,
+      uiBindConsecutiveFailures: hdrMappingState.uiBindConsecutiveFailures,
       uiBindLastReason: hdrMappingState.uiBindLastReason,
       uiBindLastError: hdrMappingState.uiBindLastError,
+      sharedPreflightOk: hdrMappingState.sharedPreflightOk,
+      sharedPreflightReason: hdrMappingState.sharedPreflightReason,
       mainTopCopyMsAvg: hdrMappingState.mainTopCopyMsAvg,
       mainTopSabWriteMsAvg: hdrMappingState.mainTopSabWriteMsAvg,
       mainTopBytesPerFrameAvg: hdrMappingState.mainTopBytesPerFrameAvg,
       mainTopBytesPerSec: hdrMappingState.mainTopBytesPerSec,
       mainTopPumpJitterMsAvg: hdrMappingState.mainTopPumpJitterMsAvg,
       mainTopFrameIntervalMsAvg: hdrMappingState.mainTopFrameIntervalMsAvg,
+      mainTopPreviewEncodeMsAvg: hdrMappingState.mainTopPreviewEncodeMsAvg,
+      mainTopPreviewBytesPerFrameAvg: hdrMappingState.mainTopPreviewBytesPerFrameAvg,
+      mainTopPreviewDroppedByBackpressure: hdrMappingState.mainTopPreviewDroppedByBackpressure,
+      mainTopPreviewJitterMsAvg: hdrMappingState.mainTopPreviewJitterMsAvg,
       lastFallbackReason: hdrMappingState.lastFallbackReason,
       lastFallbackAt: hdrMappingState.lastFallbackAt,
       nativeState: {
@@ -950,8 +1043,9 @@ async function copyHdrDiagnosticsSnapshot() {
         renderFps: nativeHdrState.renderFps,
         queueDepth: nativeHdrState.queueDepth,
         rendererBlitMsAvg: nativeHdrState.rendererBlitMsAvg,
+        previewDecodeMsAvg: nativeHdrState.previewDecodeMsAvg,
         supportsSharedFrameRead: Boolean(nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView),
-        transportMode: nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView ? 'shared-buffer' : 'http-fallback'
+        transportMode: getEffectiveHdrTransportMode()
       },
       decisionTrace: hdrDecisionTrace.slice(-80)
     },
@@ -2175,6 +2269,11 @@ async function stopNativeHdrCapture() {
   stopNativeHdrFramePump();
 
   if (nativeHdrState.sessionId > 0) {
+    if (nativeHdrState.previewStreamId > 0 && electronAPI && typeof electronAPI.hdrPreviewStop === 'function') {
+      await electronAPI.hdrPreviewStop({
+        streamId: nativeHdrState.previewStreamId
+      }).catch(() => {});
+    }
     await electronAPI.hdrSharedStop({
       sessionId: nativeHdrState.sessionId
     }).catch(() => {});
@@ -2202,14 +2301,20 @@ async function stopNativeHdrCapture() {
   nativeHdrState.startupDeadlineMs = 0;
   nativeHdrState.frameEndpoint = '';
   nativeHdrState.lastHttpFrameSeq = 0;
+  nativeHdrState.previewStreamId = 0;
+  nativeHdrState.previewSeq = 0;
+  nativeHdrState.previewMime = '';
+  nativeHdrState.previewMaxFps = HDR_PREVIEW_DEFAULT_MAX_FPS;
+  nativeHdrState.previewQuality = HDR_PREVIEW_DEFAULT_QUALITY;
   nativeHdrState.captureFps = 0;
   nativeHdrState.renderFps = 0;
   nativeHdrState.queueDepth = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = false;
   nativeHdrState.rendererBlitMsAvg = 0;
+  nativeHdrState.previewDecodeMsAvg = 0;
 }
 
-function blitNativeFrameToCanvas(frame) {
+async function blitNativeFrameToCanvas(frame) {
   if (!nativeHdrState.ctx || !nativeHdrState.canvas) {
     return;
   }
@@ -2224,47 +2329,66 @@ function blitNativeFrameToCanvas(frame) {
     return;
   }
 
-  const srcBytes = new Uint8ClampedArray(rawBytes);
-  const pixelFormat = String(frame && frame.pixelFormat ? frame.pixelFormat : 'RGBA8').toUpperCase();
-  ensureNativeHdrCanvas(width, height);
+  const mime = String((frame && frame.mime) || '').toLowerCase();
+  if (mime.startsWith('image/')) {
+    ensureNativeHdrCanvas(width, height);
+    try {
+      const decodeStart = performance.now();
+      const blob = new Blob([rawBytes], { type: mime });
+      const bitmap = await createImageBitmap(blob);
+      nativeHdrState.ctx.drawImage(bitmap, 0, 0, width, height);
+      bitmap.close();
+      const decodeMs = Math.max(0, performance.now() - decodeStart);
+      nativeHdrState.previewDecodeMsAvg = nativeHdrState.previewDecodeMsAvg > 0
+        ? ((nativeHdrState.previewDecodeMsAvg * 0.8) + (decodeMs * 0.2))
+        : decodeMs;
+    } catch (error) {
+      const decodeError = new Error(error && error.message ? error.message : 'preview decode failed');
+      decodeError.code = 'PREVIEW_STREAM_DECODE_FAILED';
+      throw decodeError;
+    }
+  } else {
+    const srcBytes = new Uint8ClampedArray(rawBytes);
+    const pixelFormat = String(frame && frame.pixelFormat ? frame.pixelFormat : 'RGBA8').toUpperCase();
+    ensureNativeHdrCanvas(width, height);
 
-  const expectedBytes = width * height * 4;
-  if (!nativeHdrState.frameImageData || nativeHdrState.frameImageData.width !== width || nativeHdrState.frameImageData.height !== height) {
-    nativeHdrState.frameImageData = nativeHdrState.ctx.createImageData(width, height);
-  }
+    const expectedBytes = width * height * 4;
+    if (!nativeHdrState.frameImageData || nativeHdrState.frameImageData.width !== width || nativeHdrState.frameImageData.height !== height) {
+      nativeHdrState.frameImageData = nativeHdrState.ctx.createImageData(width, height);
+    }
 
-  const dst = nativeHdrState.frameImageData.data;
-  if (pixelFormat === 'RGBA8') {
-    if (stride === width * 4 && srcBytes.length >= expectedBytes) {
-      dst.set(srcBytes.subarray(0, expectedBytes));
+    const dst = nativeHdrState.frameImageData.data;
+    if (pixelFormat === 'RGBA8') {
+      if (stride === width * 4 && srcBytes.length >= expectedBytes) {
+        dst.set(srcBytes.subarray(0, expectedBytes));
+      } else {
+        for (let row = 0; row < height; row += 1) {
+          const srcOffset = row * stride;
+          const dstOffset = row * width * 4;
+          const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
+          if (rowBytes > 0) {
+            dst.set(srcBytes.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+          }
+        }
+      }
     } else {
       for (let row = 0; row < height; row += 1) {
         const srcOffset = row * stride;
         const dstOffset = row * width * 4;
         const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
-        if (rowBytes > 0) {
-          dst.set(srcBytes.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+        for (let i = 0; i + 3 < rowBytes; i += 4) {
+          const s = srcOffset + i;
+          const d = dstOffset + i;
+          // Backward-compatible conversion for legacy BGRA payloads.
+          dst[d] = srcBytes[s + 2];
+          dst[d + 1] = srcBytes[s + 1];
+          dst[d + 2] = srcBytes[s];
+          dst[d + 3] = srcBytes[s + 3];
         }
       }
     }
-  } else {
-    for (let row = 0; row < height; row += 1) {
-      const srcOffset = row * stride;
-      const dstOffset = row * width * 4;
-      const rowBytes = Math.max(0, Math.min(width * 4, srcBytes.length - srcOffset));
-      for (let i = 0; i + 3 < rowBytes; i += 4) {
-        const s = srcOffset + i;
-        const d = dstOffset + i;
-        // Backward-compatible conversion for legacy BGRA payloads.
-        dst[d] = srcBytes[s + 2];
-        dst[d + 1] = srcBytes[s + 1];
-        dst[d + 2] = srcBytes[s];
-        dst[d + 3] = srcBytes[s + 3];
-      }
-    }
+    nativeHdrState.ctx.putImageData(nativeHdrState.frameImageData, 0, 0);
   }
-
-  nativeHdrState.ctx.putImageData(nativeHdrState.frameImageData, 0, 0);
   const now = performance.now();
   const delta = nativeHdrState.lastFrameAtMs > 0 ? Math.max(1, now - nativeHdrState.lastFrameAtMs) : 0;
   if (delta > 0) {
@@ -2382,6 +2506,47 @@ async function tryReadNativeFrameFromHttpEndpoint() {
   };
 }
 
+async function tryReadNativeFrameFromPreviewStream() {
+  const streamId = Number(nativeHdrState.previewStreamId || 0);
+  if (streamId <= 0 || !electronAPI || typeof electronAPI.hdrPreviewRead !== 'function') {
+    return null;
+  }
+  const result = await electronAPI.hdrPreviewRead({
+    streamId,
+    minSeq: Number(nativeHdrState.previewSeq || 0),
+    timeoutMs: HDR_PREVIEW_READ_TIMEOUT_MS
+  }).catch(() => null);
+  if (!result || result.noFrame) {
+    return null;
+  }
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: String(result.reason || 'PREVIEW_STREAM_READ_FAILED')
+    };
+  }
+  const seq = Number(result.seq || 0);
+  if (seq <= Number(nativeHdrState.previewSeq || 0)) {
+    return null;
+  }
+  const queueDepth = Math.max(0, seq - Number(nativeHdrState.previewSeq || 0) - 1);
+  nativeHdrState.queueDepth = queueDepth;
+  if (queueDepth > 0) {
+    nativeHdrState.droppedFrames += queueDepth;
+  }
+  nativeHdrState.previewSeq = seq;
+  nativeHdrState.previewMime = String(result.mime || 'image/jpeg');
+  return {
+    ok: true,
+    frameSeq: seq,
+    width: Math.max(1, Number(result.width || nativeHdrState.width || 1)),
+    height: Math.max(1, Number(result.height || nativeHdrState.height || 1)),
+    stride: Math.max(4, Number(result.stride || nativeHdrState.stride || (Number(result.width || nativeHdrState.width || 1) * 4))),
+    mime: nativeHdrState.previewMime,
+    bytes: result.bytes
+  };
+}
+
 async function fallbackNativeToDesktopVideo(reason) {
   if (nativeHdrFallbackAttempted) {
     return;
@@ -2442,23 +2607,51 @@ async function pollNativeHdrFrame() {
     const pushedResult = tryReadNativeFrameFromPushBuffer();
     if (pushedResult && pushedResult.ok) {
       nativeHdrState.readFailures = 0;
-      blitNativeFrameToCanvas(pushedResult);
+      await blitNativeFrameToCanvas(pushedResult);
       return;
     }
 
     const result = tryReadNativeFrameFromSharedBuffer();
     if (!result) {
+      const previewResult = await tryReadNativeFrameFromPreviewStream();
+      if (previewResult && previewResult.ok) {
+        if (hdrMappingState.runtimeTransportMode !== 'native-preview-stream') {
+          hdrMappingState.runtimeTransportMode = 'native-preview-stream';
+          setHdrRuntimeRoute(String(hdrMappingState.runtimeRoute || 'native'), null, 'native-preview-stream');
+        }
+        hdrMappingState.runtimeTransportReason = nativeHdrState.queueDepth > 0
+          ? 'PREVIEW_STREAM_BACKPRESSURE_DROP'
+          : 'NATIVE_PREVIEW_OK';
+        nativeHdrState.readFailures = 0;
+        await blitNativeFrameToCanvas(previewResult);
+        return;
+      }
+      if (previewResult && !previewResult.ok) {
+        hdrMappingState.runtimeTransportReason = String(previewResult.reason || 'PREVIEW_STREAM_READ_TIMEOUT');
+        nativeHdrState.readFailures += 1;
+        if (nativeHdrState.readFailures >= HDR_NATIVE_MAX_READ_FAILURES) {
+          await fallbackNativeToDesktopVideo(previewResult.reason || 'PREVIEW_STREAM_READ_FAILED');
+        }
+        return;
+      }
       const httpResult = await tryReadNativeFrameFromHttpEndpoint();
       if (httpResult && httpResult.ok) {
+        if (nativeHdrState.previewStreamId > 0 && hdrMappingState.runtimeTransportMode === 'native-preview-stream') {
+          hdrMappingState.runtimeTransportMode = 'http-fallback';
+          if (!hdrMappingState.runtimeTransportReason || hdrMappingState.runtimeTransportReason === 'NATIVE_PREVIEW_OK') {
+            hdrMappingState.runtimeTransportReason = 'PREVIEW_STREAM_READ_TIMEOUT';
+          }
+          setHdrRuntimeRoute(String(hdrMappingState.runtimeRoute || 'native'), null, 'http-fallback');
+        }
         nativeHdrState.readFailures = 0;
-        blitNativeFrameToCanvas(httpResult);
+        await blitNativeFrameToCanvas(httpResult);
         return;
       }
     }
 
     if (result && result.ok && result.hasFrame !== false) {
       nativeHdrState.readFailures = 0;
-      blitNativeFrameToCanvas(result);
+      await blitNativeFrameToCanvas(result);
       return;
     }
     const idleForMs = nativeHdrState.lastFrameAtMs > 0 ? (now - nativeHdrState.lastFrameAtMs) : 0;
@@ -2490,8 +2683,14 @@ async function pollNativeHdrFrame() {
     }
   } catch (error) {
     nativeHdrState.readFailures += 1;
+    if (error && error.code === 'PREVIEW_STREAM_DECODE_FAILED') {
+      hdrMappingState.runtimeTransportReason = 'PREVIEW_STREAM_DECODE_FAILED';
+    }
     if (nativeHdrState.readFailures >= HDR_NATIVE_MAX_READ_FAILURES) {
-      await fallbackNativeToDesktopVideo(error && error.message ? error.message : 'READ_EXCEPTION');
+      const reason = error && error.code
+        ? String(error.code)
+        : (error && error.message ? error.message : 'READ_EXCEPTION');
+      await fallbackNativeToDesktopVideo(reason);
     }
   } finally {
     nativeHdrFramePumpRunning = false;
@@ -2547,6 +2746,8 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
 
   let start = null;
   const sharedPreferred = typeof window !== 'undefined' && window.crossOriginIsolated === true;
+  hdrMappingState.sharedPreflightOk = null;
+  hdrMappingState.sharedPreflightReason = '';
   const startPayloadBase = {
     sourceId,
     displayId,
@@ -2613,63 +2814,144 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   let sharedFrameBuffer = start.sharedFrameBuffer;
   let sharedControlBuffer = start.sharedControlBuffer;
   let sharedBindOk = false;
-  if (sharedPreferred && !hdrMappingState.sharedBindCloneBlocked && start && Number(start.sessionId || 0) > 0) {
-    hdrMappingState.uiBindAttempts += 1;
-    hdrMappingState.uiBindLastReason = '';
-    hdrMappingState.uiBindLastError = '';
-    try {
-      const frameBytes = Math.max(1024 * 1024, stride * height);
-      sharedFrameBuffer = new SharedArrayBuffer(frameBytes);
-      sharedControlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * HDR_SHARED_CONTROL_SLOTS);
-      let bindResult = null;
-      try {
-        bindResult = await electronAPI.hdrSharedBind({
-          sessionId: Number(start.sessionId || 0),
-          sharedFrameBuffer,
-          sharedControlBuffer
-        });
-      } catch (bindInvokeError) {
-        bindResult = {
-          ok: false,
-          bound: false,
-          reason: 'BIND_INVOKE_CLONE_ERROR',
-          message: bindInvokeError && bindInvokeError.message ? bindInvokeError.message : 'bind invoke clone error'
-        };
-      }
-      if (!bindResult || !bindResult.ok) {
-        bindResult = await electronAPI.hdrSharedBindAsync({
-          sessionId: Number(start.sessionId || 0),
-          sharedFrameBuffer,
-          sharedControlBuffer
-        });
-      }
-      sharedBindOk = Boolean(bindResult && bindResult.ok && bindResult.bound);
-      hdrMappingState.uiBindLastReason = String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED'));
-      hdrMappingState.uiBindLastError = String((bindResult && bindResult.message) || '');
-      pushHdrDecisionTrace('shared-bind', {
-        ok: sharedBindOk,
-        reason: String((bindResult && bindResult.reason) || (sharedBindOk ? 'OK' : 'BIND_FAILED')),
-        message: String((bindResult && bindResult.message) || '')
+  let previewStreamOk = false;
+  let previewStreamId = 0;
+  let transportReason = '';
+  const previewPreferred = hdrMappingState.nativePreviewEnvFlagEnabled !== false &&
+    electronAPI &&
+    typeof electronAPI.hdrPreviewStart === 'function';
+  if (previewPreferred && start && Number(start.sessionId || 0) > 0) {
+    const previewStart = await electronAPI.hdrPreviewStart({
+      sessionId: Number(start.sessionId || 0),
+      codec: 'jpeg',
+      quality: HDR_PREVIEW_DEFAULT_QUALITY,
+      maxFps: HDR_PREVIEW_DEFAULT_MAX_FPS,
+      maxWidth: HDR_PREVIEW_DEFAULT_MAX_WIDTH,
+      maxHeight: HDR_PREVIEW_DEFAULT_MAX_HEIGHT
+    }).catch((error) => ({
+      ok: false,
+      reason: 'PREVIEW_STREAM_START_FAILED',
+      message: error && error.message ? error.message : 'preview start exception'
+    }));
+    if (previewStart && previewStart.ok) {
+      previewStreamOk = true;
+      previewStreamId = Number(previewStart.streamId || 0);
+      transportReason = 'NATIVE_PREVIEW_OK';
+      hdrMappingState.sharedPreflightOk = null;
+      hdrMappingState.sharedPreflightReason = '';
+      hdrMappingState.uiBindLastReason = '';
+      hdrMappingState.uiBindLastError = '';
+      pushHdrDecisionTrace('preview-stream-start', {
+        ok: true,
+        streamId: previewStreamId
       });
-      if (!sharedBindOk) {
+    } else {
+      transportReason = String((previewStart && previewStart.reason) || 'PREVIEW_STREAM_START_FAILED');
+      pushHdrDecisionTrace('preview-stream-start', {
+        ok: false,
+        reason: transportReason,
+        message: String((previewStart && previewStart.message) || '')
+      });
+    }
+  }
+
+  if (!previewStreamOk) {
+    if (!sharedPreferred) {
+      transportReason = transportReason || 'NO_ISOLATION';
+      hdrMappingState.sharedPreflightOk = false;
+      hdrMappingState.sharedPreflightReason = 'NO_ISOLATION';
+    } else if (hdrMappingState.sharedBindCloneBlocked) {
+      transportReason = 'CLONE_BLOCKED_PREFLIGHT';
+      hdrMappingState.sharedPreflightOk = false;
+      hdrMappingState.sharedPreflightReason = 'CLONE_BLOCKED_PREFLIGHT';
+    } else if (start && Number(start.sessionId || 0) > 0) {
+      hdrMappingState.uiBindAttempts += 1;
+      hdrMappingState.uiBindLastReason = '';
+      hdrMappingState.uiBindLastError = '';
+      try {
+        const preparedResult = await callElectronApiSafely(
+          () => electronAPI.hdrSharedBindPrepared({
+            sessionId: Number(start.sessionId || 0),
+            frameBytes: Math.max(1024 * 1024, stride * height),
+            controlSlots: HDR_SHARED_CONTROL_SLOTS,
+            timeoutMs: HDR_SHARED_BIND_ASYNC_TIMEOUT_MS
+          }),
+          'BIND_EXCEPTION',
+          'shared bind prepared exception'
+        );
+        const preparedReason = normalizeSharedBindReason(
+          preparedResult && preparedResult.reason,
+          preparedResult && preparedResult.message
+        );
+        const preparedMessage = String((preparedResult && preparedResult.message) || '');
+        const preflightFailed = preparedReason === 'CLONE_BLOCKED_PREFLIGHT' ||
+          preparedReason === 'BIND_CLONE_BLOCKED' ||
+          preparedReason === 'INVALID_SHARED_BUFFER';
+        if (preflightFailed) {
+          hdrMappingState.sharedPreflightOk = false;
+          hdrMappingState.sharedPreflightReason = preparedReason;
+          pushHdrDecisionTrace('shared-preflight-failed', {
+            reason: preparedReason === 'BIND_CLONE_BLOCKED' ? 'CLONE_BLOCKED_PREFLIGHT' : preparedReason,
+            message: preparedMessage
+          });
+        } else {
+          hdrMappingState.sharedPreflightOk = true;
+          hdrMappingState.sharedPreflightReason = 'OK';
+        }
+
+        sharedBindOk = Boolean(preparedResult && preparedResult.ok && preparedResult.bound);
+        if (sharedBindOk) {
+          sharedFrameBuffer = preparedResult.sharedFrameBuffer || null;
+          sharedControlBuffer = preparedResult.sharedControlBuffer || null;
+          hdrMappingState.uiBindConsecutiveFailures = 0;
+          hdrMappingState.uiBindLastReason = 'OK';
+          hdrMappingState.uiBindLastError = '';
+          transportReason = 'OK';
+          pushHdrDecisionTrace('shared-bind', {
+            ok: true,
+            reason: 'OK',
+            message: ''
+          });
+        } else {
+          transportReason = preparedReason === 'BIND_CLONE_BLOCKED'
+            ? 'CLONE_BLOCKED_PREFLIGHT'
+            : preparedReason;
+          hdrMappingState.uiBindFailures += 1;
+          hdrMappingState.uiBindConsecutiveFailures += 1;
+          hdrMappingState.uiBindLastReason = transportReason;
+          hdrMappingState.uiBindLastError = preparedMessage;
+          if (transportReason === 'CLONE_BLOCKED_PREFLIGHT' || transportReason === 'BIND_CLONE_BLOCKED') {
+            hdrMappingState.sharedBindCloneBlocked = true;
+          }
+          pushHdrDecisionTrace('shared-bind', {
+            ok: false,
+            reason: transportReason,
+            message: preparedMessage
+          });
+          sharedFrameBuffer = null;
+          sharedControlBuffer = null;
+        }
+      } catch (bindError) {
         hdrMappingState.uiBindFailures += 1;
+        hdrMappingState.uiBindConsecutiveFailures += 1;
+        hdrMappingState.uiBindLastError = bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION';
+        const bindExceptionReason = normalizeSharedBindReason('BIND_EXCEPTION', hdrMappingState.uiBindLastError);
+        hdrMappingState.uiBindLastReason = bindExceptionReason;
+        transportReason = bindExceptionReason;
+        if (hdrMappingState.sharedPreflightOk === null) {
+          hdrMappingState.sharedPreflightOk = false;
+          hdrMappingState.sharedPreflightReason = bindExceptionReason;
+        }
+        if (bindExceptionReason === 'BIND_CLONE_BLOCKED') {
+          hdrMappingState.sharedBindCloneBlocked = true;
+        }
+        pushHdrDecisionTrace('shared-bind-exception', {
+          message: bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION'
+        });
         sharedFrameBuffer = null;
         sharedControlBuffer = null;
+        sharedBindOk = false;
       }
-    } catch (bindError) {
-      hdrMappingState.uiBindFailures += 1;
-      hdrMappingState.uiBindLastReason = 'BIND_EXCEPTION';
-      hdrMappingState.uiBindLastError = bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION';
-      if (/could not be cloned|clone/i.test(String(hdrMappingState.uiBindLastError))) {
-        hdrMappingState.sharedBindCloneBlocked = true;
-        hdrMappingState.uiBindLastReason = 'BIND_CLONE_BLOCKED';
-      }
-      pushHdrDecisionTrace('shared-bind-exception', {
-        message: bindError && bindError.message ? bindError.message : 'BIND_EXCEPTION'
-      });
-      sharedFrameBuffer = null;
-      sharedControlBuffer = null;
-      sharedBindOk = false;
     }
   }
 
@@ -2695,11 +2977,21 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   nativeHdrState.startupDeadlineMs = performance.now() + HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS;
   nativeHdrState.frameEndpoint = String(start.frameEndpoint || '');
   nativeHdrState.lastHttpFrameSeq = 0;
+  nativeHdrState.previewStreamId = previewStreamId;
+  nativeHdrState.previewSeq = 0;
+  nativeHdrState.previewMime = '';
+  nativeHdrState.previewMaxFps = HDR_PREVIEW_DEFAULT_MAX_FPS;
+  nativeHdrState.previewQuality = HDR_PREVIEW_DEFAULT_QUALITY;
   nativeHdrState.runtimeLegacyRetryAttempted = routePreference === 'legacy';
   hdrMappingState.runtimeBackend = String(start.nativeBackend || '');
   hdrMappingState.runtimeTransportMode = normalizeHdrTransportMode(
-    sharedBindOk ? 'shared-buffer' : (start.transportMode || 'http-fallback')
+    previewStreamOk
+      ? 'native-preview-stream'
+      : (sharedBindOk ? 'shared-buffer' : (start.transportMode || 'http-fallback'))
   );
+  hdrMappingState.runtimeTransportReason = previewStreamOk
+    ? 'NATIVE_PREVIEW_OK'
+    : (sharedBindOk ? 'OK' : (transportReason || 'BIND_REJECTED'));
   hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
     (hdrMappingState.runtimeTransportMode ? ('/' + hdrMappingState.runtimeTransportMode) : '');
   hdrMappingState.fallbackLevel = Math.max(1, Number(start.fallbackLevel || 2));
@@ -2870,6 +3162,7 @@ async function loadHdrExperimentalState() {
     hdrMappingState.runtimeBackend = '';
     hdrMappingState.runtimeStage = '';
     hdrMappingState.runtimeTransportMode = '';
+    hdrMappingState.runtimeTransportReason = '';
     hdrMappingState.routePreference = 'auto';
     hdrMappingState.fallbackLevel = 3;
     hdrMappingState.mainSharedSessionCount = 0;
@@ -2881,8 +3174,12 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopLastBindError = '';
     hdrMappingState.uiBindAttempts = 0;
     hdrMappingState.uiBindFailures = 0;
+    hdrMappingState.uiBindConsecutiveFailures = 0;
     hdrMappingState.uiBindLastReason = '';
     hdrMappingState.uiBindLastError = '';
+    hdrMappingState.sharedPreflightOk = null;
+    hdrMappingState.sharedPreflightReason = '';
+    hdrMappingState.sharedBindCloneBlocked = false;
     hdrMappingState.mainTopReadMsAvg = 0;
     hdrMappingState.mainTopCopyMsAvg = 0;
     hdrMappingState.mainTopSabWriteMsAvg = 0;
@@ -2890,12 +3187,18 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopBytesPerSec = 0;
     hdrMappingState.mainTopPumpJitterMsAvg = 0;
     hdrMappingState.mainTopFrameIntervalMsAvg = 0;
+    hdrMappingState.mainTopPreviewEncodeMsAvg = 0;
+    hdrMappingState.mainTopPreviewBytesPerFrameAvg = 0;
+    hdrMappingState.mainTopPreviewDroppedByBackpressure = 0;
+    hdrMappingState.mainTopPreviewJitterMsAvg = 0;
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
     hdrMappingState.nativeEnvFlag = '';
     hdrMappingState.nativeEnvFlagEnabled = false;
     hdrMappingState.nativeLiveEnvFlag = '';
     hdrMappingState.nativeLiveEnvFlagEnabled = false;
+    hdrMappingState.nativePreviewEnvFlag = '';
+    hdrMappingState.nativePreviewEnvFlagEnabled = false;
     hdrMappingState.wgcEnvFlag = '';
     hdrMappingState.wgcEnvFlagEnabled = false;
     hdrMappingState.nativeSmokeRan = false;
@@ -2912,6 +3215,7 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeRouteStage = String(result.stage || '');
   hdrMappingState.runtimeStage = String(result.wgcStage || result.stage || '');
   hdrMappingState.runtimeTransportMode = '';
+  hdrMappingState.runtimeTransportReason = '';
   hdrMappingState.routePreference = normalizeHdrRoutePreference(result.routePreference || hdrMappingState.routePreference);
   const diagnostics = result.diagnostics || {};
   const sessions = Array.isArray(diagnostics.sharedSessions) ? diagnostics.sharedSessions : [];
@@ -2936,12 +3240,23 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopBytesPerSec = Number(top && top.perf && top.perf.bytesPerSec ? top.perf.bytesPerSec : 0);
   hdrMappingState.mainTopPumpJitterMsAvg = Number(top && top.perf && top.perf.pumpJitterMsAvg ? top.perf.pumpJitterMsAvg : 0);
   hdrMappingState.mainTopFrameIntervalMsAvg = Number(top && top.perf && top.perf.frameIntervalMsAvg ? top.perf.frameIntervalMsAvg : 0);
+  hdrMappingState.mainTopPreviewEncodeMsAvg = Number(top && top.perf && top.perf.previewEncodeMsAvg ? top.perf.previewEncodeMsAvg : 0);
+  hdrMappingState.mainTopPreviewBytesPerFrameAvg = Number(top && top.perf && top.perf.previewBytesPerFrameAvg ? top.perf.previewBytesPerFrameAvg : 0);
+  hdrMappingState.mainTopPreviewDroppedByBackpressure = Number(top && top.perf && top.perf.previewDroppedByBackpressure ? top.perf.previewDroppedByBackpressure : 0);
+  hdrMappingState.mainTopPreviewJitterMsAvg = Number(top && top.perf && top.perf.previewJitterMsAvg ? top.perf.previewJitterMsAvg : 0);
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
   if (top && top.runtimeRoute) {
     const topTransportMode = normalizeHdrTransportMode(top.transportMode || '') ||
       (top.supportsSharedFrameRead ? 'shared-buffer' : '');
     hdrMappingState.runtimeTransportMode = topTransportMode;
+    if (topTransportMode === 'shared-buffer') {
+      hdrMappingState.runtimeTransportReason = 'OK';
+    } else if (topTransportMode === 'native-preview-stream') {
+      hdrMappingState.runtimeTransportReason = 'NATIVE_PREVIEW_OK';
+    } else {
+      hdrMappingState.runtimeTransportReason = String(top.lastBindReason || hdrMappingState.uiBindLastReason || 'BIND_REJECTED');
+    }
     hdrMappingState.runtimeStage = String((top.pipelineStage || '') + (topTransportMode ? ('/' + topTransportMode) : '')) || hdrMappingState.runtimeStage;
     setHdrRuntimeRoute(String(top.runtimeRoute || hdrMappingState.runtimeRoute || 'fallback'), null, topTransportMode);
   }
@@ -2951,6 +3266,8 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeEnvFlagEnabled = Boolean(result.envFlagEnabled);
   hdrMappingState.nativeLiveEnvFlag = String(result.liveEnvFlag || '');
   hdrMappingState.nativeLiveEnvFlagEnabled = Boolean(result.liveEnvFlagEnabled);
+  hdrMappingState.nativePreviewEnvFlag = String(result.previewEnvFlag || '');
+  hdrMappingState.nativePreviewEnvFlagEnabled = Boolean(result.previewEnvFlagEnabled);
   hdrMappingState.wgcEnvFlag = String(result.wgcEnvFlag || '');
   hdrMappingState.wgcEnvFlagEnabled = Boolean(result.wgcEnvFlagEnabled);
   hdrMappingState.nativeSmokeRan = Boolean(result.smoke && result.smoke.ran);
@@ -4019,6 +4336,11 @@ async function startRecording() {
     lockedX: 0,
     lockedY: 0
   };
+  hdrMappingState.sharedBindCloneBlocked = false;
+  hdrMappingState.sharedPreflightOk = null;
+  hdrMappingState.sharedPreflightReason = '';
+  hdrMappingState.uiBindConsecutiveFailures = 0;
+  hdrMappingState.runtimeTransportReason = '';
   lastClickInfo = null;
   lastClickInfoAtMs = 0;
   resetLocalPenState();
@@ -4267,6 +4589,11 @@ function stopRecording() {
   overlayStatePollTimer = 0;
   drawTimer = 0;
   cursorUpdateInFlight = false;
+  hdrMappingState.sharedBindCloneBlocked = false;
+  hdrMappingState.sharedPreflightOk = null;
+  hdrMappingState.sharedPreflightReason = '';
+  hdrMappingState.uiBindConsecutiveFailures = 0;
+  hdrMappingState.runtimeTransportReason = '';
   lastClickInfo = null;
   lastClickInfoAtMs = 0;
   lastDrawNow = 0;
