@@ -3,10 +3,12 @@ function createIpcHandlers(deps = {}) {
   const isTestMode = Boolean(deps.testMode);
   const testCaptureMode = String(deps.testCaptureMode || 'mock').toLowerCase();
   const testExportMode = String(deps.testExportMode || 'mock').toLowerCase();
+  const platform = String(deps.platform || process.platform || '');
 
   return {
     'app:test-config': async () => ({
       ok: true,
+      platform,
       testMode: isTestMode,
       captureMode: testCaptureMode,
       exportMode: testExportMode

@@ -2,6 +2,7 @@
 const runtimeElectronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
 const runtimeTestConfig = {
   loaded: false,
+  platform: '',
   testMode: false,
   captureMode: 'real',
   exportMode: 'real'
@@ -190,6 +191,7 @@ async function ensureRuntimeTestConfig() {
   }
   const result = await runtimeElectronAPI.getTestConfig().catch(() => null);
   runtimeTestConfig.loaded = true;
+  runtimeTestConfig.platform = String((result && result.platform) || '').toLowerCase();
   runtimeTestConfig.testMode = Boolean(result && result.testMode);
   runtimeTestConfig.captureMode = String((result && result.captureMode) || 'real').toLowerCase();
   runtimeTestConfig.exportMode = String((result && result.exportMode) || 'real').toLowerCase();
@@ -417,6 +419,104 @@ function normalizeOverlayBackend(value) {
   return String(value || '').trim().toLowerCase() === 'native' ? 'native' : 'electron';
 }
 
+function isWindowsRuntimePlatform() {
+  return String(runtimeTestConfig.platform || '').toLowerCase() === 'win32';
+}
+
+function getOverlayDefaultsForCurrentPlatform() {
+  if (isWindowsRuntimePlatform()) {
+    return { backendRequested: 'native', windowBehavior: 'safe' };
+  }
+  return { backendRequested: 'electron', windowBehavior: 'always' };
+}
+
+let overlayPolicyApplyInFlight = false;
+
+async function applyOverlayPlatformPolicy() {
+  if (overlayPolicyApplyInFlight) {
+    return;
+  }
+  overlayPolicyApplyInFlight = true;
+  try {
+    const isWindows = isWindowsRuntimePlatform();
+    let desiredBackend = annotationState.backendRequested;
+    let desiredWindowBehavior = annotationState.windowBehavior;
+
+    if (!isWindows) {
+      desiredBackend = 'electron';
+      desiredWindowBehavior = 'always';
+    } else if (annotationState.backendRequested === 'native' && annotationState.backendEffective !== 'native') {
+      desiredBackend = 'electron';
+      desiredWindowBehavior = 'safe';
+    }
+
+    if (desiredBackend !== annotationState.backendRequested) {
+      annotationState.backendRequested = desiredBackend;
+      const backendResult = await electronAPI.overlaySetBackend(desiredBackend).catch(() => null);
+      if (backendResult && backendResult.ok) {
+        annotationState.backendRequested = normalizeOverlayBackend(backendResult.backendRequested || desiredBackend);
+        annotationState.backendEffective = normalizeOverlayBackend(backendResult.backendEffective || 'electron');
+        annotationState.nativeAvailable = Boolean(backendResult.nativeAvailable);
+        annotationState.nativeReason = String(backendResult.nativeReason || '');
+        annotationState.nativeOverlayActive = Boolean(backendResult.nativeOverlayActive);
+        annotationState.nativeOverlayError = String(backendResult.nativeOverlayError || '');
+      }
+      if (overlayBackendSelect) {
+        overlayBackendSelect.value = annotationState.backendRequested;
+      }
+    }
+
+    if (desiredWindowBehavior !== annotationState.windowBehavior) {
+      annotationState.windowBehavior = normalizeOverlayWindowBehavior(desiredWindowBehavior);
+      const behaviorResult = await electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior).catch(() => null);
+      if (behaviorResult && behaviorResult.ok) {
+        annotationState.windowBehavior = normalizeOverlayWindowBehavior(behaviorResult.windowBehavior || annotationState.windowBehavior);
+      }
+      if (overlayWindowBehaviorSelect) {
+        overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+      }
+    }
+  } finally {
+    overlayPolicyApplyInFlight = false;
+  }
+}
+
+async function initializeOverlayDefaultsByPlatform() {
+  await ensureRuntimeTestConfig();
+  const defaults = getOverlayDefaultsForCurrentPlatform();
+  annotationState.backendRequested = defaults.backendRequested;
+  annotationState.windowBehavior = defaults.windowBehavior;
+  if (overlayBackendSelect) {
+    overlayBackendSelect.value = annotationState.backendRequested;
+  }
+  if (overlayWindowBehaviorSelect) {
+    overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+  }
+
+  const behaviorResult = await electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior).catch(() => null);
+  if (behaviorResult && behaviorResult.ok) {
+    annotationState.windowBehavior = normalizeOverlayWindowBehavior(behaviorResult.windowBehavior || annotationState.windowBehavior);
+    if (overlayWindowBehaviorSelect) {
+      overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
+    }
+  }
+
+  const backendResult = await electronAPI.overlaySetBackend(annotationState.backendRequested).catch(() => null);
+  if (backendResult && backendResult.ok) {
+    annotationState.backendRequested = normalizeOverlayBackend(backendResult.backendRequested || annotationState.backendRequested);
+    annotationState.backendEffective = normalizeOverlayBackend(backendResult.backendEffective || 'electron');
+    annotationState.nativeAvailable = Boolean(backendResult.nativeAvailable);
+    annotationState.nativeReason = String(backendResult.nativeReason || '');
+    annotationState.nativeOverlayActive = Boolean(backendResult.nativeOverlayActive);
+    annotationState.nativeOverlayError = String(backendResult.nativeOverlayError || '');
+    if (overlayBackendSelect) {
+      overlayBackendSelect.value = annotationState.backendRequested;
+    }
+  }
+
+  await applyOverlayPlatformPolicy();
+}
+
 function refreshPenToggleLabel() {
   if (!annotationState.enabled) {
     penToggleBtn.textContent = '畫筆模式: 關';
@@ -493,6 +593,7 @@ async function syncOverlayRuntimeState() {
   if (!changed) {
     return;
   }
+  applyOverlayPlatformPolicy().catch(() => {});
   refreshPenToggleLabel();
   refreshRecordingStatusLine();
 }
@@ -4020,6 +4121,7 @@ async function startRecording() {
       );
     }
   }
+  await applyOverlayPlatformPolicy().catch(() => {});
   await syncPenStyleToOverlay();
   await electronAPI.overlaySetEnabled(annotationState.enabled);
   clearInterval(overlayStatePollTimer);
@@ -4406,6 +4508,7 @@ if (overlayWindowBehaviorSelect) {
     if (result && result.ok) {
       annotationState.windowBehavior = normalizeOverlayWindowBehavior(result.windowBehavior || selected);
     }
+    await applyOverlayPlatformPolicy().catch(() => {});
     overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
   });
 }
@@ -4423,6 +4526,7 @@ if (overlayBackendSelect) {
       annotationState.nativeOverlayActive = Boolean(result.nativeOverlayActive);
       annotationState.nativeOverlayError = String(result.nativeOverlayError || '');
     }
+    await applyOverlayPlatformPolicy().catch(() => {});
     overlayBackendSelect.value = annotationState.backendRequested;
     refreshRecordingStatusLine();
   });
@@ -4479,30 +4583,6 @@ if (overlayBackendSelect) {
   overlayBackendSelect.value = annotationState.backendRequested;
 }
 setPenMode(true).catch(() => {});
-electronAPI.overlaySetWindowBehavior(annotationState.windowBehavior)
-  .then((result) => {
-    if (result && result.ok && overlayWindowBehaviorSelect) {
-      annotationState.windowBehavior = normalizeOverlayWindowBehavior(result.windowBehavior || annotationState.windowBehavior);
-      overlayWindowBehaviorSelect.value = annotationState.windowBehavior;
-    }
-  })
-  .catch(() => {});
-electronAPI.overlaySetBackend(annotationState.backendRequested)
-  .then((result) => {
-    if (!result || !result.ok) {
-      return;
-    }
-    annotationState.backendRequested = normalizeOverlayBackend(result.backendRequested || annotationState.backendRequested);
-    annotationState.backendEffective = normalizeOverlayBackend(result.backendEffective || 'electron');
-    annotationState.nativeAvailable = Boolean(result.nativeAvailable);
-    annotationState.nativeReason = String(result.nativeReason || '');
-    annotationState.nativeOverlayActive = Boolean(result.nativeOverlayActive);
-    annotationState.nativeOverlayError = String(result.nativeOverlayError || '');
-    if (overlayBackendSelect) {
-      overlayBackendSelect.value = annotationState.backendRequested;
-    }
-  })
-  .catch(() => {});
 annotationState.color = penColorInput.value || DEFAULT_PEN_COLOR;
 annotationState.size = Number(penSizeInput.value || DEFAULT_PEN_SIZE);
 hdrMappingState.mode = normalizeHdrMappingMode((hdrMappingModeSelect && hdrMappingModeSelect.value) || hdrMappingState.mode);
@@ -4526,7 +4606,7 @@ setHdrProbeStatus('Probe: 尚未探測');
 updateHdrDiagStatus('Diag: 初始化中');
 
 Promise.resolve()
-  .then(() => ensureRuntimeTestConfig())
+  .then(() => initializeOverlayDefaultsByPlatform())
   .then(() => loadHdrExperimentalState())
   .then(() => loadSources())
   .catch((error) => {

@@ -828,11 +828,23 @@ function startNativeOverlayWindowForRecording() {
   overlayBounds = normalizeOverlayRect(getDisplayBounds(targetDisplay));
   const bounds = resolveNativeOverlayBounds(targetDisplay);
   overlayNativeBounds = { ...bounds };
+  const targetScale = Math.max(0.5, Number(targetDisplay && targetDisplay.scaleFactor ? targetDisplay.scaleFactor : 1));
+  let uiScale = targetScale;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      const mainDisplay = screen.getDisplayMatching(mainWindow.getBounds());
+      uiScale = Math.max(0.5, Number(mainDisplay && mainDisplay.scaleFactor ? mainDisplay.scaleFactor : targetScale));
+    } catch (_error) {
+      uiScale = targetScale;
+    }
+  }
+  const visualScale = Math.max(0.55, Math.min(2.0, targetScale / uiScale));
   try {
     const result = invokeNativeOverlay('startOverlay', {
       bounds,
       borderPx: 4,
-      recording: overlayRecordingActive
+      recording: overlayRecordingActive,
+      visualScale
     });
     if (result && result.ok) {
       overlayNativeActive = true;
@@ -2238,6 +2250,7 @@ app.whenReady().then(() => {
   overlayBackend = normalizeOverlayBackend(process.env.CURSORCINE_OVERLAY_BACKEND || overlayBackend);
   registerIpcHandlers(ipcMain, createIpcHandlers({
     desktopCapturer,
+    platform: process.platform,
     testMode: CURSORCINE_TEST_MODE,
     testCaptureMode: CURSORCINE_TEST_CAPTURE_MODE,
     testExportMode: CURSORCINE_TEST_EXPORT_MODE
