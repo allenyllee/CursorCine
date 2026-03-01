@@ -75,6 +75,38 @@ function readCompressedFrame(payload = {}) {
   return binding.readCompressedFrame(payload);
 }
 
+function startEncodedPreview(payload = {}) {
+  if (!binding || typeof binding.startEncodedPreview !== 'function') {
+    return {
+      ok: false,
+      reason: 'PREVIEW_ENCODED_START_FAILED',
+      message: loadError || 'Native encoded preview not available.'
+    };
+  }
+  return binding.startEncodedPreview(payload);
+}
+
+function readEncodedPreview(payload = {}) {
+  if (!binding || typeof binding.readEncodedPreview !== 'function') {
+    return {
+      ok: false,
+      reason: 'PREVIEW_ENCODED_READ_TIMEOUT',
+      message: loadError || 'Native encoded preview reader not available.'
+    };
+  }
+  return binding.readEncodedPreview(payload);
+}
+
+function stopEncodedPreview(payload = {}) {
+  if (!binding || typeof binding.stopEncodedPreview !== 'function') {
+    return {
+      ok: true,
+      skipped: true
+    };
+  }
+  return binding.stopEncodedPreview(payload);
+}
+
 function stopCapture(payload = {}) {
   if (!binding || typeof binding.stopCapture !== 'function') {
     return {
@@ -90,5 +122,8 @@ module.exports = {
   startCapture,
   readFrame,
   readCompressedFrame,
+  startEncodedPreview,
+  readEncodedPreview,
+  stopEncodedPreview,
   stopCapture
 };

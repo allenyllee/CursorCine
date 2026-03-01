@@ -1058,6 +1058,43 @@ napi_value ReadCompressedFrame(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value StartEncodedPreview(napi_env env, napi_callback_info info) {
+  napi_value result = MakeObject(env);
+  (void)info;
+#if defined(_WIN32)
+  SetNamed(env, result, "ok", MakeBool(env, false));
+  SetNamed(env, result, "reason", MakeString(env, "PREVIEW_ENCODED_START_FAILED"));
+  SetNamed(env, result, "message", MakeString(env, "MediaFoundation H.264 preview encoder is not available in this build."));
+#else
+  SetNamed(env, result, "ok", MakeBool(env, false));
+  SetNamed(env, result, "reason", MakeString(env, "NOT_WINDOWS"));
+  SetNamed(env, result, "message", MakeString(env, "Encoded preview is Windows-only."));
+#endif
+  return result;
+}
+
+napi_value ReadEncodedPreview(napi_env env, napi_callback_info info) {
+  napi_value result = MakeObject(env);
+  (void)info;
+#if defined(_WIN32)
+  SetNamed(env, result, "ok", MakeBool(env, false));
+  SetNamed(env, result, "reason", MakeString(env, "PREVIEW_ENCODED_READ_TIMEOUT"));
+  SetNamed(env, result, "message", MakeString(env, "Encoded preview reader is unavailable in this build."));
+#else
+  SetNamed(env, result, "ok", MakeBool(env, false));
+  SetNamed(env, result, "reason", MakeString(env, "NOT_WINDOWS"));
+  SetNamed(env, result, "message", MakeString(env, "Encoded preview is Windows-only."));
+#endif
+  return result;
+}
+
+napi_value StopEncodedPreview(napi_env env, napi_callback_info info) {
+  napi_value result = MakeObject(env);
+  (void)info;
+  SetNamed(env, result, "ok", MakeBool(env, true));
+  return result;
+}
+
 napi_value StopCapture(napi_env env, napi_callback_info info) {
   napi_value result = MakeObject(env);
 
@@ -1092,6 +1129,9 @@ napi_value Init(napi_env env, napi_value exports) {
       {"startCapture", 0, StartCapture, 0, 0, 0, napi_default, 0},
       {"readFrame", 0, ReadFrame, 0, 0, 0, napi_default, 0},
       {"readCompressedFrame", 0, ReadCompressedFrame, 0, 0, 0, napi_default, 0},
+      {"startEncodedPreview", 0, StartEncodedPreview, 0, 0, 0, napi_default, 0},
+      {"readEncodedPreview", 0, ReadEncodedPreview, 0, 0, 0, napi_default, 0},
+      {"stopEncodedPreview", 0, StopEncodedPreview, 0, 0, 0, napi_default, 0},
       {"stopCapture", 0, StopCapture, 0, 0, 0, napi_default, 0},
   };
 

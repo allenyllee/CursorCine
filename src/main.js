@@ -39,6 +39,8 @@ const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NAT
 const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '1') !== '0';
 const HDR_WGC_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_WGC || '1') !== '0';
 const HDR_NATIVE_PREVIEW_STREAM_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM || '1') !== '0';
+const HDR_NATIVE_PREVIEW_ENCODED_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_ENCODED || '1') !== '0';
+const HDR_PREVIEW_REQUIRE_WGC = String(process.env.CURSORCINE_HDR_PREVIEW_REQUIRE_WGC || '1') !== '0';
 const HDR_NATIVE_COMPRESSED_FRAME_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME || '0') === '1';
 const HDR_ROUTE_PREFERENCE = String(process.env.CURSORCINE_HDR_ROUTE_PREFERENCE || 'auto').trim().toLowerCase();
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
@@ -3364,6 +3366,11 @@ app.whenReady().then(() => {
         previewStreamId: 0,
         previewNativePathActive: false,
         previewNativeFallbackReason: '',
+        previewEncodedPathActive: false,
+        previewEncoderBackend: '',
+        previewEncodeQueueDepth: 0,
+        previewEncodedReadNoFrameStreak: 0,
+        previewEncodedKeyframeIntervalMs: 0,
         previewNativeReadAttempts: 0,
         previewNativeReadHits: 0,
         previewNativeFallbackCount: 0,
@@ -3383,6 +3390,8 @@ app.whenReady().then(() => {
           previewJitterMsAvg: 0,
           previewNativeReadMsAvg: 0,
           previewNativeCaptureMsAvg: 0,
+          previewNativeNoFrameStreak: 0,
+          previewNativeErrorStreak: 0,
           previewReadRoundtripMsAvg: 0,
           lastPumpAt: 0,
           lastFrameAt: 0
@@ -3524,6 +3533,15 @@ app.whenReady().then(() => {
         previewJitterMsAvg: Number(stream.jitterMsAvg || 0),
         previewNativeReadMsAvg: Number(stream.nativeReadMsAvg || 0),
         previewNativeCaptureMsAvg: Number(stream.nativeCaptureMsAvg || 0),
+        previewNativeNoFrameStreak: Number(stream.nativeNoFrameStreak || 0),
+        previewNativeErrorStreak: Number(stream.nativeErrorStreak || 0),
+        previewEncodedPathActive: Boolean(stream.previewEncodedMode),
+        previewEncoderBackend: String(stream.previewEncoderBackend || ''),
+        previewEncodeQueueDepth: Number(stream.previewEncodeQueueDepth || 0),
+        previewEncodedReadNoFrameStreak: Number(stream.previewEncodedReadNoFrameStreak || 0),
+        previewEncodedKeyframeIntervalMs: Number(stream.previewEncodedKeyframeIntervalMs || 0),
+        previewAppendMsAvg: Number(stream.previewAppendMsAvg || 0),
+        previewVideoDroppedFrames: Number(stream.previewVideoDroppedFrames || 0),
         previewReadRoundtripMsAvg: Number(stream.readRoundtripMsAvg || 0)
       }
     };
@@ -3631,6 +3649,15 @@ app.whenReady().then(() => {
       maxHeight,
       previewNativePathActive: false,
       previewNativeFallbackReason: '',
+      previewEncodedMode: false,
+      previewEncodedCodec: '',
+      previewEncodedFormat: '',
+      previewEncoderBackend: '',
+      previewEncodeQueueDepth: 0,
+      previewEncodedReadNoFrameStreak: 0,
+      previewEncodedKeyframeIntervalMs: 0,
+      previewAppendMsAvg: 0,
+      previewVideoDroppedFrames: 0,
       previewNativeReadAttempts: 0,
       previewNativeReadHits: 0,
       previewNativeFallbackCount: 0,
@@ -3650,6 +3677,8 @@ app.whenReady().then(() => {
       jitterMsAvg: 0,
       nativeReadMsAvg: 0,
       nativeCaptureMsAvg: 0,
+      nativeNoFrameStreak: 0,
+      nativeErrorStreak: 0,
       readRoundtripMsAvg: 0,
       waiters: []
     };
@@ -3751,6 +3780,241 @@ app.whenReady().then(() => {
     };
   });
 
+  ipcMain.handle('hdr:preview-encoded-start', async (_event, payload) => {
+    if (!HDR_NATIVE_PREVIEW_STREAM_ENABLED || !HDR_NATIVE_PREVIEW_ENCODED_ENABLED) {
+      return {
+        ok: false,
+        reason: 'PREVIEW_ENCODED_START_FAILED',
+        message: 'Encoded preview stream disabled.'
+      };
+    }
+    const streamId = Number(payload && payload.streamId ? payload.streamId : 0);
+    let stream = streamId > 0 ? hdrPreviewStreams.get(streamId) : null;
+    if (!stream) {
+      const sessionId = Number(payload && payload.sessionId ? payload.sessionId : 0);
+      if (sessionId > 0) {
+        const sessionObj = hdrSharedSessions.get(sessionId);
+        if (sessionObj && Number(sessionObj.previewStreamId || 0) > 0) {
+          stream = hdrPreviewStreams.get(Number(sessionObj.previewStreamId || 0)) || null;
+        }
+      }
+    }
+    if (!stream) {
+      return {
+        ok: false,
+        reason: 'INVALID_STREAM',
+        message: 'Preview stream not found.'
+      };
+    }
+    const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
+    if (!sessionObj) {
+      return {
+        ok: false,
+        reason: 'INVALID_SESSION',
+        message: 'HDR session ended.'
+      };
+    }
+    if (HDR_PREVIEW_REQUIRE_WGC && String(sessionObj.runtimeRoute || '').toLowerCase() !== 'wgc-v1') {
+      stream.previewEncodedMode = false;
+      stream.previewEncoderBackend = 'jpeg-fallback';
+      stream.previewNativeFallbackReason = 'PREVIEW_ENCODED_WGC_REQUIRED';
+      sessionObj.previewEncodedPathActive = false;
+      sessionObj.previewEncoderBackend = 'jpeg-fallback';
+      return {
+        ok: false,
+        reason: 'PREVIEW_ENCODED_WGC_REQUIRED',
+        message: 'Encoded preview requires WGC runtime route.'
+      };
+    }
+    if (!stream.workerMode) {
+      stream.previewEncodedMode = false;
+      stream.previewEncoderBackend = 'jpeg-fallback';
+      stream.previewNativeFallbackReason = 'PREVIEW_ENCODED_FALLBACK_JPEG';
+      sessionObj.previewEncodedPathActive = false;
+      sessionObj.previewEncoderBackend = 'jpeg-fallback';
+      return {
+        ok: false,
+        reason: 'PREVIEW_ENCODED_START_FAILED',
+        message: 'Encoded preview requires worker mode.'
+      };
+    }
+    const codec = String(payload && payload.codec ? payload.codec : 'h264').toLowerCase() === 'h264' ? 'h264' : 'h264';
+    const cfg = await hdrWorkerRequest('preview-encoded-config', {
+      codec,
+      maxFps: Number(payload && payload.maxFps ? payload.maxFps : stream.maxFps || HDR_PREVIEW_DEFAULT_MAX_FPS),
+      width: Number(payload && payload.width ? payload.width : stream.maxWidth || HDR_PREVIEW_DEFAULT_MAX_WIDTH),
+      height: Number(payload && payload.height ? payload.height : stream.maxHeight || HDR_PREVIEW_DEFAULT_MAX_HEIGHT),
+      bitrateKbps: Number(payload && payload.bitrateKbps ? payload.bitrateKbps : 6000),
+      keyint: Number(payload && payload.keyint ? payload.keyint : 30)
+    }, 2000).catch((error) => ({
+      ok: false,
+      reason: 'PREVIEW_ENCODED_START_FAILED',
+      message: error && error.message ? error.message : 'worker encoded preview config failed'
+    }));
+    if (!cfg || !cfg.ok) {
+      stream.previewEncodedMode = false;
+      stream.previewEncoderBackend = 'jpeg-fallback';
+      stream.previewNativeFallbackReason = String((cfg && cfg.reason) || 'PREVIEW_ENCODED_FALLBACK_JPEG');
+      sessionObj.previewEncodedPathActive = false;
+      sessionObj.previewEncoderBackend = 'jpeg-fallback';
+      return {
+        ok: false,
+        reason: String((cfg && cfg.reason) || 'PREVIEW_ENCODED_START_FAILED'),
+        message: String((cfg && cfg.message) || 'Failed to start encoded preview.')
+      };
+    }
+
+    stream.previewEncodedMode = true;
+    stream.previewEncodedCodec = String(cfg.codec || codec || 'h264');
+    stream.previewEncodedFormat = String(cfg.format || 'fmp4');
+    stream.previewEncoderBackend = String(cfg.backend || 'mf-hw');
+    stream.previewNativeFallbackReason = '';
+    sessionObj.previewEncodedPathActive = true;
+    sessionObj.previewEncoderBackend = stream.previewEncoderBackend;
+
+    return {
+      ok: true,
+      streamId: Number(stream.streamId || 0),
+      codec: stream.previewEncodedCodec,
+      format: stream.previewEncodedFormat,
+      backend: stream.previewEncoderBackend,
+      width: Number(cfg.width || stream.latestWidth || sessionObj.latestWidth || 0),
+      height: Number(cfg.height || stream.latestHeight || sessionObj.latestHeight || 0),
+      transportMode: 'native-preview-stream'
+    };
+  });
+
+  ipcMain.handle('hdr:preview-encoded-read', async (_event, payload) => {
+    const streamId = Number(payload && payload.streamId ? payload.streamId : 0);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream id invalid.' };
+    }
+    const stream = hdrPreviewStreams.get(streamId);
+    if (!stream) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream not found.' };
+    }
+    const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
+    if (!sessionObj) {
+      return { ok: false, reason: 'INVALID_SESSION', message: 'HDR shared session ended.' };
+    }
+    if (!stream.previewEncodedMode) {
+      return {
+        ok: false,
+        reason: 'PREVIEW_ENCODED_START_FAILED',
+        message: 'Encoded preview is not active.'
+      };
+    }
+    const minSeq = Math.max(0, Number(payload && payload.minSeq ? payload.minSeq : 0));
+    const previewReadStartMs = Number(process.hrtime.bigint()) / 1e6;
+    const encodedRead = await hdrWorkerRequest('frame-read-preview-encoded', {
+      minSeq
+    }, 1200).catch((error) => ({
+      ok: false,
+      reason: 'PREVIEW_ENCODED_READ_TIMEOUT',
+      message: error && error.message ? error.message : 'worker encoded preview read failed'
+    }));
+    const previewReadEndMs = Number(process.hrtime.bigint()) / 1e6;
+    stream.readRoundtripMsAvg = ewma(stream.readRoundtripMsAvg, Math.max(0, previewReadEndMs - previewReadStartMs));
+    if (!encodedRead || !encodedRead.ok) {
+      stream.previewEncodedMode = false;
+      stream.previewEncoderBackend = 'jpeg-fallback';
+      stream.previewNativeFallbackReason = String((encodedRead && encodedRead.reason) || 'PREVIEW_ENCODED_FALLBACK_JPEG');
+      sessionObj.previewEncodedPathActive = false;
+      sessionObj.previewEncoderBackend = 'jpeg-fallback';
+      return {
+        ok: false,
+        reason: String((encodedRead && encodedRead.reason) || 'PREVIEW_ENCODED_READ_TIMEOUT'),
+        message: String((encodedRead && encodedRead.message) || 'Encoded preview read failed.')
+      };
+    }
+    if (!encodedRead.hasFrame) {
+      stream.previewEncodedReadNoFrameStreak = Number(stream.previewEncodedReadNoFrameStreak || 0) + 1;
+      if (stream.previewEncodedReadNoFrameStreak >= 5) {
+        stream.previewEncodedMode = false;
+        stream.previewEncoderBackend = 'jpeg-fallback';
+        stream.previewNativeFallbackReason = 'PREVIEW_ENCODED_FALLBACK_JPEG';
+        sessionObj.previewEncodedPathActive = false;
+        sessionObj.previewEncoderBackend = 'jpeg-fallback';
+      }
+      return {
+        ok: true,
+        noFrame: true,
+        reason: String(encodedRead.reason || 'PREVIEW_ENCODED_NO_FRAME')
+      };
+    }
+    stream.previewEncodedReadNoFrameStreak = 0;
+    stream.latestSeq = Number(encodedRead.seq || stream.latestSeq || 0);
+    stream.latestTimestampMs = Number(encodedRead.ptsUs || stream.latestTimestampMs || Date.now());
+    stream.previewEncodedCodec = String(encodedRead.codec || stream.previewEncodedCodec || 'h264');
+    stream.previewEncodedFormat = String(encodedRead.format || stream.previewEncodedFormat || 'fmp4');
+    if (encodedRead.perf && typeof encodedRead.perf === 'object') {
+      stream.previewEncoderBackend = String(encodedRead.perf.previewEncoderBackend || stream.previewEncoderBackend || 'mf-hw');
+      stream.previewEncodedReadNoFrameStreak = Number(encodedRead.perf.previewEncodedReadNoFrameStreak || stream.previewEncodedReadNoFrameStreak || 0);
+      stream.previewEncodedKeyframeIntervalMs = Number(encodedRead.perf.previewEncodedKeyframeIntervalMs || stream.previewEncodedKeyframeIntervalMs || 0);
+      stream.previewEncodeQueueDepth = Number(encodedRead.perf.previewEncodeQueueDepth || stream.previewEncodeQueueDepth || 0);
+    }
+    sessionObj.previewEncodedPathActive = true;
+    sessionObj.previewEncoderBackend = stream.previewEncoderBackend;
+    sessionObj.previewEncodeQueueDepth = Number(stream.previewEncodeQueueDepth || 0);
+    sessionObj.previewEncodedReadNoFrameStreak = Number(stream.previewEncodedReadNoFrameStreak || 0);
+    sessionObj.previewEncodedKeyframeIntervalMs = Number(stream.previewEncodedKeyframeIntervalMs || 0);
+    if (sessionObj.perf) {
+      sessionObj.perf.previewReadRoundtripMsAvg = Number(stream.readRoundtripMsAvg || 0);
+      sessionObj.perf.previewAppendMsAvg = Number(stream.previewAppendMsAvg || 0);
+      sessionObj.perf.previewVideoDroppedFrames = Number(stream.previewVideoDroppedFrames || 0);
+    }
+    return {
+      ok: true,
+      seq: Number(encodedRead.seq || 0),
+      ptsUs: Number(encodedRead.ptsUs || 0),
+      dtsUs: Number(encodedRead.dtsUs || 0),
+      keyFrame: Boolean(encodedRead.keyFrame),
+      codec: stream.previewEncodedCodec,
+      format: stream.previewEncodedFormat,
+      initSegment: encodedRead.initSegment || null,
+      mediaSegment: encodedRead.mediaSegment || null,
+      perf: {
+        previewEncoderBackend: String(stream.previewEncoderBackend || ''),
+        previewEncodeQueueDepth: Number(stream.previewEncodeQueueDepth || 0),
+        previewEncodedReadNoFrameStreak: Number(stream.previewEncodedReadNoFrameStreak || 0),
+        previewEncodedKeyframeIntervalMs: Number(stream.previewEncodedKeyframeIntervalMs || 0),
+        previewReadRoundtripMsAvg: Number(stream.readRoundtripMsAvg || 0),
+        previewAppendMsAvg: Number(stream.previewAppendMsAvg || 0),
+        previewVideoDroppedFrames: Number(stream.previewVideoDroppedFrames || 0)
+      }
+    };
+  });
+
+  ipcMain.handle('hdr:preview-encoded-stop', async (_event, payload) => {
+    const streamId = Number(payload && payload.streamId ? payload.streamId : 0);
+    if (!Number.isFinite(streamId) || streamId <= 0) {
+      return { ok: false, reason: 'INVALID_STREAM', message: 'Preview stream id invalid.' };
+    }
+    const stream = hdrPreviewStreams.get(streamId);
+    if (!stream) {
+      return { ok: true, stopped: true };
+    }
+    if (stream.workerMode) {
+      await hdrWorkerRequest('preview-encoded-stop', {}, 1000).catch(() => {});
+    }
+    stream.previewEncodedMode = false;
+    stream.previewEncodedCodec = '';
+    stream.previewEncodedFormat = '';
+    stream.previewEncoderBackend = '';
+    stream.previewEncodeQueueDepth = 0;
+    stream.previewEncodedReadNoFrameStreak = 0;
+    stream.previewEncodedKeyframeIntervalMs = 0;
+    const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
+    if (sessionObj) {
+      sessionObj.previewEncodedPathActive = false;
+      sessionObj.previewEncoderBackend = '';
+      sessionObj.previewEncodeQueueDepth = 0;
+      sessionObj.previewEncodedReadNoFrameStreak = 0;
+      sessionObj.previewEncodedKeyframeIntervalMs = 0;
+    }
+    return { ok: true, stopped: true };
+  });
+
   ipcMain.handle('hdr:preview-read', async (_event, payload) => {
     const streamId = Number(payload && payload.streamId);
     if (!Number.isFinite(streamId) || streamId <= 0) {
@@ -3797,15 +4061,27 @@ app.whenReady().then(() => {
             stream.bytesPerFrameAvg = Number(workerPreviewNative.perf.previewBytesPerFrameAvg || 0);
             stream.droppedByBackpressure = Number(workerPreviewNative.perf.previewDroppedByBackpressure || 0);
             stream.jitterMsAvg = Number(workerPreviewNative.perf.previewJitterMsAvg || 0);
-            stream.nativeReadMsAvg = Number(workerPreviewNative.perf.previewNativeReadMsAvg || 0);
-            stream.nativeCaptureMsAvg = Number(workerPreviewNative.perf.previewNativeCaptureMsAvg || 0);
+          stream.nativeReadMsAvg = Number(workerPreviewNative.perf.previewNativeReadMsAvg || 0);
+          stream.nativeCaptureMsAvg = Number(workerPreviewNative.perf.previewNativeCaptureMsAvg || 0);
+            stream.nativeNoFrameStreak = Number(workerPreviewNative.perf.previewNativeNoFrameStreak || 0);
+            stream.nativeErrorStreak = Number(workerPreviewNative.perf.previewNativeErrorStreak || 0);
+            stream.previewEncoderBackend = String(workerPreviewNative.perf.previewEncoderBackend || stream.previewEncoderBackend || '');
+            stream.previewEncodeQueueDepth = Number(workerPreviewNative.perf.previewEncodeQueueDepth || stream.previewEncodeQueueDepth || 0);
+            stream.previewEncodedReadNoFrameStreak = Number(workerPreviewNative.perf.previewEncodedReadNoFrameStreak || stream.previewEncodedReadNoFrameStreak || 0);
+            stream.previewEncodedKeyframeIntervalMs = Number(workerPreviewNative.perf.previewEncodedKeyframeIntervalMs || stream.previewEncodedKeyframeIntervalMs || 0);
             if (sessionObj.perf) {
               sessionObj.perf.previewEncodeMsAvg = stream.encodeMsAvg;
               sessionObj.perf.previewBytesPerFrameAvg = stream.bytesPerFrameAvg;
               sessionObj.perf.previewDroppedByBackpressure = stream.droppedByBackpressure;
               sessionObj.perf.previewJitterMsAvg = stream.jitterMsAvg;
-              sessionObj.perf.previewNativeReadMsAvg = stream.nativeReadMsAvg;
-              sessionObj.perf.previewNativeCaptureMsAvg = stream.nativeCaptureMsAvg;
+            sessionObj.perf.previewNativeReadMsAvg = stream.nativeReadMsAvg;
+            sessionObj.perf.previewNativeCaptureMsAvg = stream.nativeCaptureMsAvg;
+              sessionObj.perf.previewNativeNoFrameStreak = stream.nativeNoFrameStreak;
+              sessionObj.perf.previewNativeErrorStreak = stream.nativeErrorStreak;
+              sessionObj.previewEncoderBackend = stream.previewEncoderBackend;
+              sessionObj.previewEncodeQueueDepth = stream.previewEncodeQueueDepth;
+              sessionObj.previewEncodedReadNoFrameStreak = stream.previewEncodedReadNoFrameStreak;
+              sessionObj.previewEncodedKeyframeIntervalMs = stream.previewEncodedKeyframeIntervalMs;
               sessionObj.perf.previewReadRoundtripMsAvg = Number(stream.readRoundtripMsAvg || 0);
             }
           }
@@ -3863,6 +4139,12 @@ app.whenReady().then(() => {
         stream.jitterMsAvg = Number(workerPreview.perf.previewJitterMsAvg || 0);
         stream.nativeReadMsAvg = Number(workerPreview.perf.previewNativeReadMsAvg || 0);
         stream.nativeCaptureMsAvg = Number(workerPreview.perf.previewNativeCaptureMsAvg || 0);
+        stream.nativeNoFrameStreak = Number(workerPreview.perf.previewNativeNoFrameStreak || 0);
+        stream.nativeErrorStreak = Number(workerPreview.perf.previewNativeErrorStreak || 0);
+        stream.previewEncoderBackend = String(workerPreview.perf.previewEncoderBackend || stream.previewEncoderBackend || '');
+        stream.previewEncodeQueueDepth = Number(workerPreview.perf.previewEncodeQueueDepth || stream.previewEncodeQueueDepth || 0);
+        stream.previewEncodedReadNoFrameStreak = Number(workerPreview.perf.previewEncodedReadNoFrameStreak || stream.previewEncodedReadNoFrameStreak || 0);
+        stream.previewEncodedKeyframeIntervalMs = Number(workerPreview.perf.previewEncodedKeyframeIntervalMs || stream.previewEncodedKeyframeIntervalMs || 0);
         if (sessionObj.perf) {
           sessionObj.perf.previewEncodeMsAvg = stream.encodeMsAvg;
           sessionObj.perf.previewBytesPerFrameAvg = stream.bytesPerFrameAvg;
@@ -3870,6 +4152,12 @@ app.whenReady().then(() => {
           sessionObj.perf.previewJitterMsAvg = stream.jitterMsAvg;
           sessionObj.perf.previewNativeReadMsAvg = stream.nativeReadMsAvg;
           sessionObj.perf.previewNativeCaptureMsAvg = stream.nativeCaptureMsAvg;
+          sessionObj.perf.previewNativeNoFrameStreak = stream.nativeNoFrameStreak;
+          sessionObj.perf.previewNativeErrorStreak = stream.nativeErrorStreak;
+          sessionObj.previewEncoderBackend = stream.previewEncoderBackend;
+          sessionObj.previewEncodeQueueDepth = stream.previewEncodeQueueDepth;
+          sessionObj.previewEncodedReadNoFrameStreak = stream.previewEncodedReadNoFrameStreak;
+          sessionObj.previewEncodedKeyframeIntervalMs = stream.previewEncodedKeyframeIntervalMs;
           sessionObj.perf.previewReadRoundtripMsAvg = Number(stream.readRoundtripMsAvg || 0);
         }
       }
@@ -3923,9 +4211,17 @@ app.whenReady().then(() => {
     }
     const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
     if (sessionObj && Number(sessionObj.previewStreamId || 0) === streamId) {
+      if (stream.workerMode && stream.previewEncodedMode) {
+        hdrWorkerRequest('preview-encoded-stop', {}, 1000).catch(() => {});
+      }
       sessionObj.previewStreamId = 0;
       sessionObj.previewNativePathActive = false;
       sessionObj.previewNativeFallbackReason = '';
+      sessionObj.previewEncodedPathActive = false;
+      sessionObj.previewEncoderBackend = '';
+      sessionObj.previewEncodeQueueDepth = 0;
+      sessionObj.previewEncodedReadNoFrameStreak = 0;
+      sessionObj.previewEncodedKeyframeIntervalMs = 0;
       sessionObj.previewNativeReadAttempts = 0;
       sessionObj.previewNativeReadHits = 0;
       sessionObj.previewNativeFallbackCount = 0;
@@ -3978,6 +4274,11 @@ app.whenReady().then(() => {
         previewStreamId: Number(session.previewStreamId || 0),
         previewNativePathActive: Boolean(session.previewNativePathActive),
         previewNativeFallbackReason: String(session.previewNativeFallbackReason || ''),
+        previewEncodedPathActive: Boolean(session.previewEncodedPathActive),
+        previewEncoderBackend: String(session.previewEncoderBackend || ''),
+        previewEncodeQueueDepth: Number(session.previewEncodeQueueDepth || 0),
+        previewEncodedReadNoFrameStreak: Number(session.previewEncodedReadNoFrameStreak || 0),
+        previewEncodedKeyframeIntervalMs: Number(session.previewEncodedKeyframeIntervalMs || 0),
         previewNativeReadAttempts: Number(session.previewNativeReadAttempts || 0),
         previewNativeReadHits: Number(session.previewNativeReadHits || 0),
         previewNativeFallbackCount: Number(session.previewNativeFallbackCount || 0),
@@ -4015,6 +4316,10 @@ app.whenReady().then(() => {
           previewJitterMsAvg: Number(session.perf && session.perf.previewJitterMsAvg ? session.perf.previewJitterMsAvg : 0),
           previewNativeReadMsAvg: Number(session.perf && session.perf.previewNativeReadMsAvg ? session.perf.previewNativeReadMsAvg : 0),
           previewNativeCaptureMsAvg: Number(session.perf && session.perf.previewNativeCaptureMsAvg ? session.perf.previewNativeCaptureMsAvg : 0),
+          previewNativeNoFrameStreak: Number(session.perf && session.perf.previewNativeNoFrameStreak ? session.perf.previewNativeNoFrameStreak : 0),
+          previewNativeErrorStreak: Number(session.perf && session.perf.previewNativeErrorStreak ? session.perf.previewNativeErrorStreak : 0),
+          previewAppendMsAvg: Number(session.perf && session.perf.previewAppendMsAvg ? session.perf.previewAppendMsAvg : 0),
+          previewVideoDroppedFrames: Number(session.perf && session.perf.previewVideoDroppedFrames ? session.perf.previewVideoDroppedFrames : 0),
           previewReadRoundtripMsAvg: Number(session.perf && session.perf.previewReadRoundtripMsAvg ? session.perf.previewReadRoundtripMsAvg : 0)
         }
       });
@@ -4033,6 +4338,10 @@ app.whenReady().then(() => {
       liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
       previewEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM',
       previewEnvFlagEnabled: HDR_NATIVE_PREVIEW_STREAM_ENABLED,
+      previewEncodedEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_ENCODED',
+      previewEncodedEnvFlagEnabled: HDR_NATIVE_PREVIEW_ENCODED_ENABLED,
+      previewRequireWgcEnvFlag: 'CURSORCINE_HDR_PREVIEW_REQUIRE_WGC',
+      previewRequireWgcEnvFlagEnabled: HDR_PREVIEW_REQUIRE_WGC,
       compressedEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME',
       compressedEnvFlagEnabled: HDR_NATIVE_COMPRESSED_FRAME_ENABLED,
       wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
@@ -4065,6 +4374,11 @@ app.whenReady().then(() => {
         previewStreamId: Number(sessionObj.previewStreamId || 0),
         previewNativePathActive: Boolean(sessionObj.previewNativePathActive),
         previewNativeFallbackReason: String(sessionObj.previewNativeFallbackReason || ''),
+        previewEncodedPathActive: Boolean(sessionObj.previewEncodedPathActive),
+        previewEncoderBackend: String(sessionObj.previewEncoderBackend || ''),
+        previewEncodeQueueDepth: Number(sessionObj.previewEncodeQueueDepth || 0),
+        previewEncodedReadNoFrameStreak: Number(sessionObj.previewEncodedReadNoFrameStreak || 0),
+        previewEncodedKeyframeIntervalMs: Number(sessionObj.previewEncodedKeyframeIntervalMs || 0),
         previewNativeReadAttempts: Number(sessionObj.previewNativeReadAttempts || 0),
         previewNativeReadHits: Number(sessionObj.previewNativeReadHits || 0),
         previewNativeFallbackCount: Number(sessionObj.previewNativeFallbackCount || 0),
@@ -4102,6 +4416,10 @@ app.whenReady().then(() => {
             previewJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.previewJitterMsAvg ? sessionObj.perf.previewJitterMsAvg : 0),
             previewNativeReadMsAvg: Number(sessionObj.perf && sessionObj.perf.previewNativeReadMsAvg ? sessionObj.perf.previewNativeReadMsAvg : 0),
             previewNativeCaptureMsAvg: Number(sessionObj.perf && sessionObj.perf.previewNativeCaptureMsAvg ? sessionObj.perf.previewNativeCaptureMsAvg : 0),
+            previewNativeNoFrameStreak: Number(sessionObj.perf && sessionObj.perf.previewNativeNoFrameStreak ? sessionObj.perf.previewNativeNoFrameStreak : 0),
+            previewNativeErrorStreak: Number(sessionObj.perf && sessionObj.perf.previewNativeErrorStreak ? sessionObj.perf.previewNativeErrorStreak : 0),
+            previewAppendMsAvg: Number(sessionObj.perf && sessionObj.perf.previewAppendMsAvg ? sessionObj.perf.previewAppendMsAvg : 0),
+            previewVideoDroppedFrames: Number(sessionObj.perf && sessionObj.perf.previewVideoDroppedFrames ? sessionObj.perf.previewVideoDroppedFrames : 0),
             previewReadRoundtripMsAvg: Number(sessionObj.perf && sessionObj.perf.previewReadRoundtripMsAvg ? sessionObj.perf.previewReadRoundtripMsAvg : 0)
           }
         });
@@ -4117,6 +4435,10 @@ app.whenReady().then(() => {
         envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
         previewEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM',
         previewEnvFlagEnabled: HDR_NATIVE_PREVIEW_STREAM_ENABLED,
+        previewEncodedEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_ENCODED',
+        previewEncodedEnvFlagEnabled: HDR_NATIVE_PREVIEW_ENCODED_ENABLED,
+        previewRequireWgcEnvFlag: 'CURSORCINE_HDR_PREVIEW_REQUIRE_WGC',
+        previewRequireWgcEnvFlagEnabled: HDR_PREVIEW_REQUIRE_WGC,
         compressedEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME',
         compressedEnvFlagEnabled: HDR_NATIVE_COMPRESSED_FRAME_ENABLED,
         wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',

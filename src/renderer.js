@@ -139,6 +139,7 @@ const HDR_PREVIEW_DEFAULT_MAX_FPS = 60;
 const HDR_PREVIEW_DEFAULT_QUALITY = 78;
 const HDR_PREVIEW_DEFAULT_MAX_WIDTH = 1920;
 const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = 1200;
+const HDR_PREVIEW_ENCODED_CODEC = 'h264';
 
 let sources = [];
 let sourceStream;
@@ -316,12 +317,21 @@ const hdrMappingState = {
   mainTopPreviewNativeReadHits: 0,
   mainTopPreviewNativeFallbackCount: 0,
   mainTopPreviewNativeFallbackTopReason: '',
+  mainTopPreviewEncodedPathActive: false,
+  mainTopPreviewEncoderBackend: '',
+  mainTopPreviewEncodeQueueDepth: 0,
+  mainTopPreviewEncodedReadNoFrameStreak: 0,
+  mainTopPreviewEncodedKeyframeIntervalMs: 0,
+  mainTopPreviewAppendMsAvg: 0,
+  mainTopPreviewVideoDroppedFrames: 0,
   nativeEnvFlag: '',
   nativeEnvFlagEnabled: false,
   nativeLiveEnvFlag: '',
   nativeLiveEnvFlagEnabled: false,
   nativePreviewEnvFlag: '',
   nativePreviewEnvFlagEnabled: false,
+  nativePreviewEncodedEnvFlag: '',
+  nativePreviewEncodedEnvFlagEnabled: false,
   nativeCompressedEnvFlag: '',
   nativeCompressedEnvFlagEnabled: false,
   wgcEnvFlag: '',
@@ -366,12 +376,28 @@ const nativeHdrState = {
   previewMime: '',
   previewMaxFps: HDR_PREVIEW_DEFAULT_MAX_FPS,
   previewQuality: HDR_PREVIEW_DEFAULT_QUALITY,
+  previewEncodedMode: false,
+  previewEncodedCodec: HDR_PREVIEW_ENCODED_CODEC,
+  previewEncodedFormat: 'fmp4',
+  previewEncoderBackend: '',
+  previewEncodedReadNoFrameStreak: 0,
+  previewEncodedKeyframeIntervalMs: 0,
+  previewAppendMsAvg: 0,
+  previewVideoDroppedFrames: 0,
   captureFps: 0,
   renderFps: 0,
   queueDepth: 0,
   runtimeLegacyRetryAttempted: false,
   rendererBlitMsAvg: 0,
-  previewDecodeMsAvg: 0
+  previewDecodeMsAvg: 0,
+  previewVideoEl: null,
+  previewMediaSource: null,
+  previewSourceBuffer: null,
+  previewSourceOpen: null,
+  previewObjectUrl: '',
+  previewInitAppended: false,
+  previewPendingInitSegment: null,
+  previewPendingMediaSegment: null
 };
 
 const viewState = {
@@ -871,6 +897,13 @@ function updateHdrDiagStatus(message) {
     ', pNatHit=' + String(Math.round(Number(hdrMappingState.mainTopPreviewNativeReadHits || 0))) + '/' + String(Math.round(Number(hdrMappingState.mainTopPreviewNativeReadAttempts || 0))) +
     ', pNatFb=' + String(Math.round(Number(hdrMappingState.mainTopPreviewNativeFallbackCount || 0))) +
     ', pNatFbReason=' + String(hdrMappingState.mainTopPreviewNativeFallbackTopReason || '-') +
+    ', pEncPath=' + (hdrMappingState.mainTopPreviewEncodedPathActive ? '1' : '0') +
+    ', pEncBe=' + String(hdrMappingState.mainTopPreviewEncoderBackend || '-') +
+    ', pEncQ=' + String(Math.round(Number(hdrMappingState.mainTopPreviewEncodeQueueDepth || 0))) +
+    ', pEncNoF=' + String(Math.round(Number(hdrMappingState.mainTopPreviewEncodedReadNoFrameStreak || 0))) +
+    ', pEncKfi=' + String(Number(hdrMappingState.mainTopPreviewEncodedKeyframeIntervalMs || 0).toFixed(1)) +
+    ', pAppMs=' + String(Number(hdrMappingState.mainTopPreviewAppendMsAvg || 0).toFixed(2)) +
+    ', pVdrop=' + String(Math.round(Number(hdrMappingState.mainTopPreviewVideoDroppedFrames || 0))) +
     ', pDecMs=' + String(Number(nativeHdrState.previewDecodeMsAvg || 0).toFixed(2)) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
     ', mainBindReason=' + String(hdrMappingState.mainTopLastBindReason || '-') +
@@ -889,6 +922,7 @@ function updateHdrDiagStatus(message) {
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
     ', live=' + (hdrMappingState.nativeLiveEnvFlag || '-') + ':' + (hdrMappingState.nativeLiveEnvFlagEnabled ? '1' : '0') +
     ', preview=' + (hdrMappingState.nativePreviewEnvFlag || '-') + ':' + (hdrMappingState.nativePreviewEnvFlagEnabled ? '1' : '0') +
+    ', penc=' + (hdrMappingState.nativePreviewEncodedEnvFlag || '-') + ':' + (hdrMappingState.nativePreviewEncodedEnvFlagEnabled ? '1' : '0') +
     ', pcmp=' + (hdrMappingState.nativeCompressedEnvFlag || '-') + ':' + (hdrMappingState.nativeCompressedEnvFlagEnabled ? '1' : '0') +
     ', wgc=' + (hdrMappingState.wgcEnvFlag || '-') + ':' + (hdrMappingState.wgcEnvFlagEnabled ? '1' : '0') +
     ', smoke=' + (
@@ -1049,6 +1083,13 @@ async function copyHdrDiagnosticsSnapshot() {
       mainTopPreviewNativeReadHits: hdrMappingState.mainTopPreviewNativeReadHits,
       mainTopPreviewNativeFallbackCount: hdrMappingState.mainTopPreviewNativeFallbackCount,
       mainTopPreviewNativeFallbackTopReason: hdrMappingState.mainTopPreviewNativeFallbackTopReason,
+      mainTopPreviewEncodedPathActive: hdrMappingState.mainTopPreviewEncodedPathActive,
+      mainTopPreviewEncoderBackend: hdrMappingState.mainTopPreviewEncoderBackend,
+      mainTopPreviewEncodeQueueDepth: hdrMappingState.mainTopPreviewEncodeQueueDepth,
+      mainTopPreviewEncodedReadNoFrameStreak: hdrMappingState.mainTopPreviewEncodedReadNoFrameStreak,
+      mainTopPreviewEncodedKeyframeIntervalMs: hdrMappingState.mainTopPreviewEncodedKeyframeIntervalMs,
+      mainTopPreviewAppendMsAvg: hdrMappingState.mainTopPreviewAppendMsAvg,
+      mainTopPreviewVideoDroppedFrames: hdrMappingState.mainTopPreviewVideoDroppedFrames,
       lastFallbackReason: hdrMappingState.lastFallbackReason,
       lastFallbackAt: hdrMappingState.lastFallbackAt,
       nativeState: {
@@ -1067,6 +1108,12 @@ async function copyHdrDiagnosticsSnapshot() {
         queueDepth: nativeHdrState.queueDepth,
         rendererBlitMsAvg: nativeHdrState.rendererBlitMsAvg,
         previewDecodeMsAvg: nativeHdrState.previewDecodeMsAvg,
+        previewEncodedMode: nativeHdrState.previewEncodedMode,
+        previewEncoderBackend: nativeHdrState.previewEncoderBackend,
+        previewEncodedReadNoFrameStreak: nativeHdrState.previewEncodedReadNoFrameStreak,
+        previewEncodedKeyframeIntervalMs: nativeHdrState.previewEncodedKeyframeIntervalMs,
+        previewAppendMsAvg: nativeHdrState.previewAppendMsAvg,
+        previewVideoDroppedFrames: nativeHdrState.previewVideoDroppedFrames,
         supportsSharedFrameRead: Boolean(nativeHdrState.sharedFrameView && nativeHdrState.sharedControlView),
         transportMode: getEffectiveHdrTransportMode()
       },
@@ -2288,10 +2335,174 @@ function stopNativeHdrFramePump() {
   nativeHdrFramePumpRunning = false;
 }
 
+function resetNativeEncodedPreviewPipeline() {
+  nativeHdrState.previewPendingInitSegment = null;
+  nativeHdrState.previewPendingMediaSegment = null;
+  nativeHdrState.previewInitAppended = false;
+  nativeHdrState.previewSourceBuffer = null;
+  nativeHdrState.previewSourceOpen = null;
+  nativeHdrState.previewMediaSource = null;
+  if (nativeHdrState.previewVideoEl) {
+    try {
+      nativeHdrState.previewVideoEl.pause();
+      nativeHdrState.previewVideoEl.removeAttribute('src');
+      nativeHdrState.previewVideoEl.load();
+      if (nativeHdrState.previewVideoEl.parentNode) {
+        nativeHdrState.previewVideoEl.parentNode.removeChild(nativeHdrState.previewVideoEl);
+      }
+    } catch (_error) {
+    }
+  }
+  nativeHdrState.previewVideoEl = null;
+  if (nativeHdrState.previewObjectUrl) {
+    try {
+      URL.revokeObjectURL(nativeHdrState.previewObjectUrl);
+    } catch (_error) {
+    }
+  }
+  nativeHdrState.previewObjectUrl = '';
+}
+
+function toUint8Array(input) {
+  if (!input) return null;
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  return null;
+}
+
+async function ensureNativeEncodedPreviewPipeline(codec = HDR_PREVIEW_ENCODED_CODEC) {
+  if (nativeHdrState.previewMediaSource && nativeHdrState.previewSourceBuffer && nativeHdrState.previewVideoEl) {
+    return true;
+  }
+  resetNativeEncodedPreviewPipeline();
+  if (typeof MediaSource === 'undefined') {
+    return false;
+  }
+  const mediaSource = new MediaSource();
+  const videoEl = document.createElement('video');
+  videoEl.muted = true;
+  videoEl.autoplay = true;
+  videoEl.playsInline = true;
+  videoEl.style.display = 'none';
+  document.body.appendChild(videoEl);
+  const objectUrl = URL.createObjectURL(mediaSource);
+  videoEl.src = objectUrl;
+  const sourceOpen = new Promise((resolve, reject) => {
+    const onOpen = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('MediaSource open failed'));
+    };
+    const cleanup = () => {
+      mediaSource.removeEventListener('sourceopen', onOpen);
+      mediaSource.removeEventListener('error', onError);
+    };
+    mediaSource.addEventListener('sourceopen', onOpen);
+    mediaSource.addEventListener('error', onError);
+  });
+  nativeHdrState.previewMediaSource = mediaSource;
+  nativeHdrState.previewVideoEl = videoEl;
+  nativeHdrState.previewObjectUrl = objectUrl;
+  nativeHdrState.previewSourceOpen = sourceOpen;
+  await sourceOpen.catch(() => false);
+  if (!nativeHdrState.previewMediaSource) {
+    return false;
+  }
+  const codecCandidates = codec === 'h264'
+    ? ['video/mp4; codecs="avc1.64001f"', 'video/mp4; codecs="avc1.42E01E"']
+    : ['video/mp4; codecs="avc1.42E01E"'];
+  const mimeType = codecCandidates.find((value) => MediaSource.isTypeSupported(value)) || '';
+  if (!mimeType) {
+    resetNativeEncodedPreviewPipeline();
+    return false;
+  }
+  let sourceBuffer = null;
+  try {
+    sourceBuffer = nativeHdrState.previewMediaSource.addSourceBuffer(mimeType);
+  } catch (_error) {
+    resetNativeEncodedPreviewPipeline();
+    return false;
+  }
+  sourceBuffer.mode = 'segments';
+  sourceBuffer.addEventListener('updateend', () => {
+    try {
+      if (nativeHdrState.previewPendingInitSegment && !nativeHdrState.previewInitAppended && !sourceBuffer.updating) {
+        const initSeg = nativeHdrState.previewPendingInitSegment;
+        nativeHdrState.previewPendingInitSegment = null;
+        sourceBuffer.appendBuffer(initSeg);
+        nativeHdrState.previewInitAppended = true;
+        return;
+      }
+      if (nativeHdrState.previewPendingMediaSegment && !sourceBuffer.updating) {
+        const seg = nativeHdrState.previewPendingMediaSegment;
+        nativeHdrState.previewPendingMediaSegment = null;
+        sourceBuffer.appendBuffer(seg);
+      }
+    } catch (_error) {
+    }
+  });
+  nativeHdrState.previewSourceBuffer = sourceBuffer;
+  return true;
+}
+
+async function appendEncodedPreviewSegment(frame) {
+  const codec = String((frame && frame.codec) || HDR_PREVIEW_ENCODED_CODEC).toLowerCase();
+  const ok = await ensureNativeEncodedPreviewPipeline(codec);
+  if (!ok || !nativeHdrState.previewSourceBuffer) {
+    const err = new Error('Encoded preview pipeline unavailable');
+    err.code = 'PREVIEW_ENCODED_MSE_APPEND_FAILED';
+    throw err;
+  }
+  const initSegment = toUint8Array(frame && frame.initSegment);
+  const mediaSegment = toUint8Array(frame && frame.mediaSegment);
+  if (!mediaSegment || mediaSegment.byteLength <= 0) {
+    return false;
+  }
+  const sb = nativeHdrState.previewSourceBuffer;
+  const appendStart = performance.now();
+  try {
+    if (initSegment && !nativeHdrState.previewInitAppended) {
+      if (sb.updating) {
+        nativeHdrState.previewPendingInitSegment = initSegment;
+      } else {
+        sb.appendBuffer(initSegment);
+        nativeHdrState.previewInitAppended = true;
+      }
+    }
+    if (sb.updating) {
+      if (nativeHdrState.previewPendingMediaSegment) {
+        nativeHdrState.previewVideoDroppedFrames += 1;
+      }
+      nativeHdrState.previewPendingMediaSegment = mediaSegment;
+      return true;
+    }
+    sb.appendBuffer(mediaSegment);
+    const appendMs = Math.max(0, performance.now() - appendStart);
+    nativeHdrState.previewAppendMsAvg = nativeHdrState.previewAppendMsAvg > 0
+      ? ((nativeHdrState.previewAppendMsAvg * 0.8) + (appendMs * 0.2))
+      : appendMs;
+    return true;
+  } catch (error) {
+    const err = new Error(error && error.message ? error.message : 'MSE append failed');
+    err.code = 'PREVIEW_ENCODED_MSE_APPEND_FAILED';
+    throw err;
+  }
+}
+
 async function stopNativeHdrCapture() {
   stopNativeHdrFramePump();
 
   if (nativeHdrState.sessionId > 0) {
+    if (nativeHdrState.previewStreamId > 0 && nativeHdrState.previewEncodedMode &&
+      electronAPI && typeof electronAPI.hdrPreviewEncodedStop === 'function') {
+      await electronAPI.hdrPreviewEncodedStop({
+        streamId: nativeHdrState.previewStreamId
+      }).catch(() => {});
+    }
     if (nativeHdrState.previewStreamId > 0 && electronAPI && typeof electronAPI.hdrPreviewStop === 'function') {
       await electronAPI.hdrPreviewStop({
         streamId: nativeHdrState.previewStreamId
@@ -2329,12 +2540,21 @@ async function stopNativeHdrCapture() {
   nativeHdrState.previewMime = '';
   nativeHdrState.previewMaxFps = HDR_PREVIEW_DEFAULT_MAX_FPS;
   nativeHdrState.previewQuality = HDR_PREVIEW_DEFAULT_QUALITY;
+  nativeHdrState.previewEncodedMode = false;
+  nativeHdrState.previewEncodedCodec = HDR_PREVIEW_ENCODED_CODEC;
+  nativeHdrState.previewEncodedFormat = 'fmp4';
+  nativeHdrState.previewEncoderBackend = '';
+  nativeHdrState.previewEncodedReadNoFrameStreak = 0;
+  nativeHdrState.previewEncodedKeyframeIntervalMs = 0;
+  nativeHdrState.previewAppendMsAvg = 0;
+  nativeHdrState.previewVideoDroppedFrames = 0;
   nativeHdrState.captureFps = 0;
   nativeHdrState.renderFps = 0;
   nativeHdrState.queueDepth = 0;
   nativeHdrState.runtimeLegacyRetryAttempted = false;
   nativeHdrState.rendererBlitMsAvg = 0;
   nativeHdrState.previewDecodeMsAvg = 0;
+  resetNativeEncodedPreviewPipeline();
 }
 
 async function blitNativeFrameToCanvas(frame) {
@@ -2342,6 +2562,33 @@ async function blitNativeFrameToCanvas(frame) {
     return;
   }
   const blitStart = performance.now();
+
+  const encodedFormat = String((frame && frame.format) || '').toLowerCase();
+  if (encodedFormat === 'fmp4' || (frame && frame.mediaSegment)) {
+    const width = Math.max(1, Number(frame && frame.width ? frame.width : nativeHdrState.width || 1));
+    const height = Math.max(1, Number(frame && frame.height ? frame.height : nativeHdrState.height || 1));
+    ensureNativeHdrCanvas(width, height);
+    const decodeStart = performance.now();
+    await appendEncodedPreviewSegment(frame);
+    if (nativeHdrState.previewVideoEl && nativeHdrState.previewVideoEl.readyState >= 2) {
+      nativeHdrState.ctx.drawImage(nativeHdrState.previewVideoEl, 0, 0, width, height);
+    }
+    const decodeMs = Math.max(0, performance.now() - decodeStart);
+    nativeHdrState.previewDecodeMsAvg = nativeHdrState.previewDecodeMsAvg > 0
+      ? ((nativeHdrState.previewDecodeMsAvg * 0.8) + (decodeMs * 0.2))
+      : decodeMs;
+    const blitMs = Math.max(0, performance.now() - blitStart);
+    nativeHdrState.rendererBlitMsAvg = nativeHdrState.rendererBlitMsAvg > 0
+      ? ((nativeHdrState.rendererBlitMsAvg * 0.8) + (blitMs * 0.2))
+      : blitMs;
+    nativeHdrState.lastFrameAtMs = performance.now();
+    if (!nativeHdrState.firstFrameReceived) {
+      nativeHdrState.firstFrameReceived = true;
+      nativeHdrState.startupDeadlineMs = 0;
+    }
+    nativeHdrState.frameCount += 1;
+    return;
+  }
 
   const width = Math.max(1, Number(frame && frame.width ? frame.width : nativeHdrState.width || 1));
   const height = Math.max(1, Number(frame && frame.height ? frame.height : nativeHdrState.height || 1));
@@ -2570,6 +2817,56 @@ async function tryReadNativeFrameFromPreviewStream() {
   };
 }
 
+async function tryReadNativeFrameFromEncodedPreviewStream() {
+  const streamId = Number(nativeHdrState.previewStreamId || 0);
+  if (streamId <= 0 || !electronAPI || typeof electronAPI.hdrPreviewEncodedRead !== 'function') {
+    return null;
+  }
+  const result = await electronAPI.hdrPreviewEncodedRead({
+    streamId,
+    minSeq: Number(nativeHdrState.previewSeq || 0),
+    timeoutMs: HDR_PREVIEW_READ_TIMEOUT_MS
+  }).catch(() => null);
+  if (!result || result.noFrame) {
+    nativeHdrState.previewEncodedReadNoFrameStreak += 1;
+    return null;
+  }
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: String(result.reason || 'PREVIEW_ENCODED_READ_TIMEOUT')
+    };
+  }
+  const seq = Number(result.seq || 0);
+  if (seq <= Number(nativeHdrState.previewSeq || 0)) {
+    return null;
+  }
+  const queueDepth = Math.max(0, seq - Number(nativeHdrState.previewSeq || 0) - 1);
+  nativeHdrState.queueDepth = queueDepth;
+  if (queueDepth > 0) {
+    nativeHdrState.droppedFrames += queueDepth;
+  }
+  nativeHdrState.previewSeq = seq;
+  nativeHdrState.previewEncodedReadNoFrameStreak = 0;
+  if (result.perf && typeof result.perf === 'object') {
+    nativeHdrState.previewEncoderBackend = String(result.perf.previewEncoderBackend || nativeHdrState.previewEncoderBackend || '');
+    nativeHdrState.previewEncodedReadNoFrameStreak = Number(result.perf.previewEncodedReadNoFrameStreak || nativeHdrState.previewEncodedReadNoFrameStreak || 0);
+    nativeHdrState.previewEncodedKeyframeIntervalMs = Number(result.perf.previewEncodedKeyframeIntervalMs || nativeHdrState.previewEncodedKeyframeIntervalMs || 0);
+    nativeHdrState.previewAppendMsAvg = Number(result.perf.previewAppendMsAvg || nativeHdrState.previewAppendMsAvg || 0);
+    nativeHdrState.previewVideoDroppedFrames = Number(result.perf.previewVideoDroppedFrames || nativeHdrState.previewVideoDroppedFrames || 0);
+  }
+  return {
+    ok: true,
+    frameSeq: seq,
+    width: Math.max(1, Number(nativeHdrState.width || 1)),
+    height: Math.max(1, Number(nativeHdrState.height || 1)),
+    format: String(result.format || 'fmp4'),
+    codec: String(result.codec || nativeHdrState.previewEncodedCodec || HDR_PREVIEW_ENCODED_CODEC),
+    initSegment: result.initSegment || null,
+    mediaSegment: result.mediaSegment || null
+  };
+}
+
 async function fallbackNativeToDesktopVideo(reason) {
   if (nativeHdrFallbackAttempted) {
     return;
@@ -2636,21 +2933,27 @@ async function pollNativeHdrFrame() {
 
     const result = tryReadNativeFrameFromSharedBuffer();
     if (!result) {
-      const previewResult = await tryReadNativeFrameFromPreviewStream();
+      const previewResult = nativeHdrState.previewEncodedMode
+        ? await tryReadNativeFrameFromEncodedPreviewStream()
+        : await tryReadNativeFrameFromPreviewStream();
       if (previewResult && previewResult.ok) {
         if (hdrMappingState.runtimeTransportMode !== 'native-preview-stream') {
           hdrMappingState.runtimeTransportMode = 'native-preview-stream';
           setHdrRuntimeRoute(String(hdrMappingState.runtimeRoute || 'native'), null, 'native-preview-stream');
         }
-        hdrMappingState.runtimeTransportReason = nativeHdrState.queueDepth > 0
-          ? 'PREVIEW_STREAM_BACKPRESSURE_DROP'
-          : 'NATIVE_PREVIEW_OK';
+        hdrMappingState.runtimeTransportReason = nativeHdrState.previewEncodedMode
+          ? (nativeHdrState.queueDepth > 0 ? 'PREVIEW_STREAM_BACKPRESSURE_DROP' : 'NATIVE_PREVIEW_H264_OK')
+          : (nativeHdrState.queueDepth > 0 ? 'PREVIEW_STREAM_BACKPRESSURE_DROP' : 'NATIVE_PREVIEW_OK');
         nativeHdrState.readFailures = 0;
         await blitNativeFrameToCanvas(previewResult);
         return;
       }
       if (previewResult && !previewResult.ok) {
-        hdrMappingState.runtimeTransportReason = String(previewResult.reason || 'PREVIEW_STREAM_READ_TIMEOUT');
+        hdrMappingState.runtimeTransportReason = String(previewResult.reason || (nativeHdrState.previewEncodedMode ? 'PREVIEW_ENCODED_READ_TIMEOUT' : 'PREVIEW_STREAM_READ_TIMEOUT'));
+        if (nativeHdrState.previewEncodedMode) {
+          nativeHdrState.previewEncodedMode = false;
+          resetNativeEncodedPreviewPipeline();
+        }
         nativeHdrState.readFailures += 1;
         if (nativeHdrState.readFailures >= HDR_NATIVE_MAX_READ_FAILURES) {
           await fallbackNativeToDesktopVideo(previewResult.reason || 'PREVIEW_STREAM_READ_FAILED');
@@ -2840,6 +3143,15 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
   let previewStreamOk = false;
   let previewStreamId = 0;
   let transportReason = '';
+  nativeHdrState.previewEncodedMode = false;
+  nativeHdrState.previewEncodedCodec = HDR_PREVIEW_ENCODED_CODEC;
+  nativeHdrState.previewEncodedFormat = 'fmp4';
+  nativeHdrState.previewEncoderBackend = '';
+  nativeHdrState.previewEncodedReadNoFrameStreak = 0;
+  nativeHdrState.previewEncodedKeyframeIntervalMs = 0;
+  nativeHdrState.previewAppendMsAvg = 0;
+  nativeHdrState.previewVideoDroppedFrames = 0;
+  resetNativeEncodedPreviewPipeline();
   const previewPreferred = hdrMappingState.nativePreviewEnvFlagEnabled !== false &&
     electronAPI &&
     typeof electronAPI.hdrPreviewStart === 'function';
@@ -2860,6 +3172,40 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       previewStreamOk = true;
       previewStreamId = Number(previewStart.streamId || 0);
       transportReason = 'NATIVE_PREVIEW_OK';
+      nativeHdrState.previewEncodedMode = false;
+      if (electronAPI && typeof electronAPI.hdrPreviewEncodedStart === 'function') {
+        const encodedStart = await electronAPI.hdrPreviewEncodedStart({
+          streamId: previewStreamId,
+          sessionId: Number(start.sessionId || 0),
+          codec: HDR_PREVIEW_ENCODED_CODEC,
+          maxFps: HDR_PREVIEW_DEFAULT_MAX_FPS,
+          width: HDR_PREVIEW_DEFAULT_MAX_WIDTH,
+          height: HDR_PREVIEW_DEFAULT_MAX_HEIGHT
+        }).catch((error) => ({
+          ok: false,
+          reason: 'PREVIEW_ENCODED_START_FAILED',
+          message: error && error.message ? error.message : 'encoded preview start exception'
+        }));
+        if (encodedStart && encodedStart.ok) {
+          nativeHdrState.previewEncodedMode = true;
+          nativeHdrState.previewEncodedCodec = String(encodedStart.codec || HDR_PREVIEW_ENCODED_CODEC);
+          nativeHdrState.previewEncodedFormat = String(encodedStart.format || 'fmp4');
+          nativeHdrState.previewEncoderBackend = String(encodedStart.backend || '');
+          transportReason = 'NATIVE_PREVIEW_H264_OK';
+          pushHdrDecisionTrace('preview-encoded-start', {
+            ok: true,
+            streamId: previewStreamId,
+            codec: nativeHdrState.previewEncodedCodec
+          });
+        } else if (encodedStart && encodedStart.reason) {
+          transportReason = 'PREVIEW_ENCODED_FALLBACK_JPEG';
+          pushHdrDecisionTrace('preview-encoded-start', {
+            ok: false,
+            reason: String(encodedStart.reason || 'PREVIEW_ENCODED_START_FAILED'),
+            message: String(encodedStart.message || '')
+          });
+        }
+      }
       hdrMappingState.sharedPreflightOk = null;
       hdrMappingState.sharedPreflightReason = '';
       hdrMappingState.uiBindLastReason = '';
@@ -3013,7 +3359,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       : (sharedBindOk ? 'shared-buffer' : (start.transportMode || 'http-fallback'))
   );
   hdrMappingState.runtimeTransportReason = previewStreamOk
-    ? 'NATIVE_PREVIEW_OK'
+    ? (nativeHdrState.previewEncodedMode ? 'NATIVE_PREVIEW_H264_OK' : 'NATIVE_PREVIEW_OK')
     : (sharedBindOk ? 'OK' : (transportReason || 'BIND_REJECTED'));
   hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
     (hdrMappingState.runtimeTransportMode ? ('/' + hdrMappingState.runtimeTransportMode) : '');
@@ -3221,6 +3567,13 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopPreviewNativeReadHits = 0;
     hdrMappingState.mainTopPreviewNativeFallbackCount = 0;
     hdrMappingState.mainTopPreviewNativeFallbackTopReason = '';
+    hdrMappingState.mainTopPreviewEncodedPathActive = false;
+    hdrMappingState.mainTopPreviewEncoderBackend = '';
+    hdrMappingState.mainTopPreviewEncodeQueueDepth = 0;
+    hdrMappingState.mainTopPreviewEncodedReadNoFrameStreak = 0;
+    hdrMappingState.mainTopPreviewEncodedKeyframeIntervalMs = 0;
+    hdrMappingState.mainTopPreviewAppendMsAvg = 0;
+    hdrMappingState.mainTopPreviewVideoDroppedFrames = 0;
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
     hdrMappingState.nativeEnvFlag = '';
@@ -3229,6 +3582,8 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeLiveEnvFlagEnabled = false;
     hdrMappingState.nativePreviewEnvFlag = '';
     hdrMappingState.nativePreviewEnvFlagEnabled = false;
+    hdrMappingState.nativePreviewEncodedEnvFlag = '';
+    hdrMappingState.nativePreviewEncodedEnvFlagEnabled = false;
     hdrMappingState.nativeCompressedEnvFlag = '';
     hdrMappingState.nativeCompressedEnvFlagEnabled = false;
     hdrMappingState.wgcEnvFlag = '';
@@ -3282,6 +3637,13 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopPreviewNativeReadAttempts = Number(top && top.previewNativeReadAttempts ? top.previewNativeReadAttempts : 0);
   hdrMappingState.mainTopPreviewNativeReadHits = Number(top && top.previewNativeReadHits ? top.previewNativeReadHits : 0);
   hdrMappingState.mainTopPreviewNativeFallbackCount = Number(top && top.previewNativeFallbackCount ? top.previewNativeFallbackCount : 0);
+  hdrMappingState.mainTopPreviewEncodedPathActive = Boolean(top && top.previewEncodedPathActive);
+  hdrMappingState.mainTopPreviewEncoderBackend = String((top && top.previewEncoderBackend) || '');
+  hdrMappingState.mainTopPreviewEncodeQueueDepth = Number(top && top.previewEncodeQueueDepth ? top.previewEncodeQueueDepth : 0);
+  hdrMappingState.mainTopPreviewEncodedReadNoFrameStreak = Number(top && top.previewEncodedReadNoFrameStreak ? top.previewEncodedReadNoFrameStreak : 0);
+  hdrMappingState.mainTopPreviewEncodedKeyframeIntervalMs = Number(top && top.previewEncodedKeyframeIntervalMs ? top.previewEncodedKeyframeIntervalMs : 0);
+  hdrMappingState.mainTopPreviewAppendMsAvg = Number(top && top.perf && top.perf.previewAppendMsAvg ? top.perf.previewAppendMsAvg : 0);
+  hdrMappingState.mainTopPreviewVideoDroppedFrames = Number(top && top.perf && top.perf.previewVideoDroppedFrames ? top.perf.previewVideoDroppedFrames : 0);
   const nativeFallbackReasonCounts = top && top.previewNativeFallbackReasonCounts && typeof top.previewNativeFallbackReasonCounts === 'object'
     ? top.previewNativeFallbackReasonCounts
     : {};
@@ -3299,7 +3661,9 @@ async function loadHdrExperimentalState() {
     if (topTransportMode === 'shared-buffer') {
       hdrMappingState.runtimeTransportReason = 'OK';
     } else if (topTransportMode === 'native-preview-stream') {
-      hdrMappingState.runtimeTransportReason = 'NATIVE_PREVIEW_OK';
+      hdrMappingState.runtimeTransportReason = hdrMappingState.mainTopPreviewEncodedPathActive
+        ? 'NATIVE_PREVIEW_H264_OK'
+        : 'NATIVE_PREVIEW_OK';
     } else {
       hdrMappingState.runtimeTransportReason = String(top.lastBindReason || hdrMappingState.uiBindLastReason || 'BIND_REJECTED');
     }
@@ -3314,6 +3678,8 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeLiveEnvFlagEnabled = Boolean(result.liveEnvFlagEnabled);
   hdrMappingState.nativePreviewEnvFlag = String(result.previewEnvFlag || '');
   hdrMappingState.nativePreviewEnvFlagEnabled = Boolean(result.previewEnvFlagEnabled);
+  hdrMappingState.nativePreviewEncodedEnvFlag = String(result.previewEncodedEnvFlag || '');
+  hdrMappingState.nativePreviewEncodedEnvFlagEnabled = Boolean(result.previewEncodedEnvFlagEnabled);
   hdrMappingState.nativeCompressedEnvFlag = String(result.compressedEnvFlag || '');
   hdrMappingState.nativeCompressedEnvFlagEnabled = Boolean(result.compressedEnvFlagEnabled);
   hdrMappingState.wgcEnvFlag = String(result.wgcEnvFlag || '');

@@ -19,6 +19,9 @@ describe('preload api contract', () => {
     expect(typeof api.hdrPreviewStart).toBe('function');
     expect(typeof api.hdrPreviewRead).toBe('function');
     expect(typeof api.hdrPreviewStop).toBe('function');
+    expect(typeof api.hdrPreviewEncodedStart).toBe('function');
+    expect(typeof api.hdrPreviewEncodedRead).toBe('function');
+    expect(typeof api.hdrPreviewEncodedStop).toBe('function');
     expect(typeof api.hdrSharedPreflight).toBe('function');
     expect(typeof api.hdrSharedBindPrepared).toBe('function');
     expect(typeof api.exportTrimmedVideoFromPath).toBe('function');
@@ -36,6 +39,9 @@ describe('preload api contract', () => {
     await api.hdrPreviewStart({ sessionId: 1, codec: 'jpeg' });
     await api.hdrPreviewRead({ streamId: 1, minSeq: 0 });
     await api.hdrPreviewStop({ streamId: 1 });
+    await api.hdrPreviewEncodedStart({ sessionId: 1, codec: 'h264' });
+    await api.hdrPreviewEncodedRead({ streamId: 1, minSeq: 0 });
+    await api.hdrPreviewEncodedStop({ streamId: 1 });
     await api.hdrSharedPreflight({ sharedFrameBuffer: {}, sharedControlBuffer: {} });
 
     expect(ipcRenderer.invoke).toHaveBeenCalledWith('desktop-sources:get');
@@ -44,6 +50,9 @@ describe('preload api contract', () => {
     expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:preview-start', { sessionId: 1, codec: 'jpeg' });
     expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:preview-read', { streamId: 1, minSeq: 0 });
     expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:preview-stop', { streamId: 1 });
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:preview-encoded-start', { sessionId: 1, codec: 'h264' });
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:preview-encoded-read', { streamId: 1, minSeq: 0 });
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:preview-encoded-stop', { streamId: 1 });
     expect(ipcRenderer.invoke).toHaveBeenCalledWith('hdr:shared-preflight', { sharedFrameBuffer: {}, sharedControlBuffer: {} });
   });
 
