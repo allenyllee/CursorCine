@@ -4118,8 +4118,13 @@ async function startRecording() {
   await electronAPI.overlaySetBackend(annotationState.backendRequested).catch(() => {});
 
   if (annotationState.windowBehavior === 'safe') {
-    // Safe mode keeps the historical behavior: minimize main window first.
-    await electronAPI.minimizeMainWindow().catch(() => {});
+    // In safe mode, only auto-minimize when main and target display are the same.
+    const autoMinimizeResult = await electronAPI
+      .shouldAutoMinimizeMainWindow(selectedSource.display_id)
+      .catch(() => null);
+    if (autoMinimizeResult && autoMinimizeResult.ok && autoMinimizeResult.shouldMinimize) {
+      await electronAPI.minimizeMainWindow().catch(() => {});
+    }
   }
 
   const overlayCreateResult = await electronAPI.overlayCreate({
