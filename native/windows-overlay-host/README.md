@@ -20,5 +20,6 @@ The module loaded by `src/main.js` exports:
 - Native overlay rendering includes:
   - Recording border
   - Cursor glow point
-  - Basic pen stroke drawing (mouse down + move)
+  - Rounded pen stroke drawing (mouse down + move)
+  - Native stroke fade-out animation (~1200ms) with per-pixel alpha blending
 - App behavior: when `Overlay backend = Native` is available, `src/main.js` can route pen interactions to native APIs.
