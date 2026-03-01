@@ -3359,7 +3359,7 @@ async function tryStartNativeHdrCapture(sourceId, displayId, options = {}) {
       : (sharedBindOk ? 'shared-buffer' : (start.transportMode || 'http-fallback'))
   );
   hdrMappingState.runtimeTransportReason = previewStreamOk
-    ? (nativeHdrState.previewEncodedMode ? 'NATIVE_PREVIEW_H264_OK' : 'NATIVE_PREVIEW_OK')
+    ? (nativeHdrState.previewEncodedMode ? 'NATIVE_PREVIEW_H264_OK' : (transportReason || 'NATIVE_PREVIEW_OK'))
     : (sharedBindOk ? 'OK' : (transportReason || 'BIND_REJECTED'));
   hdrMappingState.runtimeStage = String(start.pipelineStage || '') +
     (hdrMappingState.runtimeTransportMode ? ('/' + hdrMappingState.runtimeTransportMode) : '');
@@ -3661,9 +3661,14 @@ async function loadHdrExperimentalState() {
     if (topTransportMode === 'shared-buffer') {
       hdrMappingState.runtimeTransportReason = 'OK';
     } else if (topTransportMode === 'native-preview-stream') {
-      hdrMappingState.runtimeTransportReason = hdrMappingState.mainTopPreviewEncodedPathActive
-        ? 'NATIVE_PREVIEW_H264_OK'
-        : 'NATIVE_PREVIEW_OK';
+      const previewFallbackReason = String((top && top.previewNativeFallbackReason) || '');
+      if (hdrMappingState.mainTopPreviewEncodedPathActive) {
+        hdrMappingState.runtimeTransportReason = 'NATIVE_PREVIEW_H264_OK';
+      } else if (previewFallbackReason) {
+        hdrMappingState.runtimeTransportReason = previewFallbackReason;
+      } else {
+        hdrMappingState.runtimeTransportReason = 'NATIVE_PREVIEW_OK';
+      }
     } else {
       hdrMappingState.runtimeTransportReason = String(top.lastBindReason || hdrMappingState.uiBindLastReason || 'BIND_REJECTED');
     }
