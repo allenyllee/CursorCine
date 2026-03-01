@@ -170,7 +170,7 @@ UI 提供：
 
 注意：
 
-- Native overlay 目前是早期實作版本（先支援紅框），畫筆完整行為仍以 Electron overlay 為主。
+- Native overlay 目前是實驗性功能，已支援基礎畫筆點/線繪製與紅框提示；進階互動與穩定性仍以 Electron overlay 為主。
 - 若 Native overlay 不可用，會自動回退 Electron，並在狀態列顯示原因。
 
 ## Windows 編譯 Native 模組需求

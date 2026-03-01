@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-01
+
+### Added
+* Added overlay window behavior switching (`safe` / `always`) so annotation visibility and input policy can be tuned per recording scenario.
+* Added a Windows native overlay backend option with runtime fallback to Electron when the native host is unavailable.
+* Added initial native overlay pen rendering primitives on Windows, including dot/stroke drawing support and visibility diagnostics coverage.
+
+### Changed
+* Refined native overlay glow size/fade pacing and stroke visual tuning to better match legacy Electron pen feel while keeping native rendering path enabled.
+* Applied platform-aware overlay backend/behavior policy defaults so non-Windows and unsupported runtime combinations degrade cleanly.
+
+### Fixed
+* Fixed recording-start minimize behavior in `safe` mode so the main window is minimized only when it is on the same display as the selected recording target.
+* Release metadata bump from `0.8.1` to `0.9.0`.
+
 ## [0.8.1] - 2026-02-27
 
 ### Added
