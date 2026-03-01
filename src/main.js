@@ -59,6 +59,18 @@ const CURSORCINE_TEST_CAPTURE_MODE = String(process.env.CURSORCINE_TEST_CAPTURE_
 const CURSORCINE_TEST_EXPORT_MODE = String(process.env.CURSORCINE_TEST_EXPORT_MODE || 'mock').trim().toLowerCase();
 const CURSORCINE_DISABLE_CLICK_HOOK = String(process.env.CURSORCINE_DISABLE_CLICK_HOOK || '0') === '1';
 const CURSORCINE_E2E_FORCE_POINTER_INSIDE = String(process.env.CURSORCINE_E2E_FORCE_POINTER_INSIDE || '0') === '1';
+const OVERLAY_POINTER_EMIT_MIN_INTERVAL_IDLE_MS = Math.max(
+  6,
+  Math.min(24, Number(process.env.CURSORCINE_OVERLAY_POINTER_EMIT_MIN_INTERVAL_IDLE_MS || 10) || 10)
+);
+const OVERLAY_POINTER_EMIT_MIN_INTERVAL_DRAW_MS = Math.max(
+  8,
+  Math.min(32, Number(process.env.CURSORCINE_OVERLAY_POINTER_EMIT_MIN_INTERVAL_DRAW_MS || 16) || 16)
+);
+const OVERLAY_NATIVE_POINTER_MIN_MOVE_PX = Math.max(
+  0.25,
+  Math.min(8, Number(process.env.CURSORCINE_OVERLAY_NATIVE_POINTER_MIN_MOVE_PX || 1.75) || 1.75)
+);
 
 function encodeHdrPixelFormat(value) {
   const fmt = String(value || '').trim().toUpperCase();
@@ -81,6 +93,11 @@ let overlayCtrlChordActive = false;
 let overlayWheelLockUntil = 0;
 let overlayWheelResumeTimer = null;
 let overlayReentryGraceTimer = null;
+let overlayPointerEmitTimer = null;
+let overlayPointerEmitScheduled = false;
+let overlayPointerLastEmitAt = 0;
+let overlayNativeLastPointerKey = '';
+let overlayNativeLastPointerMeta = null;
 
 let overlayCtrlToggleArmUntil = 0;
 let overlayLastDrawActive = false;
@@ -805,6 +822,8 @@ function stopNativeOverlayWindow() {
   }
   overlayNativeActive = false;
   overlayNativeBounds = null;
+  overlayNativeLastPointerKey = '';
+  overlayNativeLastPointerMeta = null;
 }
 
 function startNativeOverlayWindowForRecording() {
@@ -849,6 +868,8 @@ function startNativeOverlayWindowForRecording() {
     if (result && result.ok) {
       overlayNativeActive = true;
       overlayNativeLastError = '';
+      overlayNativeLastPointerKey = '';
+      overlayNativeLastPointerMeta = null;
       if (overlayWindow && !overlayWindow.isDestroyed()) {
         try {
           overlayWindow.setIgnoreMouseEvents(true, { forward: true });
@@ -867,6 +888,46 @@ function startNativeOverlayWindowForRecording() {
     overlayNativeActive = false;
     overlayNativeLastError = error && error.message ? error.message : 'START_EXCEPTION';
   }
+}
+
+function clearOverlayPointerEmitSchedule() {
+  if (overlayPointerEmitTimer) {
+    clearTimeout(overlayPointerEmitTimer);
+    overlayPointerEmitTimer = null;
+  }
+  overlayPointerEmitScheduled = false;
+}
+
+function getOverlayPointerEmitIntervalMs() {
+  const drawActive = overlayDrawEnabled() && mouseDown;
+  return drawActive
+    ? OVERLAY_POINTER_EMIT_MIN_INTERVAL_DRAW_MS
+    : OVERLAY_POINTER_EMIT_MIN_INTERVAL_IDLE_MS;
+}
+
+function scheduleOverlayPointerEmit() {
+  if (overlayPointerEmitScheduled) {
+    return;
+  }
+
+  const minIntervalMs = getOverlayPointerEmitIntervalMs();
+  const elapsedMs = Date.now() - overlayPointerLastEmitAt;
+  const waitMs = Math.max(0, minIntervalMs - elapsedMs);
+  overlayPointerEmitScheduled = true;
+
+  if (waitMs <= 0) {
+    overlayPointerEmitScheduled = false;
+    overlayPointerLastEmitAt = Date.now();
+    emitOverlayPointer();
+    return;
+  }
+
+  overlayPointerEmitTimer = setTimeout(() => {
+    overlayPointerEmitTimer = null;
+    overlayPointerEmitScheduled = false;
+    overlayPointerLastEmitAt = Date.now();
+    emitOverlayPointer();
+  }, waitMs);
 }
 
 function scheduleOverlayWheelResume() {
@@ -1019,7 +1080,7 @@ function isPointerInsideOverlayBounds() {
   );
 }
 
-function emitOverlayPointer() {
+function emitOverlayPointer(force = false) {
   if (!overlayBounds) {
     return;
   }
@@ -1066,13 +1127,41 @@ function emitOverlayPointer() {
         nativeY = Math.round(pointerPayload.y * scaleY);
       }
     }
-    const nativeResult = invokeNativeOverlay('setPointer', {
-      ...pointerPayload,
-      x: nativeX,
-      y: nativeY
-    });
-    if (!nativeResult || nativeResult.ok === false) {
-      overlayNativeLastError = String((nativeResult && (nativeResult.message || nativeResult.reason)) || 'SET_POINTER_FAILED');
+    const nativePointerKey = [
+      nativeX,
+      nativeY,
+      pointerPayload.inside ? 1 : 0,
+      pointerPayload.down ? 1 : 0,
+      pointerPayload.drawActive ? 1 : 0
+    ].join(':');
+    const prevMeta = overlayNativeLastPointerMeta;
+    const dx = prevMeta ? (nativeX - prevMeta.x) : 0;
+    const dy = prevMeta ? (nativeY - prevMeta.y) : 0;
+    const moveDist = Math.hypot(dx, dy);
+    const stateChanged = !prevMeta ||
+      prevMeta.inside !== pointerPayload.inside ||
+      prevMeta.down !== pointerPayload.down ||
+      prevMeta.drawActive !== pointerPayload.drawActive;
+    const shouldSkipSmallMove = !force &&
+      !stateChanged &&
+      moveDist < OVERLAY_NATIVE_POINTER_MIN_MOVE_PX;
+    if (!shouldSkipSmallMove && (force || nativePointerKey !== overlayNativeLastPointerKey)) {
+      overlayNativeLastPointerKey = nativePointerKey;
+      overlayNativeLastPointerMeta = {
+        x: nativeX,
+        y: nativeY,
+        inside: pointerPayload.inside,
+        down: pointerPayload.down,
+        drawActive: pointerPayload.drawActive
+      };
+      const nativeResult = invokeNativeOverlay('setPointer', {
+        ...pointerPayload,
+        x: nativeX,
+        y: nativeY
+      });
+      if (!nativeResult || nativeResult.ok === false) {
+        overlayNativeLastError = String((nativeResult && (nativeResult.message || nativeResult.reason)) || 'SET_POINTER_FAILED');
+      }
     }
   }
 
@@ -1236,7 +1325,7 @@ function initGlobalClickHook() {
       emitOverlayPointer();
     });
     uIOhook.on('mousemove', () => {
-      emitOverlayPointer();
+      scheduleOverlayPointerEmit();
     });
     uIOhook.on('keydown', (event) => {
       const isCtrlKey = isOverlayToggleKey(event);
@@ -1880,6 +1969,9 @@ function runQuitCleanupSync() {
     hdrWorkerProcess = null;
   }
   hdrWorkerState = 'stopped';
+  clearOverlayPointerEmitSchedule();
+  overlayNativeLastPointerKey = '';
+  overlayNativeLastPointerMeta = null;
   for (const sessionId of Array.from(hdrSharedSessions.keys())) {
     stopHdrSharedSession(sessionId);
   }
@@ -2383,6 +2475,9 @@ app.whenReady().then(() => {
     overlayRecordingActive = false;
     overlayRecordingDisplayId = '';
     resetOverlayRiskState();
+    clearOverlayPointerEmitSchedule();
+    overlayNativeLastPointerKey = '';
+    overlayNativeLastPointerMeta = null;
     overlayLastPointerInside = null;
     overlayReentryGraceUntil = 0;
     overlaySafeArmUntil = 0;
@@ -2414,6 +2509,9 @@ app.whenReady().then(() => {
     overlayWheelLockUntil = 0;
     mouseDown = false;
     overlayCtrlToggleArmUntil = 0;
+    clearOverlayPointerEmitSchedule();
+    overlayNativeLastPointerKey = '';
+    overlayNativeLastPointerMeta = null;
 
     if (overlayWheelResumeTimer) {
       clearTimeout(overlayWheelResumeTimer);
