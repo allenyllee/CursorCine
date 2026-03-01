@@ -116,6 +116,8 @@ const DEFAULT_QUALITY_PRESET = 'balanced';
 const MIN_TRIM_GAP_SECONDS = 0.1;
 const IPC_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const RECORDING_TIMESLICE_MS = 1000;
+const CURSOR_POLL_INTERVAL_MS = 24;
+const CLICK_INFO_POLL_MIN_INTERVAL_MS = 34;
 const BUILTIN_RECORDER_TIMESLICE_MS = 200;
 const BUILTIN_FIRST_CHUNK_TIMEOUT_MS = 2500;
 const BUILTIN_OUTPUT_VIDEO_BITRATE_MULTIPLIERS = {
@@ -209,6 +211,8 @@ let clickState = {
   lockedX: 0,
   lockedY: 0
 };
+let lastClickInfo = null;
+let lastClickInfoAtMs = 0;
 
 const doubleClickMarkerState = {
   x: 0,
@@ -1586,7 +1590,27 @@ async function updateCursorFromMain() {
       cameraState.targetY = cursorPoint.y;
     }
 
-    const clickInfo = await electronAPI.getLatestClick(selectedSource.display_id, clickState.lastClickTimestamp);
+    const nowPerf = performance.now();
+    const shouldPollClickInfo = (
+      !lastClickInfo ||
+      (nowPerf - lastClickInfoAtMs) >= CLICK_INFO_POLL_MIN_INTERVAL_MS ||
+      Boolean(lastClickInfo && lastClickInfo.mouseDown) ||
+      clickState.doubleClickLocked
+    );
+    let clickInfo = lastClickInfo;
+    if (shouldPollClickInfo) {
+      clickInfo = await electronAPI.getLatestClick(selectedSource.display_id, clickState.lastClickTimestamp);
+      lastClickInfo = clickInfo || null;
+      lastClickInfoAtMs = nowPerf;
+    }
+    if (!clickInfo || typeof clickInfo !== 'object') {
+      clickInfo = {
+        enabled: clickState.enabled,
+        hasNew: false,
+        inside: Boolean(p.inside),
+        mouseDown: false
+      };
+    }
     if (!clickState.checkedCapability) {
       clickState.checkedCapability = true;
       clickState.enabled = Boolean(clickInfo && clickInfo.enabled);
@@ -3995,6 +4019,8 @@ async function startRecording() {
     lockedX: 0,
     lockedY: 0
   };
+  lastClickInfo = null;
+  lastClickInfoAtMs = 0;
   resetLocalPenState();
 
   doubleClickMarkerState.activeUntil = 0;
@@ -4166,7 +4192,7 @@ async function startRecording() {
 
   clearInterval(cursorTimer);
   cursorUpdateInFlight = false;
-  cursorTimer = setInterval(updateCursorFromMain, 16);
+  cursorTimer = setInterval(updateCursorFromMain, CURSOR_POLL_INTERVAL_MS);
 
   cancelAnimationFrame(drawTimer);
   drawTimer = 0;
@@ -4241,6 +4267,8 @@ function stopRecording() {
   overlayStatePollTimer = 0;
   drawTimer = 0;
   cursorUpdateInFlight = false;
+  lastClickInfo = null;
+  lastClickInfoAtMs = 0;
   lastDrawNow = 0;
   lastDrawnNativeFrameCount = 0;
   lastDrawnViewportX = 0;
