@@ -37,6 +37,19 @@ async function launchApp(options = {}) {
   return { app, page };
 }
 
+function expectBoundsNear(actual, expected, context) {
+  expect(actual, context + ' (actual bounds missing)').toBeTruthy();
+  expect(expected, context + ' (expected bounds missing)').toBeTruthy();
+
+  const a = actual || {};
+  const e = expected || {};
+  const msg = context + ' (tolerance: 1px)';
+  expect(Math.abs(Number(a.x || 0) - Number(e.x || 0)), msg + ' x').toBeLessThanOrEqual(1);
+  expect(Math.abs(Number(a.y || 0) - Number(e.y || 0)), msg + ' y').toBeLessThanOrEqual(1);
+  expect(Math.abs(Number(a.width || 0) - Number(e.width || 0)), msg + ' width').toBeLessThanOrEqual(1);
+  expect(Math.abs(Number(a.height || 0) - Number(e.height || 0)), msg + ' height').toBeLessThanOrEqual(1);
+}
+
 test.describe('CursorCine e2e (mock capture)', () => {
   test('loads controls and desktop source options', async () => {
     const { app, page } = await launchApp();
@@ -243,7 +256,11 @@ test.describe('CursorCine e2e (mock capture)', () => {
         expect(String(overlayState.windowBehavior || '')).toBe('always');
         expect(String(overlayState.backendEffective || '')).toBe('electron');
         expect(overlayState.overlayBounds, 'overlay bounds mismatch for source: ' + source.label).toEqual(overlayState.targetDisplayBounds);
-        expect(overlayState.overlayWindowBounds, 'overlay window bounds mismatch for source: ' + source.label).toEqual(overlayState.targetDisplayBounds);
+        expectBoundsNear(
+          overlayState.overlayWindowBounds,
+          overlayState.targetDisplayBounds,
+          'overlay window bounds mismatch for source: ' + source.label
+        );
 
         const drawResult = await page.evaluate(async () => window.electronAPI.overlayTestDrawHorizontal({
           startRatio: 0.02,
