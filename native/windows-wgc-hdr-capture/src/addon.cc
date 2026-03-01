@@ -15,6 +15,11 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <objidl.h>
+#include <oleauto.h>
+#include <wincodec.h>
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "windowscodecs.lib")
 #endif
 
 namespace {
@@ -161,6 +166,10 @@ struct CaptureSession {
   int32_t outputWidth = 0;
   int32_t outputHeight = 0;
   int32_t outputStride = 0;
+  int64_t lastFrameAtMs = 0;
+  int64_t lastCompressedAtMs = 0;
+  uint64_t frameVersion = 0;
+  uint64_t lastCompressedFrameVersion = 0;
   std::vector<uint8_t> frameBytes;
 
   ~CaptureSession() {
@@ -186,6 +195,31 @@ struct CaptureSession {
 std::mutex g_sessionsMutex;
 std::unordered_map<int32_t, std::unique_ptr<CaptureSession>> g_sessions;
 int32_t g_nextSessionId = 1;
+std::once_flag g_wicInitOnce;
+HRESULT g_wicInitHr = E_FAIL;
+IWICImagingFactory* g_wicFactory = nullptr;
+
+IWICImagingFactory* GetWicFactory(std::string* errorMessage) {
+  std::call_once(g_wicInitOnce, []() {
+    const HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE) {
+      g_wicInitHr = initHr;
+      return;
+    }
+    g_wicInitHr = CoCreateInstance(CLSID_WICImagingFactory,
+                                   nullptr,
+                                   CLSCTX_INPROC_SERVER,
+                                   IID_IWICImagingFactory,
+                                   reinterpret_cast<void**>(&g_wicFactory));
+  });
+  if (FAILED(g_wicInitHr) || !g_wicFactory) {
+    if (errorMessage) {
+      *errorMessage = "WIC factory unavailable.";
+    }
+    return nullptr;
+  }
+  return g_wicFactory;
+}
 
 CaptureRect GetDefaultVirtualScreenRect() {
   CaptureRect rect;
@@ -291,6 +325,220 @@ void ComputeOutputSize(int32_t srcW, int32_t srcH, int64_t maxOutputPixels, int3
   int32_t h = static_cast<int32_t>(std::floor(srcH * scale));
   *outW = std::max(1, w);
   *outH = std::max(1, h);
+}
+
+void ComputeBoundedSize(int32_t srcW,
+                        int32_t srcH,
+                        int32_t maxW,
+                        int32_t maxH,
+                        int32_t* outW,
+                        int32_t* outH) {
+  if (!outW || !outH) {
+    return;
+  }
+  if (srcW <= 0 || srcH <= 0) {
+    *outW = 0;
+    *outH = 0;
+    return;
+  }
+  if (maxW <= 0 && maxH <= 0) {
+    *outW = srcW;
+    *outH = srcH;
+    return;
+  }
+
+  double scale = 1.0;
+  if (maxW > 0) {
+    scale = std::min(scale, static_cast<double>(maxW) / static_cast<double>(srcW));
+  }
+  if (maxH > 0) {
+    scale = std::min(scale, static_cast<double>(maxH) / static_cast<double>(srcH));
+  }
+  if (scale >= 1.0) {
+    *outW = srcW;
+    *outH = srcH;
+    return;
+  }
+
+  *outW = std::max(1, static_cast<int32_t>(std::floor(static_cast<double>(srcW) * scale)));
+  *outH = std::max(1, static_cast<int32_t>(std::floor(static_cast<double>(srcH) * scale)));
+}
+
+bool EncodeJpegFromRgba(const uint8_t* rgba,
+                        int32_t width,
+                        int32_t height,
+                        int32_t quality,
+                        std::vector<uint8_t>* outBytes,
+                        std::string* errorMessage) {
+  if (!rgba || width <= 0 || height <= 0 || !outBytes) {
+    if (errorMessage) {
+      *errorMessage = "Invalid JPEG encode input.";
+    }
+    return false;
+  }
+
+  IWICImagingFactory* factory = GetWicFactory(errorMessage);
+  if (!factory) {
+    return false;
+  }
+  IWICBitmapEncoder* encoder = nullptr;
+  IStream* stream = nullptr;
+  IWICBitmapFrameEncode* frame = nullptr;
+  IPropertyBag2* options = nullptr;
+  bool ok = false;
+
+  do {
+    HRESULT hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+    if (FAILED(hr) || !stream) {
+      if (errorMessage) {
+        *errorMessage = "CreateStreamOnHGlobal failed.";
+      }
+      break;
+    }
+
+    hr = factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder);
+    if (FAILED(hr) || !encoder) {
+      if (errorMessage) {
+        *errorMessage = "WIC JPEG encoder unavailable.";
+      }
+      break;
+    }
+
+    hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC encoder init failed.";
+      }
+      break;
+    }
+
+    hr = encoder->CreateNewFrame(&frame, &options);
+    if (FAILED(hr) || !frame) {
+      if (errorMessage) {
+        *errorMessage = "WIC frame create failed.";
+      }
+      break;
+    }
+
+    if (options) {
+      PROPBAG2 bag = {};
+      bag.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+      VARIANT value;
+      VariantInit(&value);
+      value.vt = VT_R4;
+      const int32_t clampedQuality = std::max(1, std::min(95, quality));
+      value.fltVal = static_cast<float>(clampedQuality) / 100.0f;
+      options->Write(1, &bag, &value);
+      VariantClear(&value);
+    }
+
+    hr = frame->Initialize(options);
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC frame init failed.";
+      }
+      break;
+    }
+
+    hr = frame->SetSize(static_cast<UINT>(width), static_cast<UINT>(height));
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC frame size failed.";
+      }
+      break;
+    }
+
+    WICPixelFormatGUID pixelFormat = GUID_WICPixelFormat24bppBGR;
+    hr = frame->SetPixelFormat(&pixelFormat);
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC pixel format failed.";
+      }
+      break;
+    }
+
+    const size_t bgrStride = static_cast<size_t>(width) * 3;
+    std::vector<uint8_t> bgrBytes(static_cast<size_t>(height) * bgrStride);
+    for (int32_t y = 0; y < height; ++y) {
+      const uint8_t* srcRow = rgba + static_cast<size_t>(y) * static_cast<size_t>(width) * 4;
+      uint8_t* dstRow = bgrBytes.data() + static_cast<size_t>(y) * bgrStride;
+      for (int32_t x = 0; x < width; ++x) {
+        const uint8_t* sp = srcRow + static_cast<size_t>(x) * 4;
+        uint8_t* dp = dstRow + static_cast<size_t>(x) * 3;
+        dp[0] = sp[2];
+        dp[1] = sp[1];
+        dp[2] = sp[0];
+      }
+    }
+
+    hr = frame->WritePixels(static_cast<UINT>(height),
+                            static_cast<UINT>(bgrStride),
+                            static_cast<UINT>(bgrBytes.size()),
+                            bgrBytes.data());
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC write pixels failed.";
+      }
+      break;
+    }
+
+    hr = frame->Commit();
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC frame commit failed.";
+      }
+      break;
+    }
+
+    hr = encoder->Commit();
+    if (FAILED(hr)) {
+      if (errorMessage) {
+        *errorMessage = "WIC encoder commit failed.";
+      }
+      break;
+    }
+
+    HGLOBAL handle = nullptr;
+    hr = GetHGlobalFromStream(stream, &handle);
+    if (FAILED(hr) || !handle) {
+      if (errorMessage) {
+        *errorMessage = "WIC stream handle unavailable.";
+      }
+      break;
+    }
+    SIZE_T size = GlobalSize(handle);
+    if (size == 0) {
+      if (errorMessage) {
+        *errorMessage = "WIC produced empty JPEG.";
+      }
+      break;
+    }
+    void* ptr = GlobalLock(handle);
+    if (!ptr) {
+      if (errorMessage) {
+        *errorMessage = "WIC stream lock failed.";
+      }
+      break;
+    }
+    outBytes->resize(static_cast<size_t>(size));
+    std::memcpy(outBytes->data(), ptr, static_cast<size_t>(size));
+    GlobalUnlock(handle);
+    ok = true;
+  } while (false);
+
+  if (options) {
+    options->Release();
+  }
+  if (frame) {
+    frame->Release();
+  }
+  if (encoder) {
+    encoder->Release();
+  }
+  if (stream) {
+    stream->Release();
+  }
+  return ok;
 }
 
 uint8_t ToByte(float value) {
@@ -680,11 +928,120 @@ napi_value ReadFrame(napi_env env, napi_callback_info info) {
   const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
+  session->lastFrameAtMs = now;
+  session->frameVersion += 1;
   SetNamed(env, result, "ok", MakeBool(env, true));
   SetNamed(env, result, "width", MakeInt32(env, session->outputWidth));
   SetNamed(env, result, "height", MakeInt32(env, session->outputHeight));
   SetNamed(env, result, "stride", MakeInt32(env, session->outputStride));
   SetNamed(env, result, "pixelFormat", MakeString(env, "RGBA8"));
+  SetNamed(env, result, "timestampMs", MakeDouble(env, static_cast<double>(now)));
+  SetNamed(env, result, "bytes", bytes);
+#else
+  SetNamed(env, result, "ok", MakeBool(env, false));
+  SetNamed(env, result, "reason", MakeString(env, "NOT_WINDOWS"));
+  SetNamed(env, result, "message", MakeString(env, "Frame path is Windows-only."));
+#endif
+
+  return result;
+}
+
+napi_value ReadCompressedFrame(napi_env env, napi_callback_info info) {
+  napi_value result = MakeObject(env);
+
+#if defined(_WIN32)
+  napi_value payload = GetFirstArg(env, info);
+  const int32_t nativeSessionId = GetNamedInt32(env, payload, "nativeSessionId", 0);
+  if (nativeSessionId <= 0) {
+    SetNamed(env, result, "ok", MakeBool(env, false));
+    SetNamed(env, result, "reason", MakeString(env, "INVALID_SESSION"));
+    SetNamed(env, result, "message", MakeString(env, "Invalid native session id."));
+    return result;
+  }
+
+  const int32_t quality = GetNamedInt32(env, payload, "quality", 75);
+  const int32_t maxWidth = GetNamedInt32(env, payload, "maxWidth", 0);
+  const int32_t maxHeight = GetNamedInt32(env, payload, "maxHeight", 0);
+  const int32_t minIntervalMs = std::max(0, GetNamedInt32(env, payload, "minIntervalMs", 0));
+  const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+
+  std::lock_guard<std::mutex> lock(g_sessionsMutex);
+  auto it = g_sessions.find(nativeSessionId);
+  if (it == g_sessions.end()) {
+    SetNamed(env, result, "ok", MakeBool(env, false));
+    SetNamed(env, result, "reason", MakeString(env, "INVALID_SESSION"));
+    SetNamed(env, result, "message", MakeString(env, "Native session not found."));
+    return result;
+  }
+
+  CaptureSession* session = it->second.get();
+  if (minIntervalMs > 0 && session->lastCompressedAtMs > 0 &&
+      (now - session->lastCompressedAtMs) < minIntervalMs) {
+    SetNamed(env, result, "ok", MakeBool(env, true));
+    SetNamed(env, result, "hasFrame", MakeBool(env, false));
+    SetNamed(env, result, "reason", MakeString(env, "NO_FRAME"));
+    return result;
+  }
+
+  bool hasCapturedFrame = !session->frameBytes.empty() && session->frameVersion > 0;
+  if (!hasCapturedFrame) {
+    if (!CaptureFrame(session)) {
+      SetNamed(env, result, "ok", MakeBool(env, false));
+      SetNamed(env, result, "reason", MakeString(env, "READ_FAILED"));
+      SetNamed(env, result, "message", MakeString(env, "BitBlt failed."));
+      return result;
+    }
+    session->frameVersion += 1;
+    session->lastFrameAtMs = now;
+  }
+
+  if (session->frameVersion == session->lastCompressedFrameVersion) {
+    SetNamed(env, result, "ok", MakeBool(env, true));
+    SetNamed(env, result, "hasFrame", MakeBool(env, false));
+    SetNamed(env, result, "reason", MakeString(env, "NO_FRAME"));
+    return result;
+  }
+
+  int32_t targetW = session->outputWidth;
+  int32_t targetH = session->outputHeight;
+  ComputeBoundedSize(session->outputWidth, session->outputHeight, maxWidth, maxHeight, &targetW, &targetH);
+
+  std::vector<uint8_t> scaledRgba;
+  const uint8_t* srcBytes = session->frameBytes.data();
+  if (targetW > 0 && targetH > 0 && (targetW != session->outputWidth || targetH != session->outputHeight)) {
+    ScaleBgraNearest(session->frameBytes.data(),
+                     session->outputWidth,
+                     session->outputHeight,
+                     session->outputStride,
+                     &scaledRgba,
+                     targetW,
+                     targetH);
+    srcBytes = scaledRgba.data();
+  }
+
+  std::vector<uint8_t> encoded;
+  std::string encodeError;
+  if (!EncodeJpegFromRgba(srcBytes, targetW, targetH, quality, &encoded, &encodeError)) {
+    SetNamed(env, result, "ok", MakeBool(env, false));
+    SetNamed(env, result, "reason", MakeString(env, "ENCODE_FAILED"));
+    SetNamed(env, result, "message", MakeString(env, encodeError.empty() ? "JPEG encode failed." : encodeError));
+    return result;
+  }
+
+  void* dst = nullptr;
+  napi_value bytes;
+  assert(napi_create_buffer_copy(env, encoded.size(), encoded.data(), &dst, &bytes) == napi_ok);
+
+  session->lastCompressedAtMs = now;
+  session->lastCompressedFrameVersion = session->frameVersion;
+
+  SetNamed(env, result, "ok", MakeBool(env, true));
+  SetNamed(env, result, "hasFrame", MakeBool(env, true));
+  SetNamed(env, result, "width", MakeInt32(env, targetW));
+  SetNamed(env, result, "height", MakeInt32(env, targetH));
+  SetNamed(env, result, "mime", MakeString(env, "image/jpeg"));
   SetNamed(env, result, "timestampMs", MakeDouble(env, static_cast<double>(now)));
   SetNamed(env, result, "bytes", bytes);
 #else
@@ -729,6 +1086,7 @@ napi_value Init(napi_env env, napi_value exports) {
       {"probe", 0, Probe, 0, 0, 0, napi_default, 0},
       {"startCapture", 0, StartCapture, 0, 0, 0, napi_default, 0},
       {"readFrame", 0, ReadFrame, 0, 0, 0, napi_default, 0},
+      {"readCompressedFrame", 0, ReadCompressedFrame, 0, 0, 0, napi_default, 0},
       {"stopCapture", 0, StopCapture, 0, 0, 0, napi_default, 0},
   };
 

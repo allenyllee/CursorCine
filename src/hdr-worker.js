@@ -1,4 +1,5 @@
 const path = require("path");
+const NATIVE_COMPRESSED_FRAME_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME || "0") === "1";
 let workerNativeImage = null;
 try {
   // Electron utility process may expose nativeImage for fast JPEG encoding.
@@ -54,14 +55,18 @@ const state = {
   },
   preview: {
     enabled: false,
+    nativeCompressedEnabled: false,
+    nativeCompressedAvailable: false,
+    nativeCompressedActive: false,
+    nativeCompressedFallbackReason: "",
     codec: "jpeg",
-    quality: 58,
-    configuredQuality: 58,
+    quality: 78,
+    configuredQuality: 78,
     maxFps: 20,
-    maxWidth: 1280,
-    maxHeight: 800,
-    configuredMaxWidth: 1280,
-    configuredMaxHeight: 800,
+    maxWidth: 1920,
+    maxHeight: 1200,
+    configuredMaxWidth: 1920,
+    configuredMaxHeight: 1200,
     frameStep: 1,
     maxFrameStep: 4,
     latestSeq: 0,
@@ -239,6 +244,9 @@ function tunePreviewQualityAndScale() {
 }
 
 function encodePreviewFrame(result, rawBytes) {
+  if (state.preview.nativeCompressedEnabled && state.preview.nativeCompressedAvailable) {
+    return;
+  }
   if (!state.preview.enabled || !workerNativeImage || typeof workerNativeImage.createFromBitmap !== "function") {
     return;
   }
@@ -391,6 +399,8 @@ async function stopCaptureInternal() {
   state.session = null;
   state.latestFrameBytes = null;
   state.preview.latestBytes = null;
+  state.preview.nativeCompressedActive = false;
+  state.preview.nativeCompressedFallbackReason = "";
   state.preview.latestSeq = 0;
   state.preview.lastEncodedSeq = 0;
   state.preview.lastEncodedAt = 0;
@@ -545,14 +555,18 @@ async function handleRequest(requestId, command, payload) {
     state.noFrameStreak = 0;
     state.latestFrameBytes = null;
     state.preview.enabled = false;
+    state.preview.nativeCompressedEnabled = false;
+    state.preview.nativeCompressedAvailable = false;
+    state.preview.nativeCompressedActive = false;
+    state.preview.nativeCompressedFallbackReason = "";
     state.preview.codec = "jpeg";
-    state.preview.quality = 58;
-    state.preview.configuredQuality = 58;
+    state.preview.quality = 78;
+    state.preview.configuredQuality = 78;
     state.preview.maxFps = 20;
-    state.preview.maxWidth = 1280;
-    state.preview.maxHeight = 800;
-    state.preview.configuredMaxWidth = 1280;
-    state.preview.configuredMaxHeight = 800;
+    state.preview.maxWidth = 1920;
+    state.preview.maxHeight = 1200;
+    state.preview.configuredMaxWidth = 1920;
+    state.preview.configuredMaxHeight = 1200;
     state.preview.frameStep = 1;
     state.preview.maxFrameStep = 4;
     state.preview.latestBytes = null;
@@ -647,13 +661,23 @@ async function handleRequest(requestId, command, payload) {
   }
 
   if (command === "preview-config") {
+    const bridge = loadBridge(state.session && state.session.routePreference ? state.session.routePreference : "auto");
+    const nativeCompressedAvailable = Boolean(
+      NATIVE_COMPRESSED_FRAME_ENABLED &&
+      bridge &&
+      typeof bridge.readCompressedFrame === "function"
+    );
     state.preview.enabled = true;
+    state.preview.nativeCompressedEnabled = NATIVE_COMPRESSED_FRAME_ENABLED;
+    state.preview.nativeCompressedAvailable = nativeCompressedAvailable;
+    state.preview.nativeCompressedActive = false;
+    state.preview.nativeCompressedFallbackReason = nativeCompressedAvailable ? "" : "NATIVE_PREVIEW_UNAVAILABLE";
     state.preview.codec = "jpeg";
-    state.preview.quality = Math.max(40, Math.min(95, Number(payload && payload.quality ? payload.quality : 58) || 58));
+    state.preview.quality = Math.max(40, Math.min(95, Number(payload && payload.quality ? payload.quality : 78) || 78));
     state.preview.configuredQuality = state.preview.quality;
     state.preview.maxFps = Math.max(8, Math.min(60, Number(payload && payload.maxFps ? payload.maxFps : 20) || 20));
-    state.preview.maxWidth = Math.max(320, Math.min(2560, Number(payload && payload.maxWidth ? payload.maxWidth : 1280) || 1280));
-    state.preview.maxHeight = Math.max(180, Math.min(1440, Number(payload && payload.maxHeight ? payload.maxHeight : 800) || 800));
+    state.preview.maxWidth = Math.max(320, Math.min(2560, Number(payload && payload.maxWidth ? payload.maxWidth : 1920) || 1920));
+    state.preview.maxHeight = Math.max(180, Math.min(1440, Number(payload && payload.maxHeight ? payload.maxHeight : 1200) || 1200));
     state.preview.configuredMaxWidth = state.preview.maxWidth;
     state.preview.configuredMaxHeight = state.preview.maxHeight;
     state.preview.frameStep = 1;
@@ -668,6 +692,105 @@ async function handleRequest(requestId, command, payload) {
       frameStep: state.preview.frameStep,
       maxFrameStep: state.preview.maxFrameStep,
       nativeImageAvailable: Boolean(workerNativeImage),
+      nativeCompressedEnabled: state.preview.nativeCompressedEnabled,
+      nativeCompressedAvailable: state.preview.nativeCompressedAvailable,
+    });
+    return;
+  }
+
+  if (command === "frame-read-preview-native") {
+    if (!state.preview.enabled) {
+      response(requestId, true, {
+        hasFrame: false,
+        frameSeq: Number(state.preview.latestSeq || 0),
+        lastFrameAt: Number(state.preview.latestTimestampMs || 0),
+      });
+      return;
+    }
+    const bridge = loadBridge(state.session && state.session.routePreference ? state.session.routePreference : "auto");
+    if (!state.preview.nativeCompressedEnabled || !bridge || typeof bridge.readCompressedFrame !== "function") {
+      state.preview.nativeCompressedActive = false;
+      state.preview.nativeCompressedFallbackReason = "NATIVE_PREVIEW_UNAVAILABLE";
+      response(requestId, false, {
+        reason: "NATIVE_PREVIEW_UNAVAILABLE",
+        message: "Native compressed preview read is unavailable.",
+      });
+      return;
+    }
+    const minIntervalMs = Math.max(1, Math.floor(1000 / Math.max(1, Number(state.preview.maxFps || 20))));
+    const result = await Promise.resolve(bridge.readCompressedFrame({
+      nativeSessionId: Number(state.session && state.session.nativeSessionId ? state.session.nativeSessionId : 0),
+      quality: Number(state.preview.quality || 78),
+      maxWidth: Number(state.preview.maxWidth || 1920),
+      maxHeight: Number(state.preview.maxHeight || 1200),
+      minIntervalMs,
+    })).catch((error) => ({
+      ok: false,
+      reason: "NATIVE_PREVIEW_READ_FAILED",
+      message: error && error.message ? error.message : "readCompressedFrame failed",
+    }));
+
+    if (!result || result.ok === false) {
+      state.preview.nativeCompressedActive = false;
+      state.preview.nativeCompressedFallbackReason = String((result && result.reason) || "NATIVE_PREVIEW_READ_FAILED");
+      response(requestId, false, {
+        reason: state.preview.nativeCompressedFallbackReason,
+        message: String((result && result.message) || "Native compressed preview read failed."),
+      });
+      return;
+    }
+
+    if (!result.hasFrame || !result.bytes) {
+      response(requestId, true, {
+        hasFrame: false,
+        frameSeq: Number(result.frameSeq || state.preview.latestSeq || 0),
+        lastFrameAt: Number(result.timestampMs || state.preview.latestTimestampMs || 0),
+        perf: {
+          previewEncodeMsAvg: Number(state.perf.previewEncodeMsAvg || 0),
+          previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
+          previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
+          previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+          previewFrameStep: Number(state.preview.frameStep || 1),
+          previewNativePathActive: Boolean(state.preview.nativeCompressedActive),
+          previewNativeFallbackReason: String(state.preview.nativeCompressedFallbackReason || ""),
+        },
+      });
+      return;
+    }
+
+    const ts = Number(result.timestampMs || Date.now());
+    const seq = Number(result.frameSeq || state.preview.latestSeq + 1 || state.frameSeq + 1 || 1);
+    const bytes = Buffer.isBuffer(result.bytes) ? result.bytes : Buffer.from(result.bytes);
+    state.preview.nativeCompressedActive = true;
+    state.preview.nativeCompressedFallbackReason = "";
+    state.preview.latestSeq = seq;
+    state.preview.latestTimestampMs = ts;
+    state.preview.latestWidth = Number(result.width || state.preview.latestWidth || 0);
+    state.preview.latestHeight = Number(result.height || state.preview.latestHeight || 0);
+    state.preview.latestMime = String(result.mime || "image/jpeg");
+    state.preview.latestBytes = bytes;
+    if (Number(result.encodeMs || 0) > 0) {
+      state.perf.previewEncodeMsAvg = ewma(state.perf.previewEncodeMsAvg, Number(result.encodeMs || 0));
+    }
+    state.perf.previewBytesPerFrameAvg = ewma(state.perf.previewBytesPerFrameAvg, Number(bytes.length || 0));
+
+    response(requestId, true, {
+      hasFrame: true,
+      frameSeq: seq,
+      lastFrameAt: ts,
+      width: Number(result.width || 0),
+      height: Number(result.height || 0),
+      mime: String(result.mime || "image/jpeg"),
+      bytes,
+      perf: {
+        previewEncodeMsAvg: Number(state.perf.previewEncodeMsAvg || 0),
+        previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
+        previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
+        previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+        previewFrameStep: Number(state.preview.frameStep || 1),
+        previewNativePathActive: true,
+        previewNativeFallbackReason: "",
+      },
     });
     return;
   }
@@ -695,6 +818,8 @@ async function handleRequest(requestId, command, payload) {
         previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
         previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
         previewFrameStep: Number(state.preview.frameStep || 1),
+        previewNativePathActive: false,
+        previewNativeFallbackReason: String(state.preview.nativeCompressedFallbackReason || ""),
       },
     });
     return;

@@ -136,9 +136,9 @@ const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
 const HDR_SHARED_CONTROL_SLOTS = 16;
 const HDR_PREVIEW_READ_TIMEOUT_MS = 120;
 const HDR_PREVIEW_DEFAULT_MAX_FPS = 20;
-const HDR_PREVIEW_DEFAULT_QUALITY = 58;
-const HDR_PREVIEW_DEFAULT_MAX_WIDTH = 1280;
-const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = 800;
+const HDR_PREVIEW_DEFAULT_QUALITY = 78;
+const HDR_PREVIEW_DEFAULT_MAX_WIDTH = 1920;
+const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = 1200;
 
 let sources = [];
 let sourceStream;
@@ -309,12 +309,18 @@ const hdrMappingState = {
   mainTopPreviewBytesPerFrameAvg: 0,
   mainTopPreviewDroppedByBackpressure: 0,
   mainTopPreviewJitterMsAvg: 0,
+  mainTopPreviewNativeReadAttempts: 0,
+  mainTopPreviewNativeReadHits: 0,
+  mainTopPreviewNativeFallbackCount: 0,
+  mainTopPreviewNativeFallbackTopReason: '',
   nativeEnvFlag: '',
   nativeEnvFlagEnabled: false,
   nativeLiveEnvFlag: '',
   nativeLiveEnvFlagEnabled: false,
   nativePreviewEnvFlag: '',
   nativePreviewEnvFlagEnabled: false,
+  nativeCompressedEnvFlag: '',
+  nativeCompressedEnvFlagEnabled: false,
   wgcEnvFlag: '',
   wgcEnvFlagEnabled: false,
   nativeSmokeRan: false,
@@ -856,6 +862,9 @@ function updateHdrDiagStatus(message) {
     ', pBpf=' + String(Math.round(Number(hdrMappingState.mainTopPreviewBytesPerFrameAvg || 0))) +
     ', pDrop=' + String(Math.round(Number(hdrMappingState.mainTopPreviewDroppedByBackpressure || 0))) +
     ', pJit=' + String(Number(hdrMappingState.mainTopPreviewJitterMsAvg || 0).toFixed(2)) +
+    ', pNatHit=' + String(Math.round(Number(hdrMappingState.mainTopPreviewNativeReadHits || 0))) + '/' + String(Math.round(Number(hdrMappingState.mainTopPreviewNativeReadAttempts || 0))) +
+    ', pNatFb=' + String(Math.round(Number(hdrMappingState.mainTopPreviewNativeFallbackCount || 0))) +
+    ', pNatFbReason=' + String(hdrMappingState.mainTopPreviewNativeFallbackTopReason || '-') +
     ', pDecMs=' + String(Number(nativeHdrState.previewDecodeMsAvg || 0).toFixed(2)) +
     ', mainReason=' + String(hdrMappingState.mainTopLastReason || '-') +
     ', mainBindReason=' + String(hdrMappingState.mainTopLastBindReason || '-') +
@@ -874,6 +883,7 @@ function updateHdrDiagStatus(message) {
     ', env=' + (hdrMappingState.nativeEnvFlag || '-') + ':' + (hdrMappingState.nativeEnvFlagEnabled ? '1' : '0') +
     ', live=' + (hdrMappingState.nativeLiveEnvFlag || '-') + ':' + (hdrMappingState.nativeLiveEnvFlagEnabled ? '1' : '0') +
     ', preview=' + (hdrMappingState.nativePreviewEnvFlag || '-') + ':' + (hdrMappingState.nativePreviewEnvFlagEnabled ? '1' : '0') +
+    ', pcmp=' + (hdrMappingState.nativeCompressedEnvFlag || '-') + ':' + (hdrMappingState.nativeCompressedEnvFlagEnabled ? '1' : '0') +
     ', wgc=' + (hdrMappingState.wgcEnvFlag || '-') + ':' + (hdrMappingState.wgcEnvFlagEnabled ? '1' : '0') +
     ', smoke=' + (
       !hdrMappingState.nativeSmokeRan
@@ -1026,6 +1036,10 @@ async function copyHdrDiagnosticsSnapshot() {
       mainTopPreviewBytesPerFrameAvg: hdrMappingState.mainTopPreviewBytesPerFrameAvg,
       mainTopPreviewDroppedByBackpressure: hdrMappingState.mainTopPreviewDroppedByBackpressure,
       mainTopPreviewJitterMsAvg: hdrMappingState.mainTopPreviewJitterMsAvg,
+      mainTopPreviewNativeReadAttempts: hdrMappingState.mainTopPreviewNativeReadAttempts,
+      mainTopPreviewNativeReadHits: hdrMappingState.mainTopPreviewNativeReadHits,
+      mainTopPreviewNativeFallbackCount: hdrMappingState.mainTopPreviewNativeFallbackCount,
+      mainTopPreviewNativeFallbackTopReason: hdrMappingState.mainTopPreviewNativeFallbackTopReason,
       lastFallbackReason: hdrMappingState.lastFallbackReason,
       lastFallbackAt: hdrMappingState.lastFallbackAt,
       nativeState: {
@@ -3191,6 +3205,10 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopPreviewBytesPerFrameAvg = 0;
     hdrMappingState.mainTopPreviewDroppedByBackpressure = 0;
     hdrMappingState.mainTopPreviewJitterMsAvg = 0;
+    hdrMappingState.mainTopPreviewNativeReadAttempts = 0;
+    hdrMappingState.mainTopPreviewNativeReadHits = 0;
+    hdrMappingState.mainTopPreviewNativeFallbackCount = 0;
+    hdrMappingState.mainTopPreviewNativeFallbackTopReason = '';
     hdrMappingState.mainTopLastReason = '';
     hdrMappingState.mainTopLastError = '';
     hdrMappingState.nativeEnvFlag = '';
@@ -3199,6 +3217,8 @@ async function loadHdrExperimentalState() {
     hdrMappingState.nativeLiveEnvFlagEnabled = false;
     hdrMappingState.nativePreviewEnvFlag = '';
     hdrMappingState.nativePreviewEnvFlagEnabled = false;
+    hdrMappingState.nativeCompressedEnvFlag = '';
+    hdrMappingState.nativeCompressedEnvFlagEnabled = false;
     hdrMappingState.wgcEnvFlag = '';
     hdrMappingState.wgcEnvFlagEnabled = false;
     hdrMappingState.nativeSmokeRan = false;
@@ -3244,6 +3264,17 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopPreviewBytesPerFrameAvg = Number(top && top.perf && top.perf.previewBytesPerFrameAvg ? top.perf.previewBytesPerFrameAvg : 0);
   hdrMappingState.mainTopPreviewDroppedByBackpressure = Number(top && top.perf && top.perf.previewDroppedByBackpressure ? top.perf.previewDroppedByBackpressure : 0);
   hdrMappingState.mainTopPreviewJitterMsAvg = Number(top && top.perf && top.perf.previewJitterMsAvg ? top.perf.previewJitterMsAvg : 0);
+  hdrMappingState.mainTopPreviewNativeReadAttempts = Number(top && top.previewNativeReadAttempts ? top.previewNativeReadAttempts : 0);
+  hdrMappingState.mainTopPreviewNativeReadHits = Number(top && top.previewNativeReadHits ? top.previewNativeReadHits : 0);
+  hdrMappingState.mainTopPreviewNativeFallbackCount = Number(top && top.previewNativeFallbackCount ? top.previewNativeFallbackCount : 0);
+  const nativeFallbackReasonCounts = top && top.previewNativeFallbackReasonCounts && typeof top.previewNativeFallbackReasonCounts === 'object'
+    ? top.previewNativeFallbackReasonCounts
+    : {};
+  const nativeFallbackTopReason = Object.entries(nativeFallbackReasonCounts)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0];
+  hdrMappingState.mainTopPreviewNativeFallbackTopReason = nativeFallbackTopReason
+    ? String(nativeFallbackTopReason[0] || '')
+    : '';
   hdrMappingState.mainTopLastReason = String((top && top.lastReason) || '');
   hdrMappingState.mainTopLastError = String((top && top.lastError) || '');
   if (top && top.runtimeRoute) {
@@ -3268,6 +3299,8 @@ async function loadHdrExperimentalState() {
   hdrMappingState.nativeLiveEnvFlagEnabled = Boolean(result.liveEnvFlagEnabled);
   hdrMappingState.nativePreviewEnvFlag = String(result.previewEnvFlag || '');
   hdrMappingState.nativePreviewEnvFlagEnabled = Boolean(result.previewEnvFlagEnabled);
+  hdrMappingState.nativeCompressedEnvFlag = String(result.compressedEnvFlag || '');
+  hdrMappingState.nativeCompressedEnvFlagEnabled = Boolean(result.compressedEnvFlagEnabled);
   hdrMappingState.wgcEnvFlag = String(result.wgcEnvFlag || '');
   hdrMappingState.wgcEnvFlagEnabled = Boolean(result.wgcEnvFlagEnabled);
   hdrMappingState.nativeSmokeRan = Boolean(result.smoke && result.smoke.ran);

@@ -39,6 +39,7 @@ const HDR_NATIVE_PUSH_IPC_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NAT
 const HDR_NATIVE_LIVE_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_LIVE || '1') !== '0';
 const HDR_WGC_ROUTE_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_WGC || '1') !== '0';
 const HDR_NATIVE_PREVIEW_STREAM_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM || '1') !== '0';
+const HDR_NATIVE_COMPRESSED_FRAME_ENABLED = String(process.env.CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME || '0') === '1';
 const HDR_ROUTE_PREFERENCE = String(process.env.CURSORCINE_HDR_ROUTE_PREFERENCE || 'auto').trim().toLowerCase();
 const HDR_NATIVE_PIPELINE_STAGE = HDR_NATIVE_PUSH_IPC_ENABLED ? 'experimental-http-pull' : 'control-plane-only';
 const HDR_WGC_PIPELINE_STAGE = HDR_WGC_ROUTE_ENABLED ? 'wgc-worker-latest-frame-v1' : 'wgc-disabled';
@@ -50,15 +51,15 @@ const HDR_PREVIEW_DEFAULT_MAX_FPS = Math.max(
 );
 const HDR_PREVIEW_DEFAULT_QUALITY = Math.max(
   40,
-  Math.min(95, Number(process.env.CURSORCINE_HDR_PREVIEW_QUALITY || 58) || 58)
+  Math.min(95, Number(process.env.CURSORCINE_HDR_PREVIEW_QUALITY || 78) || 78)
 );
 const HDR_PREVIEW_DEFAULT_MAX_WIDTH = Math.max(
   320,
-  Math.min(2560, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_WIDTH || 1280) || 1280)
+  Math.min(2560, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_WIDTH || 1920) || 1920)
 );
 const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = Math.max(
   180,
-  Math.min(1440, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_HEIGHT || 800) || 800)
+  Math.min(1440, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_HEIGHT || 1200) || 1200)
 );
 const HDR_SHARED_CONTROL = {
   STATUS: 0,
@@ -3361,6 +3362,12 @@ app.whenReady().then(() => {
         latestPixelFormat: String(startResult.pixelFormat || 'RGBA8'),
         latestFrameBytes: null,
         previewStreamId: 0,
+        previewNativePathActive: false,
+        previewNativeFallbackReason: '',
+        previewNativeReadAttempts: 0,
+        previewNativeReadHits: 0,
+        previewNativeFallbackCount: 0,
+        previewNativeFallbackReasonCounts: {},
         pumpTimer: 0,
         perf: {
           readMsAvg: 0,
@@ -3610,6 +3617,12 @@ app.whenReady().then(() => {
       maxFps,
       maxWidth,
       maxHeight,
+      previewNativePathActive: false,
+      previewNativeFallbackReason: '',
+      previewNativeReadAttempts: 0,
+      previewNativeReadHits: 0,
+      previewNativeFallbackCount: 0,
+      previewNativeFallbackReasonCounts: {},
       latestSeq: 0,
       latestTimestampMs: 0,
       latestWidth: Number(sessionObj.latestWidth || sessionObj.width || 0),
@@ -3640,6 +3653,8 @@ app.whenReady().then(() => {
       }, 2000).then((cfgResult) => {
         if (!cfgResult || cfgResult.ok === false) {
           sessionObj.workerPreviewActive = false;
+          stream.previewNativePathActive = false;
+          stream.previewNativeFallbackReason = 'NATIVE_PREVIEW_UNAVAILABLE';
           // Keep stream alive and fallback to main-process preview encoder.
           stream.workerMode = false;
           pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
@@ -3652,11 +3667,14 @@ app.whenReady().then(() => {
             transportMode: 'native-preview-stream',
             codec: stream.codec,
             workerPreviewNativeImage: false,
+            workerPreviewNativeCompressed: false,
             workerPreviewFallback: 'main-preview-encoder'
           };
         }
-        if (!cfgResult.nativeImageAvailable) {
+        if (!cfgResult.nativeImageAvailable && !cfgResult.nativeCompressedAvailable) {
           sessionObj.workerPreviewActive = false;
+          stream.previewNativePathActive = false;
+          stream.previewNativeFallbackReason = 'NATIVE_PREVIEW_UNAVAILABLE';
           // Worker runtime cannot encode JPEG; fallback to main-process encoder.
           stream.workerMode = false;
           pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
@@ -3669,9 +3687,12 @@ app.whenReady().then(() => {
             transportMode: 'native-preview-stream',
             codec: stream.codec,
             workerPreviewNativeImage: false,
+            workerPreviewNativeCompressed: false,
             workerPreviewFallback: 'main-preview-encoder'
           };
         }
+        stream.previewNativePathActive = Boolean(cfgResult.nativeCompressedAvailable);
+        stream.previewNativeFallbackReason = stream.previewNativePathActive ? '' : 'NATIVE_PREVIEW_FALLBACK_JS';
         return {
           ok: true,
           streamId,
@@ -3679,10 +3700,13 @@ app.whenReady().then(() => {
           height: Number(sessionObj.latestHeight || sessionObj.height || 0),
           transportMode: 'native-preview-stream',
           codec: stream.codec,
-          workerPreviewNativeImage: true
+          workerPreviewNativeImage: Boolean(cfgResult.nativeImageAvailable),
+          workerPreviewNativeCompressed: Boolean(cfgResult.nativeCompressedAvailable)
         };
       }).catch((error) => {
         sessionObj.workerPreviewActive = false;
+        stream.previewNativePathActive = false;
+        stream.previewNativeFallbackReason = 'NATIVE_PREVIEW_UNAVAILABLE';
         // Worker preview config exception: fallback to main preview encoder.
         stream.workerMode = false;
         pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
@@ -3695,6 +3719,7 @@ app.whenReady().then(() => {
           transportMode: 'native-preview-stream',
           codec: stream.codec,
           workerPreviewNativeImage: false,
+          workerPreviewNativeCompressed: false,
           workerPreviewFallback: 'main-preview-encoder',
           workerPreviewFallbackError: error && error.message ? error.message : 'worker preview config failed'
         };
@@ -3727,6 +3752,60 @@ app.whenReady().then(() => {
     const minSeq = Math.max(0, Number(payload && payload.minSeq ? payload.minSeq : 0));
 
     if (stream.workerMode) {
+      let nativePreviewErrorReason = '';
+      if (HDR_NATIVE_COMPRESSED_FRAME_ENABLED) {
+        stream.previewNativeReadAttempts += 1;
+        sessionObj.previewNativeReadAttempts = Number(sessionObj.previewNativeReadAttempts || 0) + 1;
+        const workerPreviewNative = await hdrWorkerRequest('frame-read-preview-native', {}, 1200).catch((error) => ({
+          ok: false,
+          reason: 'NATIVE_PREVIEW_READ_FAILED',
+          message: error && error.message ? error.message : 'worker native preview read failed'
+        }));
+        if (workerPreviewNative && workerPreviewNative.ok && workerPreviewNative.hasFrame && workerPreviewNative.bytes) {
+          stream.latestSeq = Number(workerPreviewNative.frameSeq || 0);
+          stream.latestTimestampMs = Number(workerPreviewNative.lastFrameAt || Date.now());
+          stream.latestWidth = Number(workerPreviewNative.width || sessionObj.latestWidth || sessionObj.width || 0);
+          stream.latestHeight = Number(workerPreviewNative.height || sessionObj.latestHeight || sessionObj.height || 0);
+          stream.latestMime = String(workerPreviewNative.mime || 'image/jpeg');
+          stream.latestBytes = Buffer.isBuffer(workerPreviewNative.bytes) ? workerPreviewNative.bytes : Buffer.from(workerPreviewNative.bytes);
+          stream.previewNativePathActive = true;
+          stream.previewNativeFallbackReason = '';
+          stream.previewNativeReadHits += 1;
+          sessionObj.previewNativePathActive = true;
+          sessionObj.previewNativeFallbackReason = '';
+          sessionObj.previewNativeReadHits = Number(sessionObj.previewNativeReadHits || 0) + 1;
+          if (workerPreviewNative.perf && typeof workerPreviewNative.perf === 'object') {
+            stream.encodeMsAvg = Number(workerPreviewNative.perf.previewEncodeMsAvg || 0);
+            stream.bytesPerFrameAvg = Number(workerPreviewNative.perf.previewBytesPerFrameAvg || 0);
+            stream.droppedByBackpressure = Number(workerPreviewNative.perf.previewDroppedByBackpressure || 0);
+            stream.jitterMsAvg = Number(workerPreviewNative.perf.previewJitterMsAvg || 0);
+            if (sessionObj.perf) {
+              sessionObj.perf.previewEncodeMsAvg = stream.encodeMsAvg;
+              sessionObj.perf.previewBytesPerFrameAvg = stream.bytesPerFrameAvg;
+              sessionObj.perf.previewDroppedByBackpressure = stream.droppedByBackpressure;
+              sessionObj.perf.previewJitterMsAvg = stream.jitterMsAvg;
+            }
+          }
+          return buildPreviewReadPayload(stream);
+        }
+        if (workerPreviewNative && workerPreviewNative.ok && !workerPreviewNative.hasFrame) {
+          return { ok: true, noFrame: true };
+        }
+        nativePreviewErrorReason = String((workerPreviewNative && workerPreviewNative.reason) || 'NATIVE_PREVIEW_READ_FAILED');
+        stream.previewNativePathActive = false;
+        stream.previewNativeFallbackReason = nativePreviewErrorReason;
+        stream.previewNativeFallbackCount += 1;
+        stream.previewNativeFallbackReasonCounts = stream.previewNativeFallbackReasonCounts || {};
+        stream.previewNativeFallbackReasonCounts[nativePreviewErrorReason] =
+          Number(stream.previewNativeFallbackReasonCounts[nativePreviewErrorReason] || 0) + 1;
+        sessionObj.previewNativePathActive = false;
+        sessionObj.previewNativeFallbackReason = nativePreviewErrorReason;
+        sessionObj.previewNativeFallbackCount = Number(sessionObj.previewNativeFallbackCount || 0) + 1;
+        sessionObj.previewNativeFallbackReasonCounts = sessionObj.previewNativeFallbackReasonCounts || {};
+        sessionObj.previewNativeFallbackReasonCounts[nativePreviewErrorReason] =
+          Number(sessionObj.previewNativeFallbackReasonCounts[nativePreviewErrorReason] || 0) + 1;
+      }
+
       const workerPreview = await hdrWorkerRequest('frame-read-preview', {}, 1200).catch((error) => ({
         ok: false,
         reason: 'WORKER_PREVIEW_READ_FAILED',
@@ -3735,7 +3814,7 @@ app.whenReady().then(() => {
       if (!workerPreview || workerPreview.ok === false) {
         return {
           ok: false,
-          reason: String((workerPreview && workerPreview.reason) || 'WORKER_PREVIEW_READ_FAILED'),
+          reason: String((workerPreview && workerPreview.reason) || nativePreviewErrorReason || 'WORKER_PREVIEW_READ_FAILED'),
           message: String((workerPreview && workerPreview.message) || 'worker preview read failed')
         };
       }
@@ -3748,6 +3827,12 @@ app.whenReady().then(() => {
       stream.latestHeight = Number(workerPreview.height || sessionObj.latestHeight || sessionObj.height || 0);
       stream.latestMime = String(workerPreview.mime || 'image/jpeg');
       stream.latestBytes = Buffer.isBuffer(workerPreview.bytes) ? workerPreview.bytes : Buffer.from(workerPreview.bytes);
+      stream.previewNativePathActive = false;
+      if (!stream.previewNativeFallbackReason) {
+        stream.previewNativeFallbackReason = nativePreviewErrorReason || 'NATIVE_PREVIEW_FALLBACK_JS';
+      }
+      sessionObj.previewNativePathActive = false;
+      sessionObj.previewNativeFallbackReason = stream.previewNativeFallbackReason;
       if (workerPreview.perf && typeof workerPreview.perf === 'object') {
         stream.encodeMsAvg = Number(workerPreview.perf.previewEncodeMsAvg || 0);
         stream.bytesPerFrameAvg = Number(workerPreview.perf.previewBytesPerFrameAvg || 0);
@@ -3811,6 +3896,12 @@ app.whenReady().then(() => {
     const sessionObj = hdrSharedSessions.get(Number(stream.sessionId || 0));
     if (sessionObj && Number(sessionObj.previewStreamId || 0) === streamId) {
       sessionObj.previewStreamId = 0;
+      sessionObj.previewNativePathActive = false;
+      sessionObj.previewNativeFallbackReason = '';
+      sessionObj.previewNativeReadAttempts = 0;
+      sessionObj.previewNativeReadHits = 0;
+      sessionObj.previewNativeFallbackCount = 0;
+      sessionObj.previewNativeFallbackReasonCounts = {};
       if (sessionObj.workerMode && sessionObj.workerPreviewActive) {
         sessionObj.workerPreviewActive = false;
         pumpHdrWorkerSession(Number(stream.sessionId || 0)).catch(() => {});
@@ -3857,6 +3948,14 @@ app.whenReady().then(() => {
           ? 'native-preview-stream'
           : (session.frameView && session.controlView ? 'shared-buffer' : 'http-fallback'),
         previewStreamId: Number(session.previewStreamId || 0),
+        previewNativePathActive: Boolean(session.previewNativePathActive),
+        previewNativeFallbackReason: String(session.previewNativeFallbackReason || ''),
+        previewNativeReadAttempts: Number(session.previewNativeReadAttempts || 0),
+        previewNativeReadHits: Number(session.previewNativeReadHits || 0),
+        previewNativeFallbackCount: Number(session.previewNativeFallbackCount || 0),
+        previewNativeFallbackReasonCounts: session.previewNativeFallbackReasonCounts && typeof session.previewNativeFallbackReasonCounts === 'object'
+          ? session.previewNativeFallbackReasonCounts
+          : {},
         requestedRoute: String(session.requestedRoute || 'auto'),
         nativeBackend: String(session.nativeBackend || ''),
         frameSeq: Number(session.frameSeq || 0),
@@ -3903,6 +4002,8 @@ app.whenReady().then(() => {
       liveEnvFlagEnabled: HDR_NATIVE_LIVE_ROUTE_ENABLED,
       previewEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM',
       previewEnvFlagEnabled: HDR_NATIVE_PREVIEW_STREAM_ENABLED,
+      compressedEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME',
+      compressedEnvFlagEnabled: HDR_NATIVE_COMPRESSED_FRAME_ENABLED,
       wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
       wgcEnvFlagEnabled: HDR_WGC_ROUTE_ENABLED,
       requestedSourceId,
@@ -3931,6 +4032,14 @@ app.whenReady().then(() => {
           ? 'native-preview-stream'
           : (sessionObj.frameView && sessionObj.controlView ? 'shared-buffer' : 'http-fallback'),
         previewStreamId: Number(sessionObj.previewStreamId || 0),
+        previewNativePathActive: Boolean(sessionObj.previewNativePathActive),
+        previewNativeFallbackReason: String(sessionObj.previewNativeFallbackReason || ''),
+        previewNativeReadAttempts: Number(sessionObj.previewNativeReadAttempts || 0),
+        previewNativeReadHits: Number(sessionObj.previewNativeReadHits || 0),
+        previewNativeFallbackCount: Number(sessionObj.previewNativeFallbackCount || 0),
+        previewNativeFallbackReasonCounts: sessionObj.previewNativeFallbackReasonCounts && typeof sessionObj.previewNativeFallbackReasonCounts === 'object'
+          ? sessionObj.previewNativeFallbackReasonCounts
+          : {},
         requestedRoute: String(sessionObj.requestedRoute || 'auto'),
           nativeBackend: String(sessionObj.nativeBackend || ''),
           frameSeq: Number(sessionObj.frameSeq || 0),
@@ -3974,6 +4083,8 @@ app.whenReady().then(() => {
         envFlagEnabled: HDR_NATIVE_PUSH_IPC_ENABLED,
         previewEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_PREVIEW_STREAM',
         previewEnvFlagEnabled: HDR_NATIVE_PREVIEW_STREAM_ENABLED,
+        compressedEnvFlag: 'CURSORCINE_ENABLE_HDR_NATIVE_COMPRESSED_FRAME',
+        compressedEnvFlagEnabled: HDR_NATIVE_COMPRESSED_FRAME_ENABLED,
         wgcEnvFlag: 'CURSORCINE_ENABLE_HDR_WGC',
         wgcEnvFlagEnabled: HDR_WGC_ROUTE_ENABLED,
         diagnostics: {

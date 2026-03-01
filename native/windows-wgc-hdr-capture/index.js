@@ -51,6 +51,13 @@ function readFrame(payload = {}) {
   return binding.readFrame(payload);
 }
 
+function readCompressedFrame(payload = {}) {
+  if (!binding || typeof binding.readCompressedFrame !== 'function') {
+    return unsupported('NATIVE_PREVIEW_UNAVAILABLE', loadError || 'Native compressed frame not available.');
+  }
+  return binding.readCompressedFrame(payload);
+}
+
 function stopCapture(payload = {}) {
   if (!binding || typeof binding.stopCapture !== 'function') {
     return { ok: true, skipped: true };
@@ -63,5 +70,6 @@ module.exports = {
   probe,
   startCapture,
   readFrame,
+  readCompressedFrame,
   stopCapture
 };
