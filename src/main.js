@@ -90,6 +90,7 @@ let overlaySafeArmUntil = 0;
 let overlaySafeReleaseUntil = 0;
 let overlayRecordingActive = false;
 let overlayBounds = null;
+let overlayNativeBounds = null;
 let overlayTargetDisplayId = '';
 let overlayRecordingDisplayId = '';
 let overlayWindowBehavior = 'safe';
@@ -737,7 +738,11 @@ function getOverlayBackendState() {
   const hasApi = Boolean(
     bridge &&
     typeof bridge.startOverlay === 'function' &&
-    typeof bridge.stopOverlay === 'function'
+    typeof bridge.stopOverlay === 'function' &&
+    typeof bridge.setPointer === 'function' &&
+    typeof bridge.setPenStyle === 'function' &&
+    typeof bridge.undoStroke === 'function' &&
+    typeof bridge.clearStrokes === 'function'
   );
   const supported = hasApi && (
     typeof bridge.isSupported !== 'function'
@@ -756,22 +761,50 @@ function getOverlayBackendState() {
   };
 }
 
-function stopNativeOverlayWindow() {
+function isNativeOverlayEffective() {
+  return getOverlayBackendState().effective === 'native';
+}
+
+function invokeNativeOverlay(method, payload = {}) {
   const bridge = loadWindowsOverlayNativeBridge();
-  if (!bridge || typeof bridge.stopOverlay !== 'function') {
-    overlayNativeActive = false;
-    return;
+  if (!bridge || typeof bridge[method] !== 'function') {
+    return {
+      ok: false,
+      reason: 'NATIVE_BRIDGE_UNAVAILABLE',
+      message: windowsOverlayNativeLoadError || 'Native overlay bridge unavailable'
+    };
   }
   try {
-    const result = bridge.stopOverlay({});
-    if (result && result.ok === false) {
-      overlayNativeLastError = String(result.message || result.reason || 'STOP_FAILED');
-    }
+    const result = bridge[method](payload || {});
+    return result && typeof result === 'object'
+      ? result
+      : { ok: false, reason: 'INVALID_NATIVE_RESULT' };
   } catch (error) {
-    overlayNativeLastError = error && error.message ? error.message : 'STOP_EXCEPTION';
-  } finally {
-    overlayNativeActive = false;
+    return {
+      ok: false,
+      reason: 'NATIVE_CALL_FAILED',
+      message: error && error.message ? error.message : `${method} failed`
+    };
   }
+}
+
+function stopNativeOverlayWindow() {
+  if (!isNativeOverlayEffective() && !overlayNativeActive) {
+    overlayNativeActive = false;
+    overlayNativeBounds = null;
+    return;
+  }
+  const result = invokeNativeOverlay('stopOverlay', {});
+  if (!result || result.ok === false) {
+    if (result && (result.message || result.reason)) {
+      overlayNativeLastError = String(result.message || result.reason);
+    }
+    overlayNativeActive = false;
+    overlayNativeBounds = null;
+    return;
+  }
+  overlayNativeActive = false;
+  overlayNativeBounds = null;
 }
 
 function startNativeOverlayWindowForRecording() {
@@ -785,17 +818,18 @@ function startNativeOverlayWindowForRecording() {
     return;
   }
 
-  const bridge = loadWindowsOverlayNativeBridge();
-  if (!bridge || typeof bridge.startOverlay !== 'function') {
+  if (!loadWindowsOverlayNativeBridge()) {
     overlayNativeActive = false;
     overlayNativeLastError = backendState.nativeReason || 'NATIVE_BRIDGE_UNAVAILABLE';
     return;
   }
 
   const targetDisplay = getTargetDisplay(overlayRecordingDisplayId || overlayTargetDisplayId);
+  overlayBounds = normalizeOverlayRect(getDisplayBounds(targetDisplay));
   const bounds = resolveNativeOverlayBounds(targetDisplay);
+  overlayNativeBounds = { ...bounds };
   try {
-    const result = bridge.startOverlay({
+    const result = invokeNativeOverlay('startOverlay', {
       bounds,
       borderPx: 4,
       recording: overlayRecordingActive
@@ -803,6 +837,16 @@ function startNativeOverlayWindowForRecording() {
     if (result && result.ok) {
       overlayNativeActive = true;
       overlayNativeLastError = '';
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        try {
+          overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+          if (overlayWindow.isVisible()) {
+            overlayWindow.hide();
+          }
+        } catch (_error) {
+        }
+      }
+      emitOverlayPointer();
     } else {
       overlayNativeActive = false;
       overlayNativeLastError = String((result && (result.message || result.reason)) || 'START_FAILED');
@@ -964,7 +1008,7 @@ function isPointerInsideOverlayBounds() {
 }
 
 function emitOverlayPointer() {
-  if (!overlayWindow || overlayWindow.isDestroyed() || !overlayBounds) {
+  if (!overlayBounds) {
     return;
   }
 
@@ -978,13 +1022,51 @@ function emitOverlayPointer() {
       p.y < overlayBounds.y + overlayBounds.height
     );
 
-  overlayWindow.webContents.send("overlay:global-pointer", {
+  const pointerPayload = {
     x: p.x - overlayBounds.x,
     y: p.y - overlayBounds.y,
     inside,
     down: mouseDown,
+    drawActive: overlayDrawActive() && inside,
     timestamp: Date.now()
-  });
+  };
+
+  if (overlayNativeActive) {
+    let nativeX = pointerPayload.x;
+    let nativeY = pointerPayload.y;
+    if (overlayNativeBounds) {
+      let mapped = false;
+      try {
+        if (screen && typeof screen.dipToScreenPoint === 'function') {
+          const px = screen.dipToScreenPoint({ x: p.x, y: p.y });
+          if (px && Number.isFinite(px.x) && Number.isFinite(px.y)) {
+            nativeX = Math.round(px.x - overlayNativeBounds.x);
+            nativeY = Math.round(px.y - overlayNativeBounds.y);
+            mapped = true;
+          }
+        }
+      } catch (_error) {
+      }
+      if (!mapped && overlayBounds && overlayBounds.width > 0 && overlayBounds.height > 0) {
+        const scaleX = overlayNativeBounds.width / overlayBounds.width;
+        const scaleY = overlayNativeBounds.height / overlayBounds.height;
+        nativeX = Math.round(pointerPayload.x * scaleX);
+        nativeY = Math.round(pointerPayload.y * scaleY);
+      }
+    }
+    const nativeResult = invokeNativeOverlay('setPointer', {
+      ...pointerPayload,
+      x: nativeX,
+      y: nativeY
+    });
+    if (!nativeResult || nativeResult.ok === false) {
+      overlayNativeLastError = String((nativeResult && (nativeResult.message || nativeResult.reason)) || 'SET_POINTER_FAILED');
+    }
+  }
+
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send("overlay:global-pointer", pointerPayload);
+  }
 
   if (overlayLastPointerInside === null || overlayLastPointerInside !== inside) {
     const wasInside = overlayLastPointerInside;
@@ -1009,6 +1091,10 @@ function emitOverlayPointer() {
 }
 
 function applyOverlayMouseMode() {
+  if (overlayNativeActive && isNativeOverlayEffective()) {
+    emitOverlayPointer();
+    return;
+  }
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     return;
   }
@@ -2466,8 +2552,17 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:set-pen-style', (_event, style) => {
-    if (getOverlayBackendState().effective === 'native') {
-      return { ok: true, skipped: true, reason: 'NATIVE_OVERLAY' };
+    if (isNativeOverlayEffective()) {
+      const result = invokeNativeOverlay('setPenStyle', style || {});
+      if (!result || result.ok === false) {
+        overlayNativeLastError = String((result && (result.message || result.reason)) || 'SET_STYLE_FAILED');
+      }
+      return {
+        ok: Boolean(result && result.ok),
+        reason: result && result.reason ? result.reason : 'NATIVE_OVERLAY',
+        nativeOverlayActive: overlayNativeActive,
+        nativeOverlayError: overlayNativeLastError
+      };
     }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
@@ -2477,8 +2572,17 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:undo', () => {
-    if (getOverlayBackendState().effective === 'native') {
-      return { ok: true, skipped: true, reason: 'NATIVE_OVERLAY' };
+    if (isNativeOverlayEffective()) {
+      const result = invokeNativeOverlay('undoStroke', {});
+      if (!result || result.ok === false) {
+        overlayNativeLastError = String((result && (result.message || result.reason)) || 'UNDO_FAILED');
+      }
+      return {
+        ok: Boolean(result && result.ok),
+        reason: result && result.reason ? result.reason : 'NATIVE_OVERLAY',
+        nativeOverlayActive: overlayNativeActive,
+        nativeOverlayError: overlayNativeLastError
+      };
     }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };
@@ -2488,8 +2592,17 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('overlay:clear', () => {
-    if (getOverlayBackendState().effective === 'native') {
-      return { ok: true, skipped: true, reason: 'NATIVE_OVERLAY' };
+    if (isNativeOverlayEffective()) {
+      const result = invokeNativeOverlay('clearStrokes', {});
+      if (!result || result.ok === false) {
+        overlayNativeLastError = String((result && (result.message || result.reason)) || 'CLEAR_FAILED');
+      }
+      return {
+        ok: Boolean(result && result.ok),
+        reason: result && result.reason ? result.reason : 'NATIVE_OVERLAY',
+        nativeOverlayActive: overlayNativeActive,
+        nativeOverlayError: overlayNativeLastError
+      };
     }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };

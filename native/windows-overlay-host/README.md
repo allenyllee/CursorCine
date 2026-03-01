@@ -1,19 +1,24 @@
-# Windows Native Overlay Host (Experimental Scaffold)
+# Windows Native Overlay Host (Experimental)
 
-This folder now contains a minimal Node-API addon scaffold for a future Windows-native overlay host.
+This folder contains a Node-API addon for a Windows-native overlay host.
 
 ## Expected bridge shape
 
-The module loaded by `src/main.js` should export:
+The module loaded by `src/main.js` exports:
 
 - `startOverlay(payload)`
+- `setPointer(payload)`
+- `setPenStyle(payload)`
+- `undoStroke()`
+- `clearStrokes()`
 - `stopOverlay(payload)`
-
-When these two functions become available, `Overlay 後端 = Native` can switch to the native path automatically.
 
 ## Current status
 
 - `index.js` loads `build/Release/windows_overlay_host.node`.
-- The addon currently exports `isSupported`, `startOverlay`, `stopOverlay`.
-- `isSupported` returns `false` for now.
-- App behavior: selecting `Overlay backend = Native` automatically falls back to Electron with a diagnostic reason.
+- The addon currently exports `isSupported`, `startOverlay`, `setPointer`, `setPenStyle`, `undoStroke`, `clearStrokes`, `stopOverlay`.
+- Native overlay rendering includes:
+  - Recording border
+  - Cursor glow point
+  - Basic pen stroke drawing (mouse down + move)
+- App behavior: when `Overlay backend = Native` is available, `src/main.js` can route pen interactions to native APIs.

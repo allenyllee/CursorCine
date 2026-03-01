@@ -56,9 +56,41 @@ function stopOverlay(payload = {}) {
   return binding.stopOverlay(payload);
 }
 
+function setPointer(payload = {}) {
+  if (!binding || typeof binding.setPointer !== 'function') {
+    return notSupportedResult();
+  }
+  return binding.setPointer(payload);
+}
+
+function setPenStyle(payload = {}) {
+  if (!binding || typeof binding.setPenStyle !== 'function') {
+    return notSupportedResult();
+  }
+  return binding.setPenStyle(payload);
+}
+
+function undoStroke() {
+  if (!binding || typeof binding.undoStroke !== 'function') {
+    return notSupportedResult();
+  }
+  return binding.undoStroke();
+}
+
+function clearStrokes() {
+  if (!binding || typeof binding.clearStrokes !== 'function') {
+    return notSupportedResult();
+  }
+  return binding.clearStrokes();
+}
+
 module.exports = {
   backendName: 'windows-overlay-host',
   isSupported,
   startOverlay,
-  stopOverlay
+  stopOverlay,
+  setPointer,
+  setPenStyle,
+  undoStroke,
+  clearStrokes
 };
