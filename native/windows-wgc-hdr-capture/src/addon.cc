@@ -966,6 +966,9 @@ napi_value ReadCompressedFrame(napi_env env, napi_callback_info info) {
   const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
+  const auto startTick = std::chrono::steady_clock::now();
+  double captureMs = 0.0;
+  double encodeMs = 0.0;
 
   std::lock_guard<std::mutex> lock(g_sessionsMutex);
   auto it = g_sessions.find(nativeSessionId);
@@ -985,19 +988,23 @@ napi_value ReadCompressedFrame(napi_env env, napi_callback_info info) {
     return result;
   }
 
-  bool hasCapturedFrame = !session->frameBytes.empty() && session->frameVersion > 0;
-  if (!hasCapturedFrame) {
+  bool hasNewCapturedFrame = session->frameVersion > session->lastCompressedFrameVersion;
+  if (!hasNewCapturedFrame) {
+    const auto captureStart = std::chrono::steady_clock::now();
     if (!CaptureFrame(session)) {
       SetNamed(env, result, "ok", MakeBool(env, false));
       SetNamed(env, result, "reason", MakeString(env, "READ_FAILED"));
       SetNamed(env, result, "message", MakeString(env, "BitBlt failed."));
       return result;
     }
+    const auto captureEnd = std::chrono::steady_clock::now();
+    captureMs = std::chrono::duration<double, std::milli>(captureEnd - captureStart).count();
     session->frameVersion += 1;
     session->lastFrameAtMs = now;
+    hasNewCapturedFrame = true;
   }
 
-  if (session->frameVersion == session->lastCompressedFrameVersion) {
+  if (!hasNewCapturedFrame || session->frameBytes.empty()) {
     SetNamed(env, result, "ok", MakeBool(env, true));
     SetNamed(env, result, "hasFrame", MakeBool(env, false));
     SetNamed(env, result, "reason", MakeString(env, "NO_FRAME"));
@@ -1023,12 +1030,15 @@ napi_value ReadCompressedFrame(napi_env env, napi_callback_info info) {
 
   std::vector<uint8_t> encoded;
   std::string encodeError;
+  const auto encodeStart = std::chrono::steady_clock::now();
   if (!EncodeJpegFromRgba(srcBytes, targetW, targetH, quality, &encoded, &encodeError)) {
     SetNamed(env, result, "ok", MakeBool(env, false));
     SetNamed(env, result, "reason", MakeString(env, "ENCODE_FAILED"));
     SetNamed(env, result, "message", MakeString(env, encodeError.empty() ? "JPEG encode failed." : encodeError));
     return result;
   }
+  const auto encodeEnd = std::chrono::steady_clock::now();
+  encodeMs = std::chrono::duration<double, std::milli>(encodeEnd - encodeStart).count();
 
   void* dst = nullptr;
   napi_value bytes;
@@ -1043,6 +1053,9 @@ napi_value ReadCompressedFrame(napi_env env, napi_callback_info info) {
   SetNamed(env, result, "height", MakeInt32(env, targetH));
   SetNamed(env, result, "mime", MakeString(env, "image/jpeg"));
   SetNamed(env, result, "timestampMs", MakeDouble(env, static_cast<double>(now)));
+  SetNamed(env, result, "captureMs", MakeDouble(env, captureMs));
+  SetNamed(env, result, "encodeMs", MakeDouble(env, encodeMs));
+  SetNamed(env, result, "readMs", MakeDouble(env, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTick).count()));
   SetNamed(env, result, "bytes", bytes);
 #else
   SetNamed(env, result, "ok", MakeBool(env, false));

@@ -47,7 +47,7 @@ const HDR_TRACE_LIMIT = 120;
 const HDR_SHARED_POLL_INTERVAL_MS = 16;
 const HDR_PREVIEW_DEFAULT_MAX_FPS = Math.max(
   8,
-  Math.min(60, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_FPS || 20) || 20)
+  Math.min(60, Number(process.env.CURSORCINE_HDR_PREVIEW_MAX_FPS || 60) || 60)
 );
 const HDR_PREVIEW_DEFAULT_QUALITY = Math.max(
   40,
@@ -3381,6 +3381,9 @@ app.whenReady().then(() => {
           previewBytesPerFrameAvg: 0,
           previewDroppedByBackpressure: 0,
           previewJitterMsAvg: 0,
+          previewNativeReadMsAvg: 0,
+          previewNativeCaptureMsAvg: 0,
+          previewReadRoundtripMsAvg: 0,
           lastPumpAt: 0,
           lastFrameAt: 0
         }
@@ -3513,7 +3516,16 @@ app.whenReady().then(() => {
           stream.latestBytes.byteOffset,
           stream.latestBytes.byteOffset + stream.latestBytes.byteLength
         )
-        : null
+        : null,
+      perf: {
+        previewEncodeMsAvg: Number(stream.encodeMsAvg || 0),
+        previewBytesPerFrameAvg: Number(stream.bytesPerFrameAvg || 0),
+        previewDroppedByBackpressure: Number(stream.droppedByBackpressure || 0),
+        previewJitterMsAvg: Number(stream.jitterMsAvg || 0),
+        previewNativeReadMsAvg: Number(stream.nativeReadMsAvg || 0),
+        previewNativeCaptureMsAvg: Number(stream.nativeCaptureMsAvg || 0),
+        previewReadRoundtripMsAvg: Number(stream.readRoundtripMsAvg || 0)
+      }
     };
   }
 
@@ -3636,6 +3648,9 @@ app.whenReady().then(() => {
       bytesPerFrameAvg: 0,
       droppedByBackpressure: 0,
       jitterMsAvg: 0,
+      nativeReadMsAvg: 0,
+      nativeCaptureMsAvg: 0,
+      readRoundtripMsAvg: 0,
       waiters: []
     };
     hdrPreviewStreams.set(streamId, stream);
@@ -3756,11 +3771,14 @@ app.whenReady().then(() => {
       if (HDR_NATIVE_COMPRESSED_FRAME_ENABLED) {
         stream.previewNativeReadAttempts += 1;
         sessionObj.previewNativeReadAttempts = Number(sessionObj.previewNativeReadAttempts || 0) + 1;
+        const previewReadStartMs = Number(process.hrtime.bigint()) / 1e6;
         const workerPreviewNative = await hdrWorkerRequest('frame-read-preview-native', {}, 1200).catch((error) => ({
           ok: false,
           reason: 'NATIVE_PREVIEW_READ_FAILED',
           message: error && error.message ? error.message : 'worker native preview read failed'
         }));
+        const previewReadEndMs = Number(process.hrtime.bigint()) / 1e6;
+        stream.readRoundtripMsAvg = ewma(stream.readRoundtripMsAvg, Math.max(0, previewReadEndMs - previewReadStartMs));
         if (workerPreviewNative && workerPreviewNative.ok && workerPreviewNative.hasFrame && workerPreviewNative.bytes) {
           stream.latestSeq = Number(workerPreviewNative.frameSeq || 0);
           stream.latestTimestampMs = Number(workerPreviewNative.lastFrameAt || Date.now());
@@ -3779,11 +3797,16 @@ app.whenReady().then(() => {
             stream.bytesPerFrameAvg = Number(workerPreviewNative.perf.previewBytesPerFrameAvg || 0);
             stream.droppedByBackpressure = Number(workerPreviewNative.perf.previewDroppedByBackpressure || 0);
             stream.jitterMsAvg = Number(workerPreviewNative.perf.previewJitterMsAvg || 0);
+            stream.nativeReadMsAvg = Number(workerPreviewNative.perf.previewNativeReadMsAvg || 0);
+            stream.nativeCaptureMsAvg = Number(workerPreviewNative.perf.previewNativeCaptureMsAvg || 0);
             if (sessionObj.perf) {
               sessionObj.perf.previewEncodeMsAvg = stream.encodeMsAvg;
               sessionObj.perf.previewBytesPerFrameAvg = stream.bytesPerFrameAvg;
               sessionObj.perf.previewDroppedByBackpressure = stream.droppedByBackpressure;
               sessionObj.perf.previewJitterMsAvg = stream.jitterMsAvg;
+              sessionObj.perf.previewNativeReadMsAvg = stream.nativeReadMsAvg;
+              sessionObj.perf.previewNativeCaptureMsAvg = stream.nativeCaptureMsAvg;
+              sessionObj.perf.previewReadRoundtripMsAvg = Number(stream.readRoundtripMsAvg || 0);
             }
           }
           return buildPreviewReadPayload(stream);
@@ -3838,11 +3861,16 @@ app.whenReady().then(() => {
         stream.bytesPerFrameAvg = Number(workerPreview.perf.previewBytesPerFrameAvg || 0);
         stream.droppedByBackpressure = Number(workerPreview.perf.previewDroppedByBackpressure || 0);
         stream.jitterMsAvg = Number(workerPreview.perf.previewJitterMsAvg || 0);
+        stream.nativeReadMsAvg = Number(workerPreview.perf.previewNativeReadMsAvg || 0);
+        stream.nativeCaptureMsAvg = Number(workerPreview.perf.previewNativeCaptureMsAvg || 0);
         if (sessionObj.perf) {
           sessionObj.perf.previewEncodeMsAvg = stream.encodeMsAvg;
           sessionObj.perf.previewBytesPerFrameAvg = stream.bytesPerFrameAvg;
           sessionObj.perf.previewDroppedByBackpressure = stream.droppedByBackpressure;
           sessionObj.perf.previewJitterMsAvg = stream.jitterMsAvg;
+          sessionObj.perf.previewNativeReadMsAvg = stream.nativeReadMsAvg;
+          sessionObj.perf.previewNativeCaptureMsAvg = stream.nativeCaptureMsAvg;
+          sessionObj.perf.previewReadRoundtripMsAvg = Number(stream.readRoundtripMsAvg || 0);
         }
       }
       return buildPreviewReadPayload(stream);
@@ -3984,7 +4012,10 @@ app.whenReady().then(() => {
           previewEncodeMsAvg: Number(session.perf && session.perf.previewEncodeMsAvg ? session.perf.previewEncodeMsAvg : 0),
           previewBytesPerFrameAvg: Number(session.perf && session.perf.previewBytesPerFrameAvg ? session.perf.previewBytesPerFrameAvg : 0),
           previewDroppedByBackpressure: Number(session.perf && session.perf.previewDroppedByBackpressure ? session.perf.previewDroppedByBackpressure : 0),
-          previewJitterMsAvg: Number(session.perf && session.perf.previewJitterMsAvg ? session.perf.previewJitterMsAvg : 0)
+          previewJitterMsAvg: Number(session.perf && session.perf.previewJitterMsAvg ? session.perf.previewJitterMsAvg : 0),
+          previewNativeReadMsAvg: Number(session.perf && session.perf.previewNativeReadMsAvg ? session.perf.previewNativeReadMsAvg : 0),
+          previewNativeCaptureMsAvg: Number(session.perf && session.perf.previewNativeCaptureMsAvg ? session.perf.previewNativeCaptureMsAvg : 0),
+          previewReadRoundtripMsAvg: Number(session.perf && session.perf.previewReadRoundtripMsAvg ? session.perf.previewReadRoundtripMsAvg : 0)
         }
       });
     }
@@ -4068,7 +4099,10 @@ app.whenReady().then(() => {
             previewEncodeMsAvg: Number(sessionObj.perf && sessionObj.perf.previewEncodeMsAvg ? sessionObj.perf.previewEncodeMsAvg : 0),
             previewBytesPerFrameAvg: Number(sessionObj.perf && sessionObj.perf.previewBytesPerFrameAvg ? sessionObj.perf.previewBytesPerFrameAvg : 0),
             previewDroppedByBackpressure: Number(sessionObj.perf && sessionObj.perf.previewDroppedByBackpressure ? sessionObj.perf.previewDroppedByBackpressure : 0),
-            previewJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.previewJitterMsAvg ? sessionObj.perf.previewJitterMsAvg : 0)
+            previewJitterMsAvg: Number(sessionObj.perf && sessionObj.perf.previewJitterMsAvg ? sessionObj.perf.previewJitterMsAvg : 0),
+            previewNativeReadMsAvg: Number(sessionObj.perf && sessionObj.perf.previewNativeReadMsAvg ? sessionObj.perf.previewNativeReadMsAvg : 0),
+            previewNativeCaptureMsAvg: Number(sessionObj.perf && sessionObj.perf.previewNativeCaptureMsAvg ? sessionObj.perf.previewNativeCaptureMsAvg : 0),
+            previewReadRoundtripMsAvg: Number(sessionObj.perf && sessionObj.perf.previewReadRoundtripMsAvg ? sessionObj.perf.previewReadRoundtripMsAvg : 0)
           }
         });
       }

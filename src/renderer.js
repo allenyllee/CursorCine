@@ -135,7 +135,7 @@ const HDR_NATIVE_POLL_INTERVAL_MS = 16;
 const HDR_NATIVE_STARTUP_NO_FRAME_TIMEOUT_MS = 4000;
 const HDR_SHARED_CONTROL_SLOTS = 16;
 const HDR_PREVIEW_READ_TIMEOUT_MS = 120;
-const HDR_PREVIEW_DEFAULT_MAX_FPS = 20;
+const HDR_PREVIEW_DEFAULT_MAX_FPS = 60;
 const HDR_PREVIEW_DEFAULT_QUALITY = 78;
 const HDR_PREVIEW_DEFAULT_MAX_WIDTH = 1920;
 const HDR_PREVIEW_DEFAULT_MAX_HEIGHT = 1200;
@@ -309,6 +309,9 @@ const hdrMappingState = {
   mainTopPreviewBytesPerFrameAvg: 0,
   mainTopPreviewDroppedByBackpressure: 0,
   mainTopPreviewJitterMsAvg: 0,
+  mainTopPreviewNativeReadMsAvg: 0,
+  mainTopPreviewNativeCaptureMsAvg: 0,
+  mainTopPreviewReadRoundtripMsAvg: 0,
   mainTopPreviewNativeReadAttempts: 0,
   mainTopPreviewNativeReadHits: 0,
   mainTopPreviewNativeFallbackCount: 0,
@@ -859,6 +862,9 @@ function updateHdrDiagStatus(message) {
     ', mainBpf=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerFrameAvg || 0))) +
     ', mainBps=' + String(Math.round(Number(hdrMappingState.mainTopBytesPerSec || 0))) +
     ', pEncMs=' + String(Number(hdrMappingState.mainTopPreviewEncodeMsAvg || 0).toFixed(2)) +
+    ', pCapMs=' + String(Number(hdrMappingState.mainTopPreviewNativeCaptureMsAvg || 0).toFixed(2)) +
+    ', pReadMs=' + String(Number(hdrMappingState.mainTopPreviewNativeReadMsAvg || 0).toFixed(2)) +
+    ', pRtMs=' + String(Number(hdrMappingState.mainTopPreviewReadRoundtripMsAvg || 0).toFixed(2)) +
     ', pBpf=' + String(Math.round(Number(hdrMappingState.mainTopPreviewBytesPerFrameAvg || 0))) +
     ', pDrop=' + String(Math.round(Number(hdrMappingState.mainTopPreviewDroppedByBackpressure || 0))) +
     ', pJit=' + String(Number(hdrMappingState.mainTopPreviewJitterMsAvg || 0).toFixed(2)) +
@@ -1033,6 +1039,9 @@ async function copyHdrDiagnosticsSnapshot() {
       mainTopPumpJitterMsAvg: hdrMappingState.mainTopPumpJitterMsAvg,
       mainTopFrameIntervalMsAvg: hdrMappingState.mainTopFrameIntervalMsAvg,
       mainTopPreviewEncodeMsAvg: hdrMappingState.mainTopPreviewEncodeMsAvg,
+      mainTopPreviewNativeCaptureMsAvg: hdrMappingState.mainTopPreviewNativeCaptureMsAvg,
+      mainTopPreviewNativeReadMsAvg: hdrMappingState.mainTopPreviewNativeReadMsAvg,
+      mainTopPreviewReadRoundtripMsAvg: hdrMappingState.mainTopPreviewReadRoundtripMsAvg,
       mainTopPreviewBytesPerFrameAvg: hdrMappingState.mainTopPreviewBytesPerFrameAvg,
       mainTopPreviewDroppedByBackpressure: hdrMappingState.mainTopPreviewDroppedByBackpressure,
       mainTopPreviewJitterMsAvg: hdrMappingState.mainTopPreviewJitterMsAvg,
@@ -3202,6 +3211,9 @@ async function loadHdrExperimentalState() {
     hdrMappingState.mainTopPumpJitterMsAvg = 0;
     hdrMappingState.mainTopFrameIntervalMsAvg = 0;
     hdrMappingState.mainTopPreviewEncodeMsAvg = 0;
+    hdrMappingState.mainTopPreviewNativeCaptureMsAvg = 0;
+    hdrMappingState.mainTopPreviewNativeReadMsAvg = 0;
+    hdrMappingState.mainTopPreviewReadRoundtripMsAvg = 0;
     hdrMappingState.mainTopPreviewBytesPerFrameAvg = 0;
     hdrMappingState.mainTopPreviewDroppedByBackpressure = 0;
     hdrMappingState.mainTopPreviewJitterMsAvg = 0;
@@ -3261,6 +3273,9 @@ async function loadHdrExperimentalState() {
   hdrMappingState.mainTopPumpJitterMsAvg = Number(top && top.perf && top.perf.pumpJitterMsAvg ? top.perf.pumpJitterMsAvg : 0);
   hdrMappingState.mainTopFrameIntervalMsAvg = Number(top && top.perf && top.perf.frameIntervalMsAvg ? top.perf.frameIntervalMsAvg : 0);
   hdrMappingState.mainTopPreviewEncodeMsAvg = Number(top && top.perf && top.perf.previewEncodeMsAvg ? top.perf.previewEncodeMsAvg : 0);
+  hdrMappingState.mainTopPreviewNativeCaptureMsAvg = Number(top && top.perf && top.perf.previewNativeCaptureMsAvg ? top.perf.previewNativeCaptureMsAvg : 0);
+  hdrMappingState.mainTopPreviewNativeReadMsAvg = Number(top && top.perf && top.perf.previewNativeReadMsAvg ? top.perf.previewNativeReadMsAvg : 0);
+  hdrMappingState.mainTopPreviewReadRoundtripMsAvg = Number(top && top.perf && top.perf.previewReadRoundtripMsAvg ? top.perf.previewReadRoundtripMsAvg : 0);
   hdrMappingState.mainTopPreviewBytesPerFrameAvg = Number(top && top.perf && top.perf.previewBytesPerFrameAvg ? top.perf.previewBytesPerFrameAvg : 0);
   hdrMappingState.mainTopPreviewDroppedByBackpressure = Number(top && top.perf && top.perf.previewDroppedByBackpressure ? top.perf.previewDroppedByBackpressure : 0);
   hdrMappingState.mainTopPreviewJitterMsAvg = Number(top && top.perf && top.perf.previewJitterMsAvg ? top.perf.previewJitterMsAvg : 0);

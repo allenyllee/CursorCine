@@ -50,6 +50,8 @@ const state = {
     previewBytesPerFrameAvg: 0,
     previewDroppedByBackpressure: 0,
     previewJitterMsAvg: 0,
+    previewNativeReadMsAvg: 0,
+    previewNativeCaptureMsAvg: 0,
     lastPumpAt: 0,
     lastFrameAt: 0,
   },
@@ -62,7 +64,7 @@ const state = {
     codec: "jpeg",
     quality: 78,
     configuredQuality: 78,
-    maxFps: 20,
+    maxFps: 60,
     maxWidth: 1920,
     maxHeight: 1200,
     configuredMaxWidth: 1920,
@@ -168,6 +170,15 @@ function loadBridge(routePreference = "auto") {
 function clearPumpTimer() {
   clearTimeout(state.pumpTimer);
   state.pumpTimer = 0;
+}
+
+function shouldUseNativePreviewOnly() {
+  return Boolean(
+    state.session &&
+    state.preview.enabled &&
+    state.preview.nativeCompressedEnabled &&
+    state.preview.nativeCompressedAvailable
+  );
 }
 
 function ewma(prev, sample, alpha = 0.2) {
@@ -420,6 +431,13 @@ async function pumpFrameLoop() {
   if (!state.session) {
     return;
   }
+  if (shouldUseNativePreviewOnly()) {
+    state.noFrameStreak = 0;
+    state.pumpTimer = setTimeout(() => {
+      pumpFrameLoop().catch(() => {});
+    }, 100);
+    return;
+  }
   const bridge = loadBridge(state.session && state.session.routePreference ? state.session.routePreference : "auto");
   if (!bridge || typeof bridge.readFrame !== "function") {
     emit({ type: "error", error: state.bridgeError || "NATIVE_UNAVAILABLE" });
@@ -516,6 +534,8 @@ async function handleRequest(requestId, command, payload) {
         previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
         previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
         previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+        previewNativeReadMsAvg: Number(state.perf.previewNativeReadMsAvg || 0),
+        previewNativeCaptureMsAvg: Number(state.perf.previewNativeCaptureMsAvg || 0),
       },
       bridgeError: state.bridgeError || "",
     });
@@ -562,7 +582,7 @@ async function handleRequest(requestId, command, payload) {
     state.preview.codec = "jpeg";
     state.preview.quality = 78;
     state.preview.configuredQuality = 78;
-    state.preview.maxFps = 20;
+    state.preview.maxFps = 60;
     state.preview.maxWidth = 1920;
     state.preview.maxHeight = 1200;
     state.preview.configuredMaxWidth = 1920;
@@ -578,6 +598,8 @@ async function handleRequest(requestId, command, payload) {
     state.perf.previewBytesPerFrameAvg = 0;
     state.perf.previewDroppedByBackpressure = 0;
     state.perf.previewJitterMsAvg = 0;
+    state.perf.previewNativeReadMsAvg = 0;
+    state.perf.previewNativeCaptureMsAvg = 0;
     state.lastFrameMeta = {
       width: Number(result.width || 0),
       height: Number(result.height || 0),
@@ -675,7 +697,7 @@ async function handleRequest(requestId, command, payload) {
     state.preview.codec = "jpeg";
     state.preview.quality = Math.max(40, Math.min(95, Number(payload && payload.quality ? payload.quality : 78) || 78));
     state.preview.configuredQuality = state.preview.quality;
-    state.preview.maxFps = Math.max(8, Math.min(60, Number(payload && payload.maxFps ? payload.maxFps : 20) || 20));
+    state.preview.maxFps = Math.max(8, Math.min(60, Number(payload && payload.maxFps ? payload.maxFps : 60) || 60));
     state.preview.maxWidth = Math.max(320, Math.min(2560, Number(payload && payload.maxWidth ? payload.maxWidth : 1920) || 1920));
     state.preview.maxHeight = Math.max(180, Math.min(1440, Number(payload && payload.maxHeight ? payload.maxHeight : 1200) || 1200));
     state.preview.configuredMaxWidth = state.preview.maxWidth;
@@ -711,6 +733,7 @@ async function handleRequest(requestId, command, payload) {
     if (!state.preview.nativeCompressedEnabled || !bridge || typeof bridge.readCompressedFrame !== "function") {
       state.preview.nativeCompressedActive = false;
       state.preview.nativeCompressedFallbackReason = "NATIVE_PREVIEW_UNAVAILABLE";
+      state.preview.nativeCompressedAvailable = false;
       response(requestId, false, {
         reason: "NATIVE_PREVIEW_UNAVAILABLE",
         message: "Native compressed preview read is unavailable.",
@@ -718,6 +741,7 @@ async function handleRequest(requestId, command, payload) {
       return;
     }
     const minIntervalMs = Math.max(1, Math.floor(1000 / Math.max(1, Number(state.preview.maxFps || 20))));
+    const nativeReadStartMs = Number(process.hrtime.bigint()) / 1e6;
     const result = await Promise.resolve(bridge.readCompressedFrame({
       nativeSessionId: Number(state.session && state.session.nativeSessionId ? state.session.nativeSessionId : 0),
       quality: Number(state.preview.quality || 78),
@@ -729,10 +753,16 @@ async function handleRequest(requestId, command, payload) {
       reason: "NATIVE_PREVIEW_READ_FAILED",
       message: error && error.message ? error.message : "readCompressedFrame failed",
     }));
+    const nativeReadEndMs = Number(process.hrtime.bigint()) / 1e6;
+    state.perf.previewNativeReadMsAvg = ewma(
+      state.perf.previewNativeReadMsAvg,
+      Math.max(0, nativeReadEndMs - nativeReadStartMs)
+    );
 
     if (!result || result.ok === false) {
       state.preview.nativeCompressedActive = false;
       state.preview.nativeCompressedFallbackReason = String((result && result.reason) || "NATIVE_PREVIEW_READ_FAILED");
+      state.preview.nativeCompressedAvailable = false;
       response(requestId, false, {
         reason: state.preview.nativeCompressedFallbackReason,
         message: String((result && result.message) || "Native compressed preview read failed."),
@@ -750,6 +780,8 @@ async function handleRequest(requestId, command, payload) {
           previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
           previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
           previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+          previewNativeReadMsAvg: Number(state.perf.previewNativeReadMsAvg || 0),
+          previewNativeCaptureMsAvg: Number(state.perf.previewNativeCaptureMsAvg || 0),
           previewFrameStep: Number(state.preview.frameStep || 1),
           previewNativePathActive: Boolean(state.preview.nativeCompressedActive),
           previewNativeFallbackReason: String(state.preview.nativeCompressedFallbackReason || ""),
@@ -772,6 +804,9 @@ async function handleRequest(requestId, command, payload) {
     if (Number(result.encodeMs || 0) > 0) {
       state.perf.previewEncodeMsAvg = ewma(state.perf.previewEncodeMsAvg, Number(result.encodeMs || 0));
     }
+    if (Number(result.captureMs || 0) > 0) {
+      state.perf.previewNativeCaptureMsAvg = ewma(state.perf.previewNativeCaptureMsAvg, Number(result.captureMs || 0));
+    }
     state.perf.previewBytesPerFrameAvg = ewma(state.perf.previewBytesPerFrameAvg, Number(bytes.length || 0));
 
     response(requestId, true, {
@@ -787,6 +822,8 @@ async function handleRequest(requestId, command, payload) {
         previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
         previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
         previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+        previewNativeReadMsAvg: Number(state.perf.previewNativeReadMsAvg || 0),
+        previewNativeCaptureMsAvg: Number(state.perf.previewNativeCaptureMsAvg || 0),
         previewFrameStep: Number(state.preview.frameStep || 1),
         previewNativePathActive: true,
         previewNativeFallbackReason: "",
@@ -817,6 +854,8 @@ async function handleRequest(requestId, command, payload) {
         previewBytesPerFrameAvg: Number(state.perf.previewBytesPerFrameAvg || 0),
         previewDroppedByBackpressure: Number(state.perf.previewDroppedByBackpressure || 0),
         previewJitterMsAvg: Number(state.perf.previewJitterMsAvg || 0),
+        previewNativeReadMsAvg: Number(state.perf.previewNativeReadMsAvg || 0),
+        previewNativeCaptureMsAvg: Number(state.perf.previewNativeCaptureMsAvg || 0),
         previewFrameStep: Number(state.preview.frameStep || 1),
         previewNativePathActive: false,
         previewNativeFallbackReason: String(state.preview.nativeCompressedFallbackReason || ""),
