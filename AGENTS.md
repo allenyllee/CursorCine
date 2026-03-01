@@ -31,12 +31,19 @@
 ## Post-change Testing Policy
 
 - After implementing changes, always run tests based on the impacted scope before reporting completion.
+- In this repository, avoid plain `npm run ...` when runtime/path resolution is unstable. Use a wrapper that resolves the active nvm Node dynamically (no hardcoded version):
+  - `source ~/.nvm/nvm.sh && mkdir -p /tmp/cursorcine-vitest-tmp && NODE_BIN="$(nvm which current)" && NODE_DIR="$(dirname "$NODE_BIN")" && NPM_CLI="$NODE_DIR/../lib/node_modules/npm/bin/npm-cli.js" && PATH="$NODE_DIR:$PATH" TMPDIR=/tmp/cursorcine-vitest-tmp TEMP=/tmp/cursorcine-vitest-tmp TMP=/tmp/cursorcine-vitest-tmp "$NODE_BIN" "$NPM_CLI" run <script>`
+  - If the dynamic wrapper fails, use the currently active shell `node` + `npm-cli.js` pair explicitly, but do not hardcode a Node version in project rules.
 - Choose the smallest sufficient test set first, then expand when risk is higher:
   - `npm run test:unit` for isolated logic changes.
   - `npm run test:integration` for IPC/preload/controller changes.
   - `npm run test:e2e:windows` and/or `npm run test:e2e:linux` for workflow/UI/runtime changes.
   - `npm run test:coverage` when coverage-related code or test architecture changes.
   - `npm run test:native:coverage:windows:full` for native capture, native coverage, or Windows pipeline changes.
+- For E2E in this Codex environment, if platform/runtime limits block reliable execution (for example, Windows Electron under WSL), explicitly tell the user E2E must be run manually and provide the exact commands:
+  - Windows host: `npm run test:e2e:windows`
+  - WSL/Linux with Linux-native dependencies: `npm run test:e2e:linux`
+  - Clearly state in the report that E2E is pending user-side manual verification when this fallback is used.
 - If any test fails, perform root-cause triage before deciding the fix:
   - Test case issue.
   - Intended spec/behavior change requiring test updates.
