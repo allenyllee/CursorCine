@@ -85,6 +85,12 @@ napi_value MakeUint32(napi_env env, uint32_t value) {
   return out;
 }
 
+napi_value MakeDouble(napi_env env, double value) {
+  napi_value out;
+  assert(napi_create_double(env, value, &out) == napi_ok);
+  return out;
+}
+
 bool GetNamedBool(napi_env env, napi_value obj, const char* key, bool fallback) {
   napi_value value;
   if (!GetNamedProperty(env, obj, key, &value)) {
@@ -704,6 +710,58 @@ void EndStroke() {
   g_state.strokeInProgress = false;
 }
 
+napi_value GetDebugMetrics(napi_env env, napi_callback_info /*info*/) {
+  napi_value out = MakeObject(env);
+  const int width = std::max(1, static_cast<int>(g_state.bounds.right - g_state.bounds.left));
+  const int height = std::max(1, static_cast<int>(g_state.bounds.bottom - g_state.bounds.top));
+  int minX = width;
+  int minY = height;
+  int maxX = -1;
+  int maxY = -1;
+  uint32_t pointCount = 0;
+
+  for (const PenStroke& stroke : g_state.strokes) {
+    const double penScale = kNativePenScale * g_state.visualScale;
+    const int penWidth = std::max(1, static_cast<int>(std::lround(static_cast<double>(stroke.size) * penScale)));
+    const int radius = std::max(1, (penWidth + 1) / 2);
+    for (const PenPoint& point : stroke.points) {
+      pointCount += 1;
+      minX = std::min(minX, point.x - radius);
+      maxX = std::max(maxX, point.x + radius);
+      minY = std::min(minY, point.y - radius);
+      maxY = std::max(maxY, point.y + radius);
+    }
+  }
+
+  bool hasDrawnPixels = maxX >= minX && maxY >= minY;
+  if (hasDrawnPixels) {
+    minX = ClampInt(minX, 0, width - 1);
+    maxX = ClampInt(maxX, 0, width - 1);
+    minY = ClampInt(minY, 0, height - 1);
+    maxY = ClampInt(maxY, 0, height - 1);
+    hasDrawnPixels = maxX >= minX && maxY >= minY;
+  }
+
+  const int drawnWidth = hasDrawnPixels ? (maxX - minX + 1) : 0;
+  const int drawnHeight = hasDrawnPixels ? (maxY - minY + 1) : 0;
+  const double spanRatio = width > 0 ? (static_cast<double>(drawnWidth) / static_cast<double>(width)) : 0.0;
+
+  SetNamed(env, out, "ok", MakeBool(env, true));
+  SetNamed(env, out, "strokeCount", MakeUint32(env, static_cast<uint32_t>(g_state.strokes.size())));
+  SetNamed(env, out, "pointCount", MakeUint32(env, pointCount));
+  SetNamed(env, out, "canvasWidth", MakeInt32(env, width));
+  SetNamed(env, out, "canvasHeight", MakeInt32(env, height));
+  SetNamed(env, out, "hasDrawnPixels", MakeBool(env, hasDrawnPixels));
+  SetNamed(env, out, "drawnWidth", MakeInt32(env, drawnWidth));
+  SetNamed(env, out, "drawnHeight", MakeInt32(env, drawnHeight));
+  SetNamed(env, out, "minX", MakeInt32(env, hasDrawnPixels ? minX : 0));
+  SetNamed(env, out, "maxX", MakeInt32(env, hasDrawnPixels ? maxX : 0));
+  SetNamed(env, out, "minY", MakeInt32(env, hasDrawnPixels ? minY : 0));
+  SetNamed(env, out, "maxY", MakeInt32(env, hasDrawnPixels ? maxY : 0));
+  SetNamed(env, out, "spanRatio", MakeDouble(env, spanRatio));
+  return out;
+}
+
 #endif
 
 napi_value IsSupported(napi_env env, napi_callback_info /*info*/) {
@@ -882,6 +940,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"isSupported", nullptr, IsSupported, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"startOverlay", nullptr, StartOverlay, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"setPointer", nullptr, SetPointer, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"getDebugMetrics", nullptr, GetDebugMetrics, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"setPenStyle", nullptr, SetPenStyle, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"undoStroke", nullptr, UndoStroke, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"clearStrokes", nullptr, ClearStrokes, nullptr, nullptr, nullptr, napi_default, nullptr},

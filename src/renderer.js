@@ -419,15 +419,47 @@ function normalizeOverlayBackend(value) {
   return String(value || '').trim().toLowerCase() === 'native' ? 'native' : 'electron';
 }
 
+function normalizeRuntimePlatform(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function getOverlayPlatformDefaultsRuntime(platform) {
+  if (normalizeRuntimePlatform(platform) === 'win32') {
+    return { backendRequested: 'native', windowBehavior: 'safe' };
+  }
+  return { backendRequested: 'electron', windowBehavior: 'always' };
+}
+
+function enforceOverlayPlatformPolicyRuntime(input = {}) {
+  const platform = normalizeRuntimePlatform(input.platform);
+  const requestedBackend = normalizeOverlayBackend(input.requestedBackend);
+  const effectiveBackend = normalizeOverlayBackend(input.effectiveBackend);
+  const currentWindowBehavior = normalizeOverlayWindowBehavior(input.currentWindowBehavior);
+
+  if (platform !== 'win32') {
+    return {
+      backendRequested: 'electron',
+      windowBehavior: 'always'
+    };
+  }
+  if (requestedBackend === 'native' && effectiveBackend !== 'native') {
+    return {
+      backendRequested: 'electron',
+      windowBehavior: 'safe'
+    };
+  }
+  return {
+    backendRequested: requestedBackend,
+    windowBehavior: currentWindowBehavior
+  };
+}
+
 function isWindowsRuntimePlatform() {
   return String(runtimeTestConfig.platform || '').toLowerCase() === 'win32';
 }
 
 function getOverlayDefaultsForCurrentPlatform() {
-  if (isWindowsRuntimePlatform()) {
-    return { backendRequested: 'native', windowBehavior: 'safe' };
-  }
-  return { backendRequested: 'electron', windowBehavior: 'always' };
+  return getOverlayPlatformDefaultsRuntime(runtimeTestConfig.platform);
 }
 
 let overlayPolicyApplyInFlight = false;
@@ -438,17 +470,14 @@ async function applyOverlayPlatformPolicy() {
   }
   overlayPolicyApplyInFlight = true;
   try {
-    const isWindows = isWindowsRuntimePlatform();
-    let desiredBackend = annotationState.backendRequested;
-    let desiredWindowBehavior = annotationState.windowBehavior;
-
-    if (!isWindows) {
-      desiredBackend = 'electron';
-      desiredWindowBehavior = 'always';
-    } else if (annotationState.backendRequested === 'native' && annotationState.backendEffective !== 'native') {
-      desiredBackend = 'electron';
-      desiredWindowBehavior = 'safe';
-    }
+    const enforced = enforceOverlayPlatformPolicyRuntime({
+      platform: runtimeTestConfig.platform,
+      requestedBackend: annotationState.backendRequested,
+      effectiveBackend: annotationState.backendEffective,
+      currentWindowBehavior: annotationState.windowBehavior
+    });
+    const desiredBackend = normalizeOverlayBackend(enforced.backendRequested);
+    const desiredWindowBehavior = normalizeOverlayWindowBehavior(enforced.windowBehavior);
 
     if (desiredBackend !== annotationState.backendRequested) {
       annotationState.backendRequested = desiredBackend;

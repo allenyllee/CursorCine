@@ -70,6 +70,13 @@ function setPenStyle(payload = {}) {
   return binding.setPenStyle(payload);
 }
 
+function getDebugMetrics(payload = {}) {
+  if (!binding || typeof binding.getDebugMetrics !== 'function') {
+    return notSupportedResult();
+  }
+  return binding.getDebugMetrics(payload);
+}
+
 function undoStroke() {
   if (!binding || typeof binding.undoStroke !== 'function') {
     return notSupportedResult();
@@ -90,6 +97,7 @@ module.exports = {
   startOverlay,
   stopOverlay,
   setPointer,
+  getDebugMetrics,
   setPenStyle,
   undoStroke,
   clearStrokes

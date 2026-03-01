@@ -2537,7 +2537,8 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:get-state', () => {
     const profile = getOverlayInteractionProfile();
     const backendState = getOverlayBackendState();
-    const targetDisplay = getTargetDisplay(overlayTargetDisplayId);
+    const resolvedTargetDisplayId = String(overlayRecordingDisplayId || overlayTargetDisplayId || '');
+    const targetDisplay = getTargetDisplay(resolvedTargetDisplayId);
     const targetBounds = getDisplayBounds(targetDisplay);
     return {
       ok: true,
@@ -2557,7 +2558,7 @@ app.whenReady().then(() => {
       nativeOverlayActive: overlayNativeActive,
       nativeOverlayError: overlayNativeLastError,
       overlayBounds: overlayBounds ? { ...overlayBounds } : null,
-      targetDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : '',
+      targetDisplayId: targetDisplay && targetDisplay.id ? String(targetDisplay.id) : resolvedTargetDisplayId,
       targetDisplayBounds: targetBounds,
       overlayWindowBounds: overlayWindow && !overlayWindow.isDestroyed() ? overlayWindow.getBounds() : null,
       overlayBorderWindowBounds: null
@@ -2627,6 +2628,135 @@ app.whenReady().then(() => {
   ipcMain.handle('overlay:test-draw-horizontal', async (_event, payload) => {
     if (!CURSORCINE_TEST_MODE) {
       return { ok: false, reason: 'TEST_MODE_ONLY' };
+    }
+    if (isNativeOverlayEffective()) {
+      const startRatio = Number(payload && payload.startRatio);
+      const endRatio = Number(payload && payload.endRatio);
+      const yRatio = Number(payload && payload.yRatio);
+      const steps = Number(payload && payload.steps);
+      const drawSteps = Number.isFinite(steps) ? Math.max(4, Math.min(400, Math.round(steps))) : 40;
+      const logicalCanvasWidth = Math.max(1, Math.round(Number(overlayBounds && overlayBounds.width) || Number(overlayNativeBounds && overlayNativeBounds.width) || 1));
+      const logicalCanvasHeight = Math.max(1, Math.round(Number(overlayBounds && overlayBounds.height) || Number(overlayNativeBounds && overlayNativeBounds.height) || 1));
+      const nativeCanvasWidth = Math.max(1, Math.round(Number(overlayNativeBounds && overlayNativeBounds.width) || logicalCanvasWidth));
+      const nativeCanvasHeight = Math.max(1, Math.round(Number(overlayNativeBounds && overlayNativeBounds.height) || logicalCanvasHeight));
+      const safeStart = Number.isFinite(startRatio) ? startRatio : 0.02;
+      const safeEnd = Number.isFinite(endRatio) ? endRatio : 0.98;
+      const safeY = Number.isFinite(yRatio) ? yRatio : 0.5;
+      const ratioToLogicalX = (ratio) => Math.max(0, Math.min(logicalCanvasWidth - 1, Math.round((logicalCanvasWidth - 1) * ratio)));
+      const ratioToLogicalY = (ratio) => Math.max(0, Math.min(logicalCanvasHeight - 1, Math.round((logicalCanvasHeight - 1) * ratio)));
+      const logicalStartX = ratioToLogicalX(safeStart);
+      const logicalEndX = ratioToLogicalX(safeEnd);
+      const logicalY = ratioToLogicalY(safeY);
+      const logicalToNativePoint = (logicalX, logicalY) => {
+        let mapped = false;
+        let nativeX = Math.max(0, Math.min(nativeCanvasWidth - 1, Math.round((logicalX / Math.max(1, logicalCanvasWidth - 1)) * Math.max(1, nativeCanvasWidth - 1))));
+        let nativeY = Math.max(0, Math.min(nativeCanvasHeight - 1, Math.round((logicalY / Math.max(1, logicalCanvasHeight - 1)) * Math.max(1, nativeCanvasHeight - 1))));
+        if (overlayNativeBounds && overlayBounds) {
+          try {
+            if (screen && typeof screen.dipToScreenPoint === 'function') {
+              const px = screen.dipToScreenPoint({
+                x: Number(overlayBounds.x || 0) + logicalX,
+                y: Number(overlayBounds.y || 0) + logicalY
+              });
+              if (px && Number.isFinite(px.x) && Number.isFinite(px.y)) {
+                nativeX = Math.round(px.x - overlayNativeBounds.x);
+                nativeY = Math.round(px.y - overlayNativeBounds.y);
+                mapped = true;
+              }
+            }
+          } catch (_error) {
+          }
+        }
+        return {
+          mapped,
+          x: Math.max(0, Math.min(nativeCanvasWidth - 1, nativeX)),
+          y: Math.max(0, Math.min(nativeCanvasHeight - 1, nativeY))
+        };
+      };
+      const startPoint = logicalToNativePoint(logicalStartX, logicalY);
+      const endPoint = logicalToNativePoint(logicalEndX, logicalY);
+      const startX = startPoint.x;
+      const endX = endPoint.x;
+      const targetY = startPoint.y;
+      const mappingMode = startPoint.mapped && endPoint.mapped ? 'dipToScreenPoint' : 'ratio-fallback';
+      const beforeMetrics = invokeNativeOverlay('getDebugMetrics', {});
+      if (!beforeMetrics || beforeMetrics.ok === false) {
+        return {
+          ok: false,
+          reason: 'NATIVE_METRICS_BEFORE_FAILED',
+          message: beforeMetrics && (beforeMetrics.message || beforeMetrics.reason)
+            ? String(beforeMetrics.message || beforeMetrics.reason)
+            : 'getDebugMetrics before draw failed'
+        };
+      }
+      for (let i = 0; i <= drawSteps; i += 1) {
+        const t = drawSteps > 0 ? (i / drawSteps) : 0;
+        const x = Math.round(startX + ((endX - startX) * t));
+        const pointerResult = invokeNativeOverlay('setPointer', {
+          x,
+          y: targetY,
+          inside: true,
+          down: true,
+          drawActive: true
+        });
+        if (!pointerResult || pointerResult.ok === false) {
+          return {
+            ok: false,
+            reason: 'NATIVE_SET_POINTER_FAILED',
+            message: pointerResult && (pointerResult.message || pointerResult.reason)
+              ? String(pointerResult.message || pointerResult.reason)
+              : 'setPointer draw step failed'
+          };
+        }
+      }
+      invokeNativeOverlay('setPointer', {
+        x: endX,
+        y: targetY,
+        inside: true,
+        down: false,
+        drawActive: true
+      });
+      const afterMetrics = invokeNativeOverlay('getDebugMetrics', {});
+      if (!afterMetrics || afterMetrics.ok === false) {
+        return {
+          ok: false,
+          reason: 'NATIVE_METRICS_AFTER_FAILED',
+          message: afterMetrics && (afterMetrics.message || afterMetrics.reason)
+            ? String(afterMetrics.message || afterMetrics.reason)
+            : 'getDebugMetrics after draw failed'
+        };
+      }
+      return {
+        ok: true,
+        draw: {
+          ok: true,
+          backend: 'native',
+          logicalStartX,
+          logicalEndX,
+          logicalY,
+          logicalCanvasWidth,
+          logicalCanvasHeight,
+          nativeCanvasWidth,
+          nativeCanvasHeight,
+          mappingMode,
+          startX,
+          endX,
+          y: targetY,
+          steps: drawSteps
+        },
+        before: {
+          alphaCount: Number(beforeMetrics.pointCount || 0),
+          drawnWidth: Number(beforeMetrics.drawnWidth || 0),
+          canvasWidth: Number(beforeMetrics.canvasWidth || nativeCanvasWidth),
+          spanRatio: Number(beforeMetrics.spanRatio || 0)
+        },
+        after: {
+          alphaCount: Number(afterMetrics.pointCount || 0),
+          drawnWidth: Number(afterMetrics.drawnWidth || 0),
+          canvasWidth: Number(afterMetrics.canvasWidth || nativeCanvasWidth),
+          spanRatio: Number(afterMetrics.spanRatio || 0)
+        }
+      };
     }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       return { ok: false, reason: 'NO_OVERLAY' };

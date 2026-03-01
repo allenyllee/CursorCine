@@ -4,6 +4,7 @@ describe('ipc handlers', () => {
   it('returns mock desktop source in test capture mode', async () => {
     const handlers = createIpcHandlers({
       desktopCapturer: { getSources: vi.fn() },
+      platform: 'win32',
       testMode: true,
       testCaptureMode: 'mock',
       testExportMode: 'mock'
@@ -12,6 +13,7 @@ describe('ipc handlers', () => {
     const cfg = await handlers['app:test-config']();
     const sources = await handlers['desktop-sources:get']();
 
+    expect(cfg.platform).toBe('win32');
     expect(cfg.testMode).toBe(true);
     expect(sources).toHaveLength(1);
     expect(sources[0].id).toBe('screen:test:0');
