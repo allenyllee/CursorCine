@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -23,12 +24,12 @@ constexpr uint64_t kStrokeFadeTailMs = 760;
 constexpr uint64_t kRecordBorderBlinkMs = 2200;
 constexpr UINT_PTR kOverlayTimerId = 1;
 constexpr UINT kOverlayTimerIntervalMs = 16;
-constexpr double kNativeBorderScale = 1.45;
-constexpr double kNativePenScale = 1.4;
-constexpr int kGlowOuterMin = 11;
-constexpr int kGlowOuterExtra = 14;
+constexpr double kNativeBorderScale = 1.08;
+constexpr double kNativePenScale = 1.0;
+constexpr int kGlowOuterMin = 12;
+constexpr int kGlowOuterExtra = 13;
 constexpr int kGlowCoreMin = 4;
-constexpr double kGlowCoreScale = 0.82;
+constexpr double kGlowCoreScale = 0.74;
 
 napi_value MakeObject(napi_env env) {
   napi_value out;
@@ -155,6 +156,7 @@ struct OverlayState {
   RECT bounds{0, 0, 0, 0};
   int borderPx = kDefaultBorderPx;
   bool recording = true;
+  double visualScale = 1.0;
   COLORREF penColor = kDefaultPenColor;
   int penSize = kDefaultPenSize;
   int pointerX = 0;
@@ -364,6 +366,13 @@ bool EnsureRenderTarget(int width, int height) {
   return true;
 }
 
+double ClampVisualScale(double value) {
+  if (!std::isfinite(value)) {
+    return 1.0;
+  }
+  return std::max(0.55, std::min(2.0, value));
+}
+
 void RenderOverlayFrame() {
   if (!g_state.hwnd) {
     return;
@@ -380,7 +389,8 @@ void RenderOverlayFrame() {
     const double phase = (static_cast<double>(nowMs % kRecordBorderBlinkMs) / static_cast<double>(kRecordBorderBlinkMs)) * (std::acos(-1.0) * 2.0);
     const double alpha = 0.35 + ((std::sin(phase) + 1.0) / 2.0) * 0.45;
     const uint8_t borderAlpha = ClampU8(static_cast<int>(std::lround(alpha * 255.0)));
-    const int borderPx = std::max(1, static_cast<int>(std::lround(static_cast<double>(g_state.borderPx) * kNativeBorderScale)));
+    const double borderScale = kNativeBorderScale * g_state.visualScale;
+    const int borderPx = std::max(1, static_cast<int>(std::lround(static_cast<double>(g_state.borderPx) * borderScale)));
     DrawRectStroke(0, 0, width, height, borderPx, 255, 42, 42, borderAlpha);
   }
   std::vector<PenStroke> remaining;
@@ -419,7 +429,8 @@ void RenderOverlayFrame() {
     if (alpha == 0) {
       continue;
     }
-    const int penWidth = std::max(1, static_cast<int>(std::lround(static_cast<double>(stroke.size) * kNativePenScale)));
+    const double penScale = kNativePenScale * g_state.visualScale;
+    const int penWidth = std::max(1, static_cast<int>(std::lround(static_cast<double>(stroke.size) * penScale)));
     const int radius = std::max(1, (penWidth + 1) / 2);
     const uint8_t r = GetRValue(stroke.color);
     const uint8_t g = GetGValue(stroke.color);
@@ -438,7 +449,8 @@ void RenderOverlayFrame() {
   g_state.strokes.swap(remaining);
 
   if (g_state.drawActive && g_state.pointerInside) {
-    const int scaledPen = std::max(1, static_cast<int>(std::lround(static_cast<double>(g_state.penSize) * kNativePenScale)));
+    const double penScale = kNativePenScale * g_state.visualScale;
+    const int scaledPen = std::max(1, static_cast<int>(std::lround(static_cast<double>(g_state.penSize) * penScale)));
     const int outerRadius = std::max(kGlowOuterMin, scaledPen + kGlowOuterExtra);
     const int coreRadius = std::max(kGlowCoreMin, static_cast<int>(std::lround(static_cast<double>(scaledPen) * kGlowCoreScale)));
     DrawCursorGlow(g_state.pointerX, g_state.pointerY, outerRadius, coreRadius);
@@ -711,6 +723,18 @@ napi_value StartOverlay(napi_env env, napi_callback_info info) {
   if (payload) {
     borderPx = std::max<int32_t>(1, GetNamedInt32(env, payload, "borderPx", kDefaultBorderPx));
     g_state.recording = GetNamedBool(env, payload, "recording", true);
+    const std::string visualScaleText = GetNamedString(env, payload, "visualScale", "");
+    if (!visualScaleText.empty()) {
+      g_state.visualScale = ClampVisualScale(std::strtod(visualScaleText.c_str(), nullptr));
+    } else {
+      napi_value visualScaleValue = nullptr;
+      if (GetNamedProperty(env, payload, "visualScale", &visualScaleValue)) {
+        double parsed = 1.0;
+        if (napi_get_value_double(env, visualScaleValue, &parsed) == napi_ok) {
+          g_state.visualScale = ClampVisualScale(parsed);
+        }
+      }
+    }
   }
   const bool ok = EnsureOverlayWindow(rc, borderPx);
   SetNamed(env, out, "ok", MakeBool(env, ok));
@@ -731,6 +755,7 @@ napi_value StartOverlay(napi_env env, napi_callback_info info) {
   );
   SetNamed(env, out, "borderPx", MakeInt32(env, borderPx));
   SetNamed(env, out, "recording", MakeBool(env, g_state.recording));
+  SetNamed(env, out, "visualScaleX1000", MakeInt32(env, static_cast<int32_t>(std::lround(g_state.visualScale * 1000.0))));
   return out;
 #else
   (void)info;
